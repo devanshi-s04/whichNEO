@@ -8,13 +8,17 @@
 <body>
 
 <header>
-  <h1>{{ row.desig }} <span class="sub">L01 Ti&#269;an</span></h1>
-  <div class="status"><a href="{{ url_for('index') }}">&larr; back to queue</a></div>
+  <div><h1>{{ row.desig }} <span class="sub">L01 Ti&#269;an</span></h1></div>
+  <div class="upd"><a href="{{ url_for('index') }}">&larr; back to sequence</a></div>
 </header>
 
 <div class="detail">
   <table class="kv">
-    <tr><th>Digest2 score</th><td>{{ row.digest2 }}</td></tr>
+    <tr><th>Status</th><td>
+      {% if row.observable %}<span class="tag go">GO</span>
+      {% else %}{% for f in row.discard_reasons %}<span class="tag no">{{ f }}</span>{% endfor %}{% endif %}
+    </td></tr>
+    <tr><th>digest2 score</th><td>{{ row.score }}</td></tr>
     <tr><th>V magnitude</th><td>{{ '%.1f'|format(row.vmag) }}</td></tr>
     <tr><th>H magnitude</th><td>{{ '%.1f'|format(row.hmag) }}</td></tr>
     <tr><th>Observations</th><td>{{ row.nobs }}</td></tr>
@@ -25,44 +29,53 @@
   </table>
 
   <table class="kv">
-    <tr><th>RA / Dec (J2000)</th><td>{{ '%.4f'|format(row.ra_deg) }} / {{ '%.4f'|format(row.dec_deg) }}</td></tr>
-    <tr><th>Altitude</th><td>{{ '%.2f'|format(row.alt_deg) }}&deg;</td></tr>
-    <tr><th>Azimuth</th><td>{{ '%.2f'|format(row.az_deg) }}&deg;</td></tr>
-    <tr><th>Airmass</th><td>{{ '%.3f'|format(row.airmass) if row.airmass else '—' }}</td></tr>
-    <tr><th>Hour angle</th><td>{{ '%.2f'|format(row.hour_angle_deg) }}&deg;
-        ({{ 'rising, pre-meridian' if row.pre_meridian else 'past meridian' }})</td></tr>
-    <tr><th>Transit</th><td>{{ row.transit_utc }} (in {{ '%.0f'|format(row.minutes_to_transit) }} min)</td></tr>
-    <tr><th>Moon separation</th><td>{{ '%.1f'|format(row.moon_sep_deg) }}&deg;</td></tr>
-    <tr><th>Moon</th><td>{{ '%.0f'|format(row.moon_illum * 100) }}% illuminated, alt {{ '%.1f'|format(row.moon_alt_deg) }}&deg;</td></tr>
-    <tr><th>Sun altitude</th><td>{{ '%.1f'|format(row.sun_alt_deg) }}&deg;</td></tr>
-    <tr><th>Solar elongation</th><td>{{ '%.1f'|format(row.sun_elong_deg) }}&deg;</td></tr>
-    <tr><th>Status</th><td>
-      {% if row.observable %}<span class="tag go">GO</span>
-      {% else %}{% for f in row.flags %}<span class="tag no">{{ f }}</span>{% endfor %}{% endif %}
-    </td></tr>
+    <tr><th>Perihelion q</th><td>{{ '%.4f'|format(row.q) ~ ' AU' if row.q is not none else 'unknown' }}</td></tr>
+    <tr><th>Eccentricity e</th><td>{{ '%.4f'|format(row.e) if row.e is not none else 'unknown' }}</td></tr>
+    <tr><th>Inclination</th><td>{{ '%.1f'|format(row.incl) ~ '&deg;'|safe if row.incl is not none else 'unknown' }}</td></tr>
+    <tr><th>NEO-like</th><td>
+      {% if row.q is none %}<span class="dim">no orbit data</span>
+      {% elif row.q < config.NEO_Q_MAX or row.e > config.NEO_E_MIN %}yes
+      {% else %}no{% endif %}</td></tr>
+    <tr><th>Scatteredness</th><td>
+      {% if row.scatteredness %}{{ row.scatteredness[0] }}&Prime; &times; {{ row.scatteredness[1] }}&Prime;
+        {% if row.scattered_warn %}<span class="tag no">wide</span>{% endif %}
+      {% else %}<span class="dim">unknown</span>{% endif %}</td></tr>
+    <tr><th>Observed from L01</th><td>
+      {% if row.observed_from_site is none %}<span class="dim">unknown</span>
+      {% elif row.observed_from_site %}yes{% else %}no{% endif %}</td></tr>
+  </table>
+
+  <table class="kv">
+    <tr><th>Best observable altitude</th><td>
+      {% if row.max_alt_utc %}{{ '%.1f'|format(row.max_alt) }}&deg; at {{ row.max_alt_utc }} UT
+      {% else %}<span class="dim">no window tonight</span>{% endif %}</td></tr>
+    <tr><th>Exposure</th><td>{{ '%.1f'|format(row.exposure_min) ~ ' min' if row.exposure_min else '—' }}</td></tr>
+    <tr><th>Window remaining</th><td>{{ '%.0f'|format(row.window_minutes) }} min</td></tr>
+    <tr><th>Current alt / az</th><td>
+      {% if row.cur_alt is not none %}{{ '%.1f'|format(row.cur_alt) }}&deg; / {{ '%.1f'|format(row.cur_az) }}&deg;
+      {% else %}&mdash;{% endif %}</td></tr>
+    <tr><th>Sky motion</th><td>{{ '%.2f'|format(row.cur_motion) ~ '&Prime;/min'|safe if row.cur_motion is not none else '—' }}</td></tr>
+    <tr><th>Moon separation</th><td>{{ '%.0f'|format(row.cur_moon_dist) ~ '&deg;'|safe if row.cur_moon_dist is not none else '—' }}</td></tr>
+    <tr><th>Sun altitude</th><td>{{ '%.0f'|format(row.cur_sun_alt) ~ '&deg;'|safe if row.cur_sun_alt is not none else '—' }}</td></tr>
+    <tr><th>Ephemeris rows</th><td>{{ row.eph_rows_usable }} usable of {{ row.eph_rows_total }}
+      {% if row.eph_report %}<span class="dim">({% for k,v in row.eph_report.items() %}{{ k }}&times;{{ v }}{{ ', ' if not loop.last }}{% endfor %})</span>{% endif %}</td></tr>
+    {% if row.eph_error %}<tr><th>Ephemeris error</th><td class="err">{{ row.eph_error }}</td></tr>{% endif %}
+    {% if row.crosscheck %}
+    <tr><th>astropy cross-check</th><td>
+      {% if row.crosscheck.ok %}<span class="tag go">agrees</span>{% else %}<span class="tag no">differs</span>{% endif %}
+      <span class="dim">&Delta;alt {{ row.crosscheck.d_alt }}&deg;,
+        &Delta;az {{ row.crosscheck.d_az }}&deg;, &Delta;moon {{ row.crosscheck.d_moon }}&deg;</span>
+    </td></tr>{% endif %}
   </table>
 </div>
 
-<h2>Observing block</h2>
-<pre class="block">{{ row.block }}</pre>
-<p class="note">
-  Exposure plan {{ config.EXPOSURE_COUNT }} &times; {{ config.EXPOSURE_SECONDS }} s is a
-  <strong>placeholder</strong>. Sky motion and position angle are absent because they
-  come only from the per-object ephemeris below.
-</p>
+{% if row.map_url %}
+<p class="note"><a href="{{ row.map_url }}" rel="noopener">uncertainty map at MPC</a></p>
+{% endif %}
 
-<h2>MPC ephemeris</h2>
-{% if eph_text %}
-  <pre class="block">{{ eph_text[:8000] }}</pre>
-{% elif eph_error %}
-  <p class="err">Fetch failed: {{ eph_error }}</p>
-  <p><a href="{{ eph_url }}" rel="noopener">open at MPC directly</a></p>
-{% else %}
-  <p>
-    Not fetched. This is the only outbound request the site makes, kept off the
-    five-minute loop on purpose.
-    <a class="btn" href="{{ url_for('target_detail', desig=row.desig, ephemeris=1) }}">Fetch ephemeris from MPC</a>
-  </p>
+{% if row.plan_block %}
+<h2>Plan entry</h2>
+<pre class="block">{{ row.plan_block }}</pre>
 {% endif %}
 
 </body>

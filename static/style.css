@@ -109,3 +109,17 @@ table.kv td { padding: 3px 0; }
 .note, footer p { color: var(--dim); margin: 8px 16px; max-width: 100ch; }
 footer { border-top: 1px solid var(--line); margin-top: 16px; padding: 8px 0; }
 .empty { text-align: center; color: var(--dim); padding: 30px; }
+
+/* --- sequence view ------------------------------------------------------ */
+td.seq { color: var(--faint); font-size: 11px; }
+td.peak { text-align: right; white-space: nowrap; }
+td.peak strong { color: var(--accent); font-weight: 600; }
+td.peak .dim { margin-left: 5px; font-size: 11px; }
+td.exp { color: var(--ink); }
+.tag.xc { color: var(--warn); border-color: var(--warn); }
+.filters .sep { color: var(--line2); }
+.upd span { margin-left: 12px; }
+.upd strong { display: inline-block; margin-left: 6px; }
+.maskgrid { display: flex; flex-wrap: wrap; gap: 26px; align-items: flex-start; }
+.maskgrid .note { margin: 0; max-width: 62ch; }
+header { align-items: flex-start; }

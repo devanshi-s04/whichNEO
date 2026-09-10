@@ -9,3 +9,6 @@ venv/
 .env
 
 .DS_Store
+
+# Generated nightly plan files
+plans/

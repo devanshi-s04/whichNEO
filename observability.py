@@ -77,6 +77,29 @@ def moon_illumination(t, loc):
     return float((1 + np.cos(phase)) / 2.0)
 
 
+def altaz_batch(ra_degs, dec_degs, unix_ts):
+    """Alt/az and lunar separation for many positions at one instant.
+
+    Used to verify MPC's ephemeris independently. Vectorised deliberately:
+    called once per update rather than once per target.
+    """
+    if not len(ra_degs):
+        return []
+    loc = site()
+    t = Time(float(unix_ts), format="unix")
+    frame = AltAz(obstime=t, location=loc)
+    coords = SkyCoord(ra=np.asarray(ra_degs) * u.deg,
+                      dec=np.asarray(dec_degs) * u.deg)
+    aa = coords.transform_to(frame)
+    moon = get_body("moon", t, loc)
+    sep = coords.transform_to(moon.frame).separation(moon).deg
+    alt = np.atleast_1d(aa.alt.deg)
+    az = np.atleast_1d(aa.az.deg)
+    sep = np.atleast_1d(sep)
+    return [{"alt": float(alt[i]), "az": float(az[i]), "moon_sep": float(sep[i])}
+            for i in range(len(alt))]
+
+
 def compute(rows, when=None, scan_hours=24, scan_step_min=2):
     """Annotate each NEOCP row with observability for L01.
 

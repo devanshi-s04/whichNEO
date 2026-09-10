@@ -9,75 +9,85 @@
 <body>
 
 <header>
-  <h1>WhichNEO <span class="sub">NEOCP follow-up &middot; L01 Ti&#269;an / Vi&#353;njan</span></h1>
-  <div class="status">
-    <span class="dot {{ 'ok' if status.ok else 'bad' }}"></span>
-    Last NEOCP update: <strong id="last-update">{{ status.last_update_utc }} UTC</strong>
-    &middot; <span id="count">{{ status.count }}</span> targets
-    {% if status.timings %}
-      &middot; cycle {{ status.timings.get('total', '?') }} ms
-    {% endif %}
-    {% if not status.ok and status.error %}
-      <span class="err">&middot; {{ status.error }}</span>
-    {% endif %}
+  <div>
+    <h1>Which<b>NEO</b> <span class="sub">L01 Ti&#269;an / Vi&#353;njan &middot; night {{ status.night }}</span></h1>
+    <div class="site">45.2909&deg;N 13.74930&deg;E 381 m &middot; 1.0-m f/2.9
+      &middot; night runs {{ config.NIGHT_ROLLOVER_HOUR_UT }}:00&ndash;{{ config.NIGHT_ROLLOVER_HOUR_UT }}:00 UT</div>
+  </div>
+  <div class="upd">
+    <span class="dot {{ 'ok' if status.ok else 'bad' }}"></span> LAST NEOCP UPDATE
+    <strong id="last-update">{{ status.last_update_utc }} UTC</strong>
+    <span id="counts">{{ status.observable }} observable of {{ status.count }}</span>
+    {% if status.timings %}<span>cycle {{ '%.1f'|format((status.timings.get('total',0))/1000) }} s</span>{% endif %}
+    {% if status.mismatches and status.mismatches != '0' %}
+      <span class="err">{{ status.mismatches }} cross-check mismatch(es)</span>{% endif %}
+    {% if not status.ok and status.error %}<span class="err">{{ status.error }}</span>{% endif %}
   </div>
 </header>
 
 <nav class="filters">
-  <a href="{{ url_for('index') }}" class="{{ '' if show_observed or show_hidden else 'active' }}">Active queue</a>
-  <a href="{{ url_for('index', observed=1) }}" class="{{ 'active' if show_observed else '' }}">Include observed</a>
-  <a href="{{ url_for('index', hidden=1) }}" class="{{ 'active' if show_hidden else '' }}">Include hidden</a>
+  <a href="{{ url_for('index', sort='chronological') }}" class="{{ 'active' if mode != 'score' else '' }}">Tonight&rsquo;s sequence</a>
+  <a href="{{ url_for('index', sort='score') }}" class="{{ 'active' if mode == 'score' else '' }}">By score</a>
+  <span class="sep">|</span>
+  <a href="{{ url_for('index', sort=mode, observed=1) }}" class="{{ 'active' if show_observed else '' }}">include observed</a>
+  <a href="{{ url_for('index', sort=mode, hidden=1) }}" class="{{ 'active' if show_hidden else '' }}">include hidden</a>
+  <a href="{{ url_for('plan_text') }}">plan file</a>
   <span class="legend">
-    Limits: mag &le; {{ config.MAX_MAG }} &middot; sun &lt; {{ config.SUN_ALT_MAX }}&deg;
-    &middot; moon sep &ge; {{ config.MOON_SEP_MIN }}&deg; &middot; horizon mask active
-    <a href="#" onclick="document.getElementById('mask').open=true;return false;">(mask)</a>
+    score &ge; {{ config.MIN_SCORE }} &middot; V &le; {{ config.MAX_MAG }} &middot;
+    arc &ge; {{ config.MIN_ARC_DAYS }} &middot; unseen &le; {{ config.MAX_NOT_SEEN_DAYS }} d &middot;
+    motion &ge; {{ config.MIN_MOTION }}&Prime;/min &middot; moon &ge; {{ config.MOON_SEP_MIN }}&deg; &middot;
+    sun &lt; {{ config.SUN_ALT_MAX }}&deg;
+    {% if config.NEO_ONLY %}&middot; q &lt; {{ config.NEO_Q_MAX }} or e &gt; {{ config.NEO_E_MIN }}{% endif %}
   </span>
 </nav>
 
-<details id="mask" class="mask">
-  <summary>Dome / horizon mask &mdash; <strong>TBD, needs confirmation from Luka</strong></summary>
-  <table class="masktable">
-    <tr><th>Sector</th><th>Azimuth</th><th>Min altitude</th></tr>
-    {% for start, end, minalt in config.HORIZON_MASK %}
-    <tr>
-      <td>{{ ['N','NE','E','SE','S','SW','W','NW'][loop.index0] }}</td>
-      <td>{{ start }}&ndash;{{ end }}&deg;</td>
-      <td>{{ 'BLOCKED' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-  <p class="note">
-    Unresolved conflicts in the source notes: NW given as both 50&deg; and 40&deg;
-    (using 40&deg;); W given as both &ldquo;30&ndash;40&rdquo; and 40&deg; (using 40&deg;);
-    SW never specified (interpolated to 30&deg;). Upper elevation limit mentioned
-    but no value given &mdash; <code>MAX_ALTITUDE</code> is currently
-    {{ config.MAX_ALTITUDE or 'unset' }}. Exposure default
-    {{ config.EXPOSURE_COUNT }} &times; {{ config.EXPOSURE_SECONDS }} s is a placeholder.
-  </p>
+<details class="mask">
+  <summary>Dome mask &amp; exposure rule &mdash; <strong>values still to confirm with Luka</strong></summary>
+  <div class="maskgrid">
+    <table class="masktable">
+      <tr><th>Sector</th><th>Azimuth</th><th>Min alt</th></tr>
+      {% for start, end, minalt in config.HORIZON_MASK %}
+      <tr><td>{{ ['N','NE','E','SE','S','SW','W','NW'][loop.index0] }}</td>
+          <td>{{ start }}&ndash;{{ end }}&deg;</td>
+          <td>{{ 'BLOCKED' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td></tr>
+      {% endfor %}
+    </table>
+    <p class="note">
+      Azimuths here are compass bearings from north. MPC's ephemeris reports
+      azimuth from <em>south</em>; it is converted on parse, verified against
+      an independent astropy calculation each cycle.<br><br>
+      Exposure is the observatory's own rule recovered from the legacy planner:
+      <code>{{ config.EXPOSURE_BASE_MIN }} + (V &minus; {{ config.EXPOSURE_REF_MAG }}) &times; {{ config.EXPOSURE_MIN_PER_MAG }}</code> minutes.<br><br>
+      Unresolved in the source notes: NW given as both 50&deg; and 40&deg; (using 40&deg;);
+      W as both &ldquo;30&ndash;40&rdquo; and 40&deg; (using 40&deg;); SW never specified
+      (interpolated to 30&deg;); upper elevation limit mentioned but no value given.
+    </p>
+  </div>
 </details>
 
-<table class="targets">
-  <thead>
-    <tr>
-      <th>#</th><th>Target</th><th>D2</th><th>V</th><th>Arc</th><th>Unseen</th><th>N</th>
-      <th>Alt</th><th>Az</th><th>AM</th><th>Transit</th><th>Moon</th><th>Window</th>
-      <th>Score</th><th>Status</th><th>Actions</th>
-    </tr>
-  </thead>
-  <tbody id="rows">
-    {% include "_rows.html" %}
-  </tbody>
-</table>
+<div class="tablewrap">
+  <table class="targets">
+    <thead><tr>
+      <th></th><th class="l">#</th><th>Peak</th><th class="l">Target</th>
+      <th>Score</th><th>V</th><th>Exp</th><th>&Prime;/min</th>
+      <th>Alt</th><th>Az</th><th>Moon</th>
+      <th>Arc</th><th>Unseen</th><th>q</th><th>e</th><th>Scatter</th>
+      <th>Value</th><th class="l">Status</th><th></th>
+    </tr></thead>
+    <tbody id="rows">{% include "_rows.html" %}</tbody>
+  </table>
+</div>
 
 <footer>
-  <p>
-    Scoring is intrinsic only (digest2 {{ config.RANK_WEIGHTS.digest2 }} &middot;
-    arc {{ config.RANK_WEIGHTS.arc }} &middot; magnitude {{ config.RANK_WEIGHTS.magnitude }}),
-    deliberately excluding altitude so the ordering is stable through the day.
-    Unobservable targets sink below observable ones.
-    Positions are NEOCP-listed, not live ephemerides &mdash; treat targets with a
-    large <em>Unseen</em> value as approximate and open the target for a real ephemeris.
-  </p>
+  <p>Ordered by the time each target reaches its best <em>observable</em> altitude,
+  so working down the list keeps every target near its peak &mdash; the same
+  sequencing the observatory's own planner uses. <em>Value</em> is our separate
+  intrinsic score (digest2, arc, magnitude); it deliberately excludes altitude
+  so it stays meaningful during the day, and it does not drive this ordering.</p>
+  <p>Positions come from MPC ephemerides generated for L01, recomputed
+  independently with astropy each cycle; disagreements are flagged rather than
+  hidden. The live pointing line is interpolated
+  {{ config.INTERPOLATE_AHEAD_S // 60 }} minutes ahead to allow for slewing.</p>
 </footer>
 
 <script>
@@ -91,8 +101,9 @@ async function refresh() {
     ]);
     document.getElementById('rows').innerHTML = rows;
     document.getElementById('last-update').textContent = st.last_update_utc + ' UTC';
-    document.getElementById('count').textContent = st.count;
-  } catch (e) { /* keep showing the last good render */ }
+    document.getElementById('counts').textContent =
+      st.observable + ' observable of ' + st.count;
+  } catch (e) { /* keep the last good render */ }
 }
 setInterval(refresh, POLL);
 

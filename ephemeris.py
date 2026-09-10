@@ -1,0 +1,285 @@
+"""Per-object ephemerides from the MPC confirmation-page CGI.
+
+MPC generates these for our site directly (obscode=L01), which is where sky
+motion, moon distance and solar altitude come from -- none of which appear in
+the NEOCP list feed. One request returns a whole night for one object.
+
+The legacy planner fetches an object's ephemeris once, the first time it is
+seen, and never again. That is why a target rejected early in the evening for
+being too low stays rejected after it has risen. Here the fetch is cached
+against a signature of the object's NEOCP row, so it repeats only when new
+observations actually change the solution.
+"""
+
+import calendar
+import datetime as dt
+import re
+from concurrent.futures import ThreadPoolExecutor
+
+import requests
+from bs4 import BeautifulSoup
+
+import config
+
+_UA = {"User-Agent": "visnjan_whichneo/0.2 "
+                     "(Visnjan Observatory L01 follow-up planning)"}
+
+# Row layout, whitespace separated:
+#   0    1  2   3      4  5   6    7   8  9   10     11     12     13    14   15   16    17    18   19
+#   2026 09 10 2000   02 30 34.7 +36 47 19  118.3   16.4  391.9  047.2  240  +23  -26  0.00   115  -28
+#   <-----date----->  <--R.A.--> <-Decl.->  Elong.     V  "/min   P.A.  Azi  Alt  Sun Phase  Dist  Alt
+_I_ELONG, _I_V, _I_MOTION, _I_PA = 10, 11, 12, 13
+_I_AZ, _I_ALT, _I_SUNALT, _I_PHASE, _I_MOONDIST, _I_MOONALT = 14, 15, 16, 17, 18, 19
+_MIN_FIELDS = 20
+
+
+def _to_unix_utc(y, mo, d, hhmm):
+    """Ephemeris timestamps are UTC. The legacy code pushes them through
+    time.mktime(), which reinterprets them as local time; the error largely
+    cancels because it does the same to 'now', but it is wrong on its face."""
+    return calendar.timegm(
+        dt.datetime(int(y), int(mo), int(d), int(hhmm[:2]), int(hhmm[2:])).timetuple())
+
+
+class Row:
+    """One ephemeris line."""
+
+    __slots__ = ("line", "ts", "ra_deg", "dec_deg", "elong", "vmag", "motion",
+                 "pa", "az", "az_mpc", "alt", "sun_alt", "moon_phase",
+                 "moon_dist", "moon_alt", "flag")
+
+    def __init__(self, line):
+        p = line.split()
+        if len(p) < _MIN_FIELDS:
+            raise ValueError("short ephemeris row")
+        self.line = line.rstrip()
+        self.ts = _to_unix_utc(p[0], p[1], p[2], p[3])
+
+        self.ra_deg = (float(p[4]) + float(p[5]) / 60 + float(p[6]) / 3600) * 15.0
+        sign = -1.0 if p[7].startswith("-") else 1.0
+        self.dec_deg = sign * (abs(float(p[7])) + float(p[8]) / 60 + float(p[9]) / 3600)
+
+        self.elong = float(p[_I_ELONG])
+        self.vmag = float(p[_I_V])
+        self.motion = float(p[_I_MOTION])
+        self.pa = float(p[_I_PA])
+        # MPC reports azimuth measured from SOUTH; everything else here (the
+        # dome mask, the sky map, astropy) uses the compass convention from
+        # north. Verified against astropy: MPC 228.0 vs ours 48.2, MPC 244.5
+        # vs ours 64.6, with altitudes agreeing to better than half a degree.
+        # The legacy planner carries the same +180 in its sky-map code.
+        self.az_mpc = float(p[_I_AZ])
+        self.az = (self.az_mpc + 180.0) % 360.0
+        self.alt = float(p[_I_ALT])
+        self.sun_alt = float(p[_I_SUNALT])
+        self.moon_phase = float(p[_I_PHASE])
+        self.moon_dist = float(p[_I_MOONDIST])
+        self.moon_alt = float(p[_I_MOONALT])
+        stripped = self.line.rstrip()
+        self.flag = "!!" if stripped.endswith("!!") else (
+            "!" if stripped.endswith("!") else "")
+
+    @property
+    def utc(self):
+        return dt.datetime.fromtimestamp(self.ts, dt.timezone.utc)
+
+    def exposure_minutes(self):
+        """The observatory's own rule, recovered from the legacy planner.
+
+        Clamped at the floor: the formula is unbounded below and returns
+        negative minutes for anything brighter than about V=16.
+        """
+        mins = (config.EXPOSURE_BASE_MIN
+                + (self.vmag - config.EXPOSURE_REF_MAG)
+                * config.EXPOSURE_MIN_PER_MAG)
+        return round(max(mins, config.EXPOSURE_FLOOR_MIN), 2)
+
+    def as_dict(self):
+        return {k: getattr(self, k) for k in self.__slots__}
+
+
+class ObjectEphemeris:
+    def __init__(self, desig, rows, offsets_url=None, map_url=None,
+                 observations_url=None, error=None):
+        self.desig = desig
+        self.rows = rows
+        self.offsets_url = offsets_url
+        self.map_url = map_url
+        self.observations_url = observations_url
+        self.error = error
+
+    def __bool__(self):
+        return bool(self.rows)
+
+    def max_altitude_row(self):
+        return max(self.rows, key=lambda r: r.alt) if self.rows else None
+
+    def nearest_to(self, ts):
+        return min(self.rows, key=lambda r: abs(r.ts - ts)) if self.rows else None
+
+    def interpolate_at(self, ts):
+        """Linear alt/az interpolation between the bracketing rows.
+
+        The legacy planner evaluates at now + 600 s so the coordinates account
+        for slew time; we keep that, but rebuild the output line from the data
+        instead of splicing the original string, which corrupts it.
+        """
+        if not self.rows:
+            return None
+        rows = sorted(self.rows, key=lambda r: r.ts)
+        if ts <= rows[0].ts:
+            return rows[0]
+        if ts >= rows[-1].ts:
+            return rows[-1]
+        for a, b in zip(rows, rows[1:]):
+            if a.ts <= ts <= b.ts:
+                span = b.ts - a.ts
+                f = 0.0 if span == 0 else (ts - a.ts) / span
+                out = Row(a.line)
+                out.ts = ts
+                out.alt = a.alt + (b.alt - a.alt) * f
+                # Azimuth wraps at 360; interpolate the short way round.
+                d_az = ((b.az - a.az + 180) % 360) - 180
+                out.az = (a.az + d_az * f) % 360
+                out.az_mpc = (out.az - 180.0) % 360.0
+                out.ra_deg = a.ra_deg + (((b.ra_deg - a.ra_deg + 180) % 360) - 180) * f
+                out.dec_deg = a.dec_deg + (b.dec_deg - a.dec_deg) * f
+                out.vmag = a.vmag + (b.vmag - a.vmag) * f
+                out.motion = a.motion + (b.motion - a.motion) * f
+                out.sun_alt = a.sun_alt + (b.sun_alt - a.sun_alt) * f
+                out.moon_dist = a.moon_dist + (b.moon_dist - a.moon_dist) * f
+                return out
+        return rows[-1]
+
+
+def from_lines(desig, lines, offsets_url=None, map_url=None,
+               observations_url=None):
+    """Rebuild from cached raw lines. Re-parsing is cheaper and far less
+    fragile than serialising the parsed objects."""
+    rows = []
+    for line in lines:
+        try:
+            rows.append(Row(line))
+        except (ValueError, IndexError):
+            continue
+    return ObjectEphemeris(desig, rows, offsets_url, map_url, observations_url)
+
+
+def signature(target):
+    """Changes only when new astrometry has altered the solution, which is
+    the only reason to re-request an ephemeris."""
+    return f"{target['nobs']}|{target['arc_days']}|{target['not_seen_days']}"
+
+
+def _post(desig, timeout=None):
+    return requests.post(
+        config.EPHEMERIS_URL,
+        data={"mb": -30, "mf": 30, "dl": -90, "du": 90, "nl": 0, "nu": 100,
+              "sort": "d", "W": "j", "obj": desig, "Parallax": 1,
+              "obscode": config.MPC_CODE, "int": 1, "start": 0, "raty": "a",
+              "mot": "m", "dmot": "p", "out": "f", "sun": "x",
+              "oalt": int(config.MPC_SERVER_MIN_ALT)},
+        timeout=timeout or config.EPHEMERIS_TIMEOUT_S, headers=_UA)
+
+
+def parse(desig, html_text):
+    """Extract ephemeris rows and the auxiliary links from one CGI response."""
+    soup = BeautifulSoup(html_text, "lxml")
+    pre = soup.find("pre")
+    if pre is None:
+        return ObjectEphemeris(desig, [], error="no <pre> in response")
+
+    rows = []
+    for line in pre.get_text().split("\n"):
+        if "<suppressed>" in line:
+            continue
+        try:
+            rows.append(Row(line))
+        except (ValueError, IndexError):
+            continue  # header and decoration lines
+
+    offsets_url = map_url = None
+    for a in pre.find_all("a"):
+        label = a.get_text(strip=True)
+        if label == "Offsets" and offsets_url is None:
+            offsets_url = a.get("href")
+        elif label == "Map" and map_url is None:
+            map_url = a.get("href")
+        if offsets_url and map_url:
+            break
+
+    obs_url = None
+    for a in soup.find_all("a"):
+        if a.get_text(strip=True) == "observations":
+            obs_url = a.get("href")
+            break
+
+    return ObjectEphemeris(desig, rows, offsets_url, map_url, obs_url)
+
+
+def fetch(desig):
+    """Fetch and parse one object's ephemeris. Never raises."""
+    try:
+        r = _post(desig)
+        r.raise_for_status()
+        return parse(desig, r.text)
+    except Exception as e:
+        return ObjectEphemeris(desig, [], error=f"{type(e).__name__}: {e}")
+
+
+def fetch_many(desigs, workers=None):
+    """Fetch several objects concurrently, politely."""
+    desigs = list(desigs)
+    if not desigs:
+        return {}
+    with ThreadPoolExecutor(
+            max_workers=workers or config.EPHEMERIS_WORKERS) as pool:
+        return {e.desig: e for e in pool.map(fetch, desigs)}
+
+
+# --- auxiliary pages -------------------------------------------------------
+
+_OFFSET_RE = re.compile(r"([+-][0-9]+)\s+([+-][0-9]+).*?Ephemeris #\s*[0-9]+$",
+                        re.M)
+
+
+def scatteredness(offsets_url):
+    """Spread of the uncertainty-map points in arcseconds, as (dRA, dDec).
+
+    Large values mean the predicted position is smeared over more sky than a
+    single pointing can cover.
+    """
+    if not offsets_url:
+        return None
+    try:
+        r = requests.get(offsets_url, timeout=config.NEOCP_TIMEOUT_S, headers=_UA)
+        r.raise_for_status()
+        pre = BeautifulSoup(r.text, "lxml").find("pre")
+        if pre is None:
+            return None
+        pts = _OFFSET_RE.findall(pre.get_text())
+        if not pts:
+            return None
+        ras = [int(a) for a, _ in pts]
+        decs = [int(b) for _, b in pts]
+        return (max(ras) - min(ras), max(decs) - min(decs))
+    except Exception:
+        return None
+
+
+def observed_from_site(observations_url, mpc_code=None):
+    """True if our observatory code already appears in this object's
+    astrometry, i.e. we have contributed observations of it already."""
+    if not observations_url:
+        return None
+    code = mpc_code or config.MPC_CODE
+    try:
+        r = requests.get(observations_url, timeout=config.NEOCP_TIMEOUT_S,
+                         headers=_UA)
+        r.raise_for_status()
+        pre = BeautifulSoup(r.text, "lxml").find("pre")
+        text = pre.get_text() if pre else r.text
+        # The observatory code is the final field of each 80-column record.
+        return re.search(rf"{re.escape(code)}\s*$", text, re.M) is not None
+    except Exception:
+        return None
