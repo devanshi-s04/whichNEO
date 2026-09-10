@@ -5,6 +5,7 @@ rendering stays fast. The updater has already done all the work.
 """
 
 import json
+import time
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -48,6 +49,58 @@ def status(conn):
     }
 
 
+def night_strip(rows, max_lanes=16):
+    """Geometry for the night timeline: one lane per observable target,
+    positioned as a percentage of the observable span.
+
+    Percentages are computed here rather than in the template so the markup
+    stays declarative and the page does no arithmetic on render.
+    """
+    obs = [r for r in rows
+           if r["observable"] and r.get("window_start_ts") and r.get("window_end_ts")]
+    if not obs:
+        return None
+
+    start = min(r["window_start_ts"] for r in obs)
+    end = max(r["window_end_ts"] for r in obs)
+    span = end - start
+    if span <= 0:
+        return None
+
+    def pct(ts):
+        return max(0.0, min(100.0, (ts - start) / span * 100.0))
+
+    # Hour ticks across the span.
+    ticks = []
+    t = start - (start % 3600) + 3600
+    while t < end:
+        ticks.append({"label": time.strftime("%H:%M", time.gmtime(t)),
+                      "pct": pct(t)})
+        t += 3600
+
+    lanes = []
+    for r in obs[:max_lanes]:
+        left = pct(r["window_start_ts"])
+        right = pct(r["window_end_ts"])
+        lanes.append({
+            "desig": r["desig"],
+            "left": round(left, 2),
+            "width": round(max(right - left, 0.6), 2),
+            "peak": round(pct(r["max_alt_ts"]), 2) if r.get("max_alt_ts") else None,
+            "alt": r.get("max_alt"),
+        })
+
+    now = time.time()
+    return {
+        "start": time.strftime("%H:%M", time.gmtime(start)),
+        "end": time.strftime("%H:%M", time.gmtime(end)),
+        "hours": ticks,
+        "lanes": lanes,
+        "now_pct": round(pct(now), 2) if start <= now <= end else None,
+        "hidden": max(0, len(obs) - max_lanes),
+    }
+
+
 def _view_args():
     return dict(show_observed=request.args.get("observed") == "1",
                 show_hidden=request.args.get("hidden") == "1",
@@ -59,10 +112,12 @@ def index():
     v = _view_args()
     conn = get_conn()
     try:
+        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
+        upcoming = [r for r in rows if r["observable"]][:3]
         return render_template(
-            "index.html",
-            rows=load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"]),
-            status=status(conn), max_score=ranking.max_possible_score(),
+            "index.html", rows=rows, strip=night_strip(rows),
+            upcoming=upcoming, status=status(conn),
+            max_score=ranking.max_possible_score(),
             poll_interval=config.WEB_POLL_INTERVAL_S, **v)
     finally:
         conn.close()

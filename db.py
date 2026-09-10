@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS targets (
     max_alt_utc          TEXT,
     exposure_min         REAL,
     window_minutes       REAL,
+    window_start_ts      REAL,
+    window_end_ts        REAL,
 
     cur_alt              REAL,
     cur_az               REAL,
@@ -106,6 +108,7 @@ _COLS = [
     "not_seen_days", "update_note", "is_new", "survey",
     "q", "e", "incl",
     "max_alt", "max_alt_ts", "max_alt_utc", "exposure_min", "window_minutes",
+    "window_start_ts", "window_end_ts",
     "cur_alt", "cur_az", "cur_motion", "cur_moon_dist", "cur_sun_alt",
     "cur_vmag", "cur_ts",
     "scat_ra", "scat_dec", "scattered_warn", "observed_from_site",
@@ -133,6 +136,12 @@ def connect(path=None):
 
 def init(conn):
     conn.executescript(SCHEMA)
+    # `targets` is rewritten every cycle, so when its columns drift from _COLS
+    # it is safe to rebuild. observer_state and ephemeris_cache are never
+    # dropped -- they hold state the updater cannot regenerate.
+    have = {r[1] for r in conn.execute("PRAGMA table_info(targets)")}
+    if have and have != set(_COLS):
+        conn.executescript("DROP TABLE targets;" + SCHEMA)
     conn.commit()
 
 

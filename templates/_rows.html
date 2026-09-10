@@ -1,60 +1,49 @@
 {% for r in rows %}
-<tr class="{{ 'obs' if r.observable else 'unobs' }}{{ ' done' if r.observed else '' }}">
-  <td class="stripe" style="background:{{ 'var(--go)' if r.observable else '#2a3a52' }}"></td>
-  <td class="l seq">{{ loop.index }}</td>
+<tr class="{{ '' if r.observable else 'gone' }}{{ ' done' if r.observed else '' }}">
+  <td class="l idx">{{ loop.index }}</td>
 
-  <td class="peak">
-    {% if r.max_alt_utc %}
-      <strong>{{ r.max_alt_utc[11:] }}</strong>
-      <span class="dim">{{ '%.0f'|format(r.max_alt) }}&deg;</span>
+  <td class="peakt">
+    {% if r.max_alt_utc %}{{ r.max_alt_utc[11:] }}<em>{{ '%.0f'|format(r.max_alt) }}&deg;</em>
     {% else %}<span class="dim">&mdash;</span>{% endif %}
   </td>
 
-  <td class="l">
-    <a class="desig" href="{{ url_for('target_detail', desig=r.desig) }}">{{ r.desig }}</a>
-    {% if r.is_new %}<span class="tag new">new</span>{% endif %}
-    {% if r.crosscheck and not r.crosscheck.ok %}<span class="tag xc">xcheck</span>{% endif %}
+  <td class="l nm">
+    <a href="{{ url_for('target_detail', desig=r.desig) }}">{{ r.desig }}</a>
+    {% if r.is_new %} <span class="pill new">new</span>{% endif %}
+    {% if r.crosscheck and not r.crosscheck.ok %} <span class="pill xc">xcheck</span>{% endif %}
   </td>
 
   <td>{{ r.score }}</td>
   <td>{{ '%.1f'|format(r.vmag) }}</td>
-  <td class="exp">{{ '%.1f'|format(r.exposure_min) if r.exposure_min else '&mdash;'|safe }}</td>
-  <td>{{ '%.2f'|format(r.cur_motion) if r.cur_motion is not none else '&mdash;'|safe }}</td>
+  <td class="expo">{{ '%.0f'|format(r.exposure_min) if r.exposure_min else '&mdash;'|safe }}</td>
+  <td>{{ '%.1f'|format(r.cur_motion) if r.cur_motion is not none else '&mdash;'|safe }}</td>
 
   <td>{{ '%.0f'|format(r.cur_alt) ~ '&deg;'|safe if r.cur_alt is not none else '&mdash;'|safe }}</td>
   <td>{{ '%.0f'|format(r.cur_az) ~ '&deg;'|safe if r.cur_az is not none else '&mdash;'|safe }}</td>
   <td class="{{ 'warn' if r.cur_moon_dist is not none and r.cur_moon_dist < config.MOON_SEP_MIN else '' }}">
     {{ '%.0f'|format(r.cur_moon_dist) ~ '&deg;'|safe if r.cur_moon_dist is not none else '&mdash;'|safe }}</td>
 
-  <td>{{ '%.2f'|format(r.arc_days) }}</td>
   <td class="{{ 'warn' if r.not_seen_days > 3 else '' }}">{{ '%.1f'|format(r.not_seen_days) }}</td>
 
-  <td>{{ '%.3f'|format(r.q) if r.q is not none else '&mdash;'|safe }}</td>
-  <td>{{ '%.3f'|format(r.e) if r.e is not none else '&mdash;'|safe }}</td>
-
-  <td class="{{ 'warn' if r.scattered_warn else '' }}">
-    {% if r.scatteredness %}{{ r.scatteredness[0] }},{{ r.scatteredness[1] }}
-    {% else %}<span class="dim">&mdash;</span>{% endif %}
+  <td class="dim">
+    {%- if r.q is not none -%}{{ '%.2f'|format(r.q) }} / {{ '%.2f'|format(r.e) }}
+    {%- else -%}&mdash;{%- endif -%}
   </td>
 
-  <td class="score">
-    <span class="sc">{{ '%.2f'|format(r.score_total + (r.priority_bump or 0)) }}</span>
-    <span class="bar"><i style="width:{{ '%.0f'|format((r.score_total / max_score * 100) if max_score else 0) }}%"></i></span>
+  <td>{{ '%.2f'|format(r.score_total + (r.priority_bump or 0)) }}</td>
+
+  <td class="l">
+    {% if r.observed %}<span class="pill ob">observed</span>
+    {% elif r.observable %}<span class="pill go">GO</span>
+    {% else %}{% for f in r.discard_reasons[:2] %}<span class="pill no">{{ f|lower|replace('_',' ') }}</span> {% endfor %}
+      {%- if r.discard_reasons|length > 2 %}<span class="dim">+{{ r.discard_reasons|length - 2 }}</span>{% endif %}
+    {% endif %}
   </td>
 
-  <td class="l flags">
-    {% if r.observed %}<span class="tag done">observed</span>{% endif %}
-    {% if r.observable %}<span class="tag go">GO</span>
-    {% else %}{% for f in r.discard_reasons %}<span class="tag no">{{ f }}</span>{% endfor %}{% endif %}
-  </td>
-
-  <td class="actions">
-    <form method="post" action="{{ url_for('mark', desig=r.desig) }}">
-      {% if r.observed %}
-        <button name="action" value="unobserved">undo</button>
-      {% else %}
-        <button name="action" value="observed">observed</button>
-      {% endif %}
+  <td>
+    <form method="post" action="{{ url_for('mark', desig=r.desig) }}" class="acts">
+      {% if r.observed %}<button name="action" value="unobserved">undo</button>
+      {% else %}<button name="action" value="observed">done</button>{% endif %}
       <button name="action" value="up" title="Raise priority">&uarr;</button>
       <button name="action" value="down" title="Lower priority">&darr;</button>
       {% if r.hidden %}<button name="action" value="restore">restore</button>
@@ -62,19 +51,6 @@
     </form>
   </td>
 </tr>
-
-{% if r.plan_block %}
-<tr class="blockrow obs">
-  <td class="stripe"></td>
-  <td colspan="17">
-    <details>
-      <summary>plan entry <button type="button" class="copybtn"
-        onclick="copyBlock('blk-{{ r.desig }}')">copy</button></summary>
-      <pre id="blk-{{ r.desig }}">{{ r.plan_block }}</pre>
-    </details>
-  </td>
-</tr>
-{% endif %}
 {% else %}
-<tr><td colspan="18" class="empty">No targets. Has the updater run yet?</td></tr>
+<tr><td colspan="15" class="empty">No targets yet &mdash; has the updater run?</td></tr>
 {% endfor %}

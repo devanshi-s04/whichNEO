@@ -123,7 +123,8 @@ def analyze(target, eph, orbit, now=None):
         discard.append("NO_WINDOW")
         target.update(max_alt_row=None, nearest_row=None, interp_row=None,
                       max_alt_ts=None, max_alt=None, exposure_min=None,
-                      window_minutes=0.0)
+                      window_minutes=0.0, window_start_ts=None,
+                      window_end_ts=None)
     else:
         best = max(rows, key=lambda r: r.alt)
         target["max_alt_row"] = best
@@ -131,6 +132,9 @@ def analyze(target, eph, orbit, now=None):
         target["max_alt"] = best.alt
         target["exposure_min"] = best.exposure_minutes()
         target["window_minutes"] = _contiguous_window(rows, now)
+        # Span of the observable rows, for the night timeline.
+        target["window_start_ts"] = min(r.ts for r in rows)
+        target["window_end_ts"] = max(r.ts for r in rows)
 
         if best.vmag > config.MAX_MAG:
             discard.append("TOO_FAINT")
