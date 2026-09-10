@@ -112,14 +112,41 @@ format surfaces as a visible mismatch rather than quietly wrong pointing.
 
 ## Performance
 
-| | Cold cache | Warm |
-|---|---|---|
-| Full cycle | ~110 s | **~2 s** |
+| | Cold cache | Typical | Warm |
+|---|---|---|---|
+| Full cycle | ~38 s | ~33 s | **~2 s** |
+
+Page render is ~140 ms; the polled row partial ~38 ms. Twelve concurrent
+requests are all served in under 1.8 s.
 
 Ephemerides are cached against a signature of the object's NEOCP row, so they
 are re-requested only when new observations change the solution. Objects
 rejected by the cheap list-level filters never trigger a per-object request at
-all. Page render is ~150 ms; the polled row partial ~38 ms.
+all.
+
+### Against the legacy planner
+
+Benchmarked as request patterns on identical client code — `planets-new.py`
+cannot be run here (it needs `requests_cache` and `playsound`, and prompts
+interactively), so this measures the architecture rather than the binary.
+
+| | Legacy | Here |
+|---|---|---|
+| Per object | 2.65 s sequential | 0.95 s, 4 workers |
+| Objects fetched | all 82 | 40 |
+| Cold start | 218 s | 38 s |
+| | | **5.7× faster** |
+
+Roughly 2.8× of that comes from concurrency and 2× from pre-filtering: half
+the NEOCP list fails a score, arc, not-seen or NEO check that costs nothing,
+and those objects never generate a request. The legacy planner calls
+`getEphemerides()` as the first line of `analyzePlanet`, before any filter, so
+every object costs three sequential requests regardless.
+
+The consequence matters more than the ratio. A legacy cold start uses 73% of
+its own 300 s budget, which is why it can only analyse each object once ever —
+and that is exactly the staleness bug. Re-evaluating everything every cycle,
+which is what correctness requires, costs it 218 s and costs us about 2.
 
 ## Files
 
