@@ -29,10 +29,29 @@ in your notes, and it is what most changes which targets we show.
   supports a continuous horizon (`site_L01.txt`) — if one exists, we should
   use it directly.
 
-**Azimuths above are compass bearings from north.** MPC's ephemeris reports
-azimuth from *south*; we convert on parse. Please sanity-check that your notes
-meant compass bearings too — if they were MPC-convention, every sector is 180°
-out.
+**Azimuth convention: RESOLVED, no longer a question.** MPC reports azimuth
+from south; we convert to compass bearings on parse. That the notes are also
+compass bearings was confirmed empirically against 579 ephemeris lines in the
+legacy planner's own nightly output for 2026-03 to 2026-09:
+
+| Sector | read as compass | read as raw MPC |
+|---|---|---|
+| N  | **5** | **228** |
+| NE | 18 | 27 |
+| E  | 98 | 10 |
+| SE | 182 | 11 |
+| S  | 228 | 5 |
+| SW | 27 | 18 |
+| W  | 10 | 98 |
+| NW | 11 | 182 |
+
+Read as compass, 88% of six months of real targets sit in E/SE/S, five of 579
+fall in the north, and W/NW are nearly empty — matching "avoid north
+completely", "above 20 in South and East", "West/Northwest = 40" and "before
+it crosses meridian". Read as raw MPC, north would be the busiest sector of
+all. Only the compass reading is consistent.
+
+What remains open is the *numbers*, not the convention.
 
 ## 2. Upper elevation limit
 
