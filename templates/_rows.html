@@ -1,0 +1,90 @@
+{% for r in rows %}
+<tr class="{{ 'obs' if r.observable else 'unobs' }}{{ ' done' if r.observed else '' }}">
+  <td class="rank">{{ loop.index }}</td>
+
+  <td class="desig">
+    <a href="{{ url_for('target_detail', desig=r.desig) }}">{{ r.desig }}</a>
+    {% if r.is_new %}<span class="tag new">new</span>{% endif %}
+    {% if r.survey %}<span class="tag survey">{{ r.survey }}</span>{% endif %}
+  </td>
+
+  <td class="num">{{ r.digest2 }}</td>
+  <td class="num">{{ '%.1f'|format(r.vmag) }}</td>
+  <td class="num">{{ '%.2f'|format(r.arc_days) }}</td>
+  <td class="num {{ 'warn' if r.not_seen_days > 3 else '' }}">{{ '%.1f'|format(r.not_seen_days) }}</td>
+  <td class="num">{{ r.nobs }}</td>
+
+  <td class="num">{{ '%.1f'|format(r.alt_deg) }}&deg;</td>
+  <td class="num">{{ '%.0f'|format(r.az_deg) }}&deg;</td>
+  <td class="num">{{ '%.2f'|format(r.airmass) if r.airmass else '&mdash;'|safe }}</td>
+
+  <td class="num" title="{{ r.transit_utc }}">
+    {% if r.pre_meridian %}
+      &uarr; {{ '%.0f'|format(r.minutes_to_transit) }}m
+    {% else %}
+      &darr; past
+    {% endif %}
+  </td>
+
+  <td class="num {{ 'warn' if r.moon_sep_deg < config.MOON_SEP_MIN else '' }}">
+    {{ '%.0f'|format(r.moon_sep_deg) }}&deg;
+  </td>
+
+  <td class="num">
+    {% if r.observable %}
+      {{ '%.0f'|format(r.window_remaining_min) }}m
+    {% elif r.minutes_until_observable is not none %}
+      <span class="dim">in {{ '%.0f'|format(r.minutes_until_observable) }}m</span>
+    {% else %}
+      <span class="dim">&mdash;</span>
+    {% endif %}
+  </td>
+
+  <td class="score">
+    <strong>{{ '%.2f'|format(r.score_total + (r.priority_bump or 0)) }}</strong>
+    <span class="components" title="digest2 / arc / magnitude">
+      {{ '%.2f'|format(r.score_digest2) }}&middot;{{ '%.2f'|format(r.score_arc) }}&middot;{{ '%.2f'|format(r.score_magnitude) }}
+    </span>
+    {% if r.priority_bump %}<span class="tag bump">{{ '%+.0f'|format(r.priority_bump) }}</span>{% endif %}
+  </td>
+
+  <td class="flags">
+    {% if r.observed %}<span class="tag done">observed {{ r.observed_at_utc }}</span>{% endif %}
+    {% if r.observable %}
+      <span class="tag go">GO</span>
+    {% else %}
+      {% for f in r.flags %}<span class="tag no">{{ f }}</span>{% endfor %}
+    {% endif %}
+  </td>
+
+  <td class="actions">
+    <form method="post" action="{{ url_for('mark', desig=r.desig) }}">
+      {% if r.observed %}
+        <button name="action" value="unobserved" title="Undo">undo</button>
+      {% else %}
+        <button name="action" value="observed" title="Mark observed">observed</button>
+      {% endif %}
+      <button name="action" value="up" title="Raise priority">&uarr;</button>
+      <button name="action" value="down" title="Lower priority">&darr;</button>
+      {% if r.hidden %}
+        <button name="action" value="restore" title="Restore">restore</button>
+      {% else %}
+        <button name="action" value="hide" title="Hide">hide</button>
+      {% endif %}
+    </form>
+  </td>
+</tr>
+
+<tr class="blockrow {{ 'obs' if r.observable else 'unobs' }}">
+  <td></td>
+  <td colspan="15">
+    <details>
+      <summary>observing block <button type="button" class="copybtn"
+        onclick="copyBlock('blk-{{ r.desig }}')">copy</button></summary>
+      <pre id="blk-{{ r.desig }}">{{ r.block }}</pre>
+    </details>
+  </td>
+</tr>
+{% else %}
+<tr><td colspan="16" class="empty">No targets. Has the updater run yet?</td></tr>
+{% endfor %}

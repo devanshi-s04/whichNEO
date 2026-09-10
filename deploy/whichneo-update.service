@@ -1,0 +1,11 @@
+[Unit]
+Description=WhichNEO NEOCP update cycle (L01 Tican)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/devanshi-s04/visnjan_whichneo
+ExecStart=/usr/bin/env python3 update_neocp.py
+# A cycle takes ~2.5 s; kill it long before the next timer fire.
+TimeoutStartSec=120

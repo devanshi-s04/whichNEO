@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ row.desig }} &mdash; WhichNEO</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<header>
+  <h1>{{ row.desig }} <span class="sub">L01 Ti&#269;an</span></h1>
+  <div class="status"><a href="{{ url_for('index') }}">&larr; back to queue</a></div>
+</header>
+
+<div class="detail">
+  <table class="kv">
+    <tr><th>Digest2 score</th><td>{{ row.digest2 }}</td></tr>
+    <tr><th>V magnitude</th><td>{{ '%.1f'|format(row.vmag) }}</td></tr>
+    <tr><th>H magnitude</th><td>{{ '%.1f'|format(row.hmag) }}</td></tr>
+    <tr><th>Observations</th><td>{{ row.nobs }}</td></tr>
+    <tr><th>Arc</th><td>{{ '%.3f'|format(row.arc_days) }} d</td></tr>
+    <tr><th>Not seen</th><td>{{ '%.2f'|format(row.not_seen_days) }} d</td></tr>
+    <tr><th>NEOCP note</th><td>{{ row.update_note }}</td></tr>
+    <tr><th>Survey (guess)</th><td>{{ row.survey or 'unknown' }}</td></tr>
+  </table>
+
+  <table class="kv">
+    <tr><th>RA / Dec (J2000)</th><td>{{ '%.4f'|format(row.ra_deg) }} / {{ '%.4f'|format(row.dec_deg) }}</td></tr>
+    <tr><th>Altitude</th><td>{{ '%.2f'|format(row.alt_deg) }}&deg;</td></tr>
+    <tr><th>Azimuth</th><td>{{ '%.2f'|format(row.az_deg) }}&deg;</td></tr>
+    <tr><th>Airmass</th><td>{{ '%.3f'|format(row.airmass) if row.airmass else '—' }}</td></tr>
+    <tr><th>Hour angle</th><td>{{ '%.2f'|format(row.hour_angle_deg) }}&deg;
+        ({{ 'rising, pre-meridian' if row.pre_meridian else 'past meridian' }})</td></tr>
+    <tr><th>Transit</th><td>{{ row.transit_utc }} (in {{ '%.0f'|format(row.minutes_to_transit) }} min)</td></tr>
+    <tr><th>Moon separation</th><td>{{ '%.1f'|format(row.moon_sep_deg) }}&deg;</td></tr>
+    <tr><th>Moon</th><td>{{ '%.0f'|format(row.moon_illum * 100) }}% illuminated, alt {{ '%.1f'|format(row.moon_alt_deg) }}&deg;</td></tr>
+    <tr><th>Sun altitude</th><td>{{ '%.1f'|format(row.sun_alt_deg) }}&deg;</td></tr>
+    <tr><th>Solar elongation</th><td>{{ '%.1f'|format(row.sun_elong_deg) }}&deg;</td></tr>
+    <tr><th>Status</th><td>
+      {% if row.observable %}<span class="tag go">GO</span>
+      {% else %}{% for f in row.flags %}<span class="tag no">{{ f }}</span>{% endfor %}{% endif %}
+    </td></tr>
+  </table>
+</div>
+
+<h2>Observing block</h2>
+<pre class="block">{{ row.block }}</pre>
+<p class="note">
+  Exposure plan {{ config.EXPOSURE_COUNT }} &times; {{ config.EXPOSURE_SECONDS }} s is a
+  <strong>placeholder</strong>. Sky motion and position angle are absent because they
+  come only from the per-object ephemeris below.
+</p>
+
+<h2>MPC ephemeris</h2>
+{% if eph_text %}
+  <pre class="block">{{ eph_text[:8000] }}</pre>
+{% elif eph_error %}
+  <p class="err">Fetch failed: {{ eph_error }}</p>
+  <p><a href="{{ eph_url }}" rel="noopener">open at MPC directly</a></p>
+{% else %}
+  <p>
+    Not fetched. This is the only outbound request the site makes, kept off the
+    five-minute loop on purpose.
+    <a class="btn" href="{{ url_for('target_detail', desig=row.desig, ephemeris=1) }}">Fetch ephemeris from MPC</a>
+  </p>
+{% endif %}
+
+</body>
+</html>

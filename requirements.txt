@@ -1,0 +1,4 @@
+flask>=3.0
+requests>=2.28
+astropy>=6.0
+numpy>=1.24

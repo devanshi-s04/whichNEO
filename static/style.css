@@ -1,0 +1,111 @@
+/* Dark by default: this runs on a screen in a control room at night. */
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --line: #26303d;
+  --fg: #d6deeb;
+  --dim: #7d8899;
+  --go: #3fb950;
+  --no: #f85149;
+  --warn: #d29922;
+  --accent: #58a6ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+header {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  display: flex; flex-wrap: wrap; gap: 12px;
+  align-items: baseline; justify-content: space-between;
+}
+h1 { margin: 0; font-size: 16px; letter-spacing: .02em; }
+h2 { font-size: 14px; margin: 20px 16px 6px; }
+.sub { color: var(--dim); font-weight: normal; margin-left: 8px; }
+.status { color: var(--dim); }
+.status strong { color: var(--fg); }
+
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+.dot.ok { background: var(--go); }
+.dot.bad { background: var(--no); }
+
+.filters {
+  padding: 8px 16px; border-bottom: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+}
+.filters a { color: var(--dim); text-decoration: none; }
+.filters a.active { color: var(--accent); }
+.legend { color: var(--dim); margin-left: auto; }
+
+.mask { margin: 8px 16px; color: var(--dim); }
+.mask summary { cursor: pointer; }
+.masktable { border-collapse: collapse; margin: 8px 0; }
+.masktable th, .masktable td { border: 1px solid var(--line); padding: 2px 10px; text-align: left; }
+
+table.targets { width: 100%; border-collapse: collapse; }
+table.targets th {
+  position: sticky; top: 0; background: var(--panel);
+  border-bottom: 1px solid var(--line); text-align: right;
+  padding: 6px 8px; color: var(--dim); font-weight: normal;
+}
+table.targets th:nth-child(2) { text-align: left; }
+table.targets td { padding: 3px 8px; border-bottom: 1px solid #1b2029; }
+td.num, td.rank, td.score { text-align: right; white-space: nowrap; }
+td.desig { font-weight: bold; }
+td.desig a { color: var(--fg); text-decoration: none; }
+td.desig a:hover { color: var(--accent); }
+
+tr.unobs td { color: var(--dim); }
+tr.unobs td.desig a { color: var(--dim); }
+tr.done td { opacity: .45; text-decoration: line-through; }
+tr.blockrow td { border-bottom: 1px solid var(--line); padding-top: 0; }
+tr.blockrow summary { color: var(--dim); cursor: pointer; font-size: 12px; }
+
+.warn { color: var(--warn); }
+.dim { color: var(--dim); }
+.err { color: var(--no); }
+.components { color: var(--dim); font-size: 11px; margin-left: 6px; }
+
+.tag {
+  display: inline-block; padding: 0 5px; margin-right: 3px;
+  border-radius: 3px; font-size: 11px; border: 1px solid var(--line);
+}
+.tag.go { color: var(--go); border-color: var(--go); }
+.tag.no { color: var(--no); border-color: var(--no); }
+.tag.new { color: var(--accent); border-color: var(--accent); }
+.tag.bump { color: var(--warn); border-color: var(--warn); }
+.tag.survey, .tag.done { color: var(--dim); }
+
+.actions form { display: flex; gap: 3px; }
+button, .btn {
+  background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 3px; padding: 1px 7px; cursor: pointer;
+  font: inherit; font-size: 11px; text-decoration: none;
+}
+button:hover, .btn:hover { border-color: var(--accent); color: var(--accent); }
+
+pre.block, tr.blockrow pre {
+  background: #0a0e14; border: 1px solid var(--line); border-radius: 4px;
+  padding: 8px 10px; margin: 6px 0; overflow-x: auto; color: var(--fg);
+}
+.block { margin: 0 16px; }
+
+.detail { display: flex; flex-wrap: wrap; gap: 24px; padding: 12px 16px; }
+table.kv { border-collapse: collapse; min-width: 340px; }
+table.kv th {
+  text-align: left; color: var(--dim); font-weight: normal;
+  padding: 3px 14px 3px 0; vertical-align: top;
+}
+table.kv td { padding: 3px 0; }
+
+.note, footer p { color: var(--dim); margin: 8px 16px; max-width: 100ch; }
+footer { border-top: 1px solid var(--line); margin-top: 16px; padding: 8px 0; }
+.empty { text-align: center; color: var(--dim); padding: 30px; }

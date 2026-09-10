@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhichNEO &mdash; L01 Ti&#269;an</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<header>
+  <h1>WhichNEO <span class="sub">NEOCP follow-up &middot; L01 Ti&#269;an / Vi&#353;njan</span></h1>
+  <div class="status">
+    <span class="dot {{ 'ok' if status.ok else 'bad' }}"></span>
+    Last NEOCP update: <strong id="last-update">{{ status.last_update_utc }} UTC</strong>
+    &middot; <span id="count">{{ status.count }}</span> targets
+    {% if status.timings %}
+      &middot; cycle {{ status.timings.get('total', '?') }} ms
+    {% endif %}
+    {% if not status.ok and status.error %}
+      <span class="err">&middot; {{ status.error }}</span>
+    {% endif %}
+  </div>
+</header>
+
+<nav class="filters">
+  <a href="{{ url_for('index') }}" class="{{ '' if show_observed or show_hidden else 'active' }}">Active queue</a>
+  <a href="{{ url_for('index', observed=1) }}" class="{{ 'active' if show_observed else '' }}">Include observed</a>
+  <a href="{{ url_for('index', hidden=1) }}" class="{{ 'active' if show_hidden else '' }}">Include hidden</a>
+  <span class="legend">
+    Limits: mag &le; {{ config.MAX_MAG }} &middot; sun &lt; {{ config.SUN_ALT_MAX }}&deg;
+    &middot; moon sep &ge; {{ config.MOON_SEP_MIN }}&deg; &middot; horizon mask active
+    <a href="#" onclick="document.getElementById('mask').open=true;return false;">(mask)</a>
+  </span>
+</nav>
+
+<details id="mask" class="mask">
+  <summary>Dome / horizon mask &mdash; <strong>TBD, needs confirmation from Luka</strong></summary>
+  <table class="masktable">
+    <tr><th>Sector</th><th>Azimuth</th><th>Min altitude</th></tr>
+    {% for start, end, minalt in config.HORIZON_MASK %}
+    <tr>
+      <td>{{ ['N','NE','E','SE','S','SW','W','NW'][loop.index0] }}</td>
+      <td>{{ start }}&ndash;{{ end }}&deg;</td>
+      <td>{{ 'BLOCKED' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="note">
+    Unresolved conflicts in the source notes: NW given as both 50&deg; and 40&deg;
+    (using 40&deg;); W given as both &ldquo;30&ndash;40&rdquo; and 40&deg; (using 40&deg;);
+    SW never specified (interpolated to 30&deg;). Upper elevation limit mentioned
+    but no value given &mdash; <code>MAX_ALTITUDE</code> is currently
+    {{ config.MAX_ALTITUDE or 'unset' }}. Exposure default
+    {{ config.EXPOSURE_COUNT }} &times; {{ config.EXPOSURE_SECONDS }} s is a placeholder.
+  </p>
+</details>
+
+<table class="targets">
+  <thead>
+    <tr>
+      <th>#</th><th>Target</th><th>D2</th><th>V</th><th>Arc</th><th>Unseen</th><th>N</th>
+      <th>Alt</th><th>Az</th><th>AM</th><th>Transit</th><th>Moon</th><th>Window</th>
+      <th>Score</th><th>Status</th><th>Actions</th>
+    </tr>
+  </thead>
+  <tbody id="rows">
+    {% include "_rows.html" %}
+  </tbody>
+</table>
+
+<footer>
+  <p>
+    Scoring is intrinsic only (digest2 {{ config.RANK_WEIGHTS.digest2 }} &middot;
+    arc {{ config.RANK_WEIGHTS.arc }} &middot; magnitude {{ config.RANK_WEIGHTS.magnitude }}),
+    deliberately excluding altitude so the ordering is stable through the day.
+    Unobservable targets sink below observable ones.
+    Positions are NEOCP-listed, not live ephemerides &mdash; treat targets with a
+    large <em>Unseen</em> value as approximate and open the target for a real ephemeris.
+  </p>
+</footer>
+
+<script>
+const POLL = {{ poll_interval }} * 1000;
+const params = new URLSearchParams(window.location.search);
+async function refresh() {
+  try {
+    const [rows, st] = await Promise.all([
+      fetch('/rows?' + params.toString()).then(r => r.text()),
+      fetch('/status').then(r => r.json())
+    ]);
+    document.getElementById('rows').innerHTML = rows;
+    document.getElementById('last-update').textContent = st.last_update_utc + ' UTC';
+    document.getElementById('count').textContent = st.count;
+  } catch (e) { /* keep showing the last good render */ }
+}
+setInterval(refresh, POLL);
+
+function copyBlock(id) {
+  const el = document.getElementById(id);
+  navigator.clipboard.writeText(el.textContent).then(() => {
+    const b = el.parentElement.querySelector('.copybtn');
+    if (b) { b.textContent = 'copied'; setTimeout(() => b.textContent = 'copy', 1200); }
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# Runtime state and generated output: the database, logs, and exported
+# snapshots are all rebuilt by update_neocp.py.
+data/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+.DS_Store
