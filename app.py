@@ -6,6 +6,7 @@ rendering stays fast. The updater has already done all the work.
 
 import json
 import time
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -16,10 +17,44 @@ import ranking
 app = Flask(__name__)
 
 
+try:
+    from zoneinfo import ZoneInfo
+    _TZ = ZoneInfo(config.DISPLAY_TZ)
+except Exception:                                    # no tzdata on the host
+    _TZ = timezone.utc
+
+
 @app.context_processor
 def inject_config():
     """Templates read limits and the horizon mask straight from config."""
-    return {"config": config}
+    return {"config": config, "tzname": _tzabbr()}
+
+
+def _tzabbr(ts=None):
+    d = datetime.fromtimestamp(ts if ts is not None else time.time(), _TZ)
+    return d.strftime("%Z") or config.DISPLAY_TZ
+
+
+@app.template_filter("localt")
+def localt(ts):
+    """Unix timestamp -> local clock time at the observatory."""
+    if ts is None:
+        return "—"
+    return datetime.fromtimestamp(float(ts), _TZ).strftime("%H:%M")
+
+
+@app.template_filter("localdt")
+def localdt(ts):
+    if ts is None:
+        return "—"
+    return datetime.fromtimestamp(float(ts), _TZ).strftime("%Y-%m-%d %H:%M")
+
+
+@app.template_filter("utct")
+def utct(ts):
+    if ts is None:
+        return "—"
+    return datetime.fromtimestamp(float(ts), timezone.utc).strftime("%H:%M")
 
 
 def get_conn():
@@ -36,8 +71,16 @@ def load_sorted(conn, show_observed=False, show_hidden=False, mode=None):
 
 def status(conn):
     timings = db.get_meta(conn, "last_update_timings")
+    stamp = db.get_meta(conn, "last_update_utc", "never")
+    try:
+        ts = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        ts = None
     return {
-        "last_update_utc": db.get_meta(conn, "last_update_utc", "never"),
+        "last_update_utc": stamp,
+        "last_update_ts": ts,
+        "last_update_local": localt(ts) if ts else "never",
         "count": db.get_meta(conn, "last_update_count", "0"),
         "observable": db.get_meta(conn, "last_update_observable", "0"),
         "night": db.get_meta(conn, "night", "-"),
@@ -70,12 +113,11 @@ def night_strip(rows, max_lanes=16):
     def pct(ts):
         return max(0.0, min(100.0, (ts - start) / span * 100.0))
 
-    # Hour ticks across the span.
+    # Hour ticks across the span, labelled in observatory local time.
     ticks = []
     t = start - (start % 3600) + 3600
     while t < end:
-        ticks.append({"label": time.strftime("%H:%M", time.gmtime(t)),
-                      "pct": pct(t)})
+        ticks.append({"label": localt(t), "pct": pct(t)})
         t += 3600
 
     lanes = []
@@ -92,8 +134,8 @@ def night_strip(rows, max_lanes=16):
 
     now = time.time()
     return {
-        "start": time.strftime("%H:%M", time.gmtime(start)),
-        "end": time.strftime("%H:%M", time.gmtime(end)),
+        "start": localt(start), "end": localt(end),
+        "start_ut": utct(start), "end_ut": utct(end),
         "hours": ticks,
         "lanes": lanes,
         "now_pct": round(pct(now), 2) if start <= now <= end else None,

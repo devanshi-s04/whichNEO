@@ -45,6 +45,12 @@ ALLOWED_HOSTS = (
     "https://minorplanetcenter.net/",
 )
 
+# --- Display ----------------------------------------------------------------
+# The board is read at the observatory, so times are shown in Visnjan local
+# time. UTC is kept alongside because that is what MPC, the plan file and the
+# 80-column astrometry format all use -- the plan file stays UTC on purpose.
+DISPLAY_TZ = "Europe/Zagreb"
+
 # --- Observing night ---------------------------------------------------------
 # The legacy planner treats a night as 11:00 UT to 11:00 UT the next day, so a
 # session spanning midnight stays one unit and names one output file.

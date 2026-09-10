@@ -20,7 +20,7 @@
     <div class="stat"><div class="k">Observable</div>
       <div class="v amber">{{ status.observable }} <small>/ {{ status.count }}</small></div></div>
     <div class="stat"><div class="k">Last update</div>
-      <div class="v {{ 'go' if status.ok else 'bad' }}" id="last-update">{{ status.last_update_utc[11:] }}<small> UT</small></div></div>
+      <div class="v {{ 'go' if status.ok else 'bad' }}" id="last-update">{{ status.last_update_ts|localt }}<small> {{ tzname }}</small></div></div>
     <div class="stat"><div class="k">Cycle</div>
       <div class="v">{{ '%.1f'|format((status.timings.get('total',0))/1000) }}<small>s</small></div></div>
     {% if status.mismatches and status.mismatches != '0' %}
@@ -33,7 +33,9 @@
 {% if strip %}
 <section class="strip">
   <h2>Tonight</h2>
-  <p class="cap">Observable window for each target, {{ strip.start }}&ndash;{{ strip.end }} UT.
+  <p class="cap">Observable window for each target,
+    {{ strip.start }}&ndash;{{ strip.end }} {{ tzname }}
+    <span class="dim">({{ strip.start_ut }}&ndash;{{ strip.end_ut }} UT)</span>.
     The dot marks its best altitude &mdash; that is where it sits in the running order.</p>
   <div class="axis">
     {% for h in strip.hours %}<span style="left:{{ h.pct }}%">{{ h.label }}</span>{% endfor %}
@@ -62,7 +64,8 @@
 <section class="next">
   {% for r in upcoming %}
   <article class="card {{ 'lead' if loop.first else '' }}">
-    <div class="when">{{ 'UP NEXT &middot; '|safe if loop.first }}PEAKS {{ r.max_alt_utc[11:] if r.max_alt_utc else '—' }} UT</div>
+    <div class="when">{{ 'UP NEXT &middot; '|safe if loop.first }}PEAKS {{ r.max_alt_ts|localt }} {{ tzname }}
+      <span class="dim">/ {{ r.max_alt_ts|utct }} UT</span></div>
     <div class="name"><a href="{{ url_for('target_detail', desig=r.desig) }}">{{ r.desig }}</a></div>
     <div class="facts">
       <div><div class="k">Exposure</div><div class="n">{{ '%.0f'|format(r.exposure_min) if r.exposure_min else '—' }}<span class="dim"> min</span></div></div>
@@ -147,12 +150,46 @@
   independently with astropy each cycle, so a disagreement is flagged rather
   than hidden. The pointing line is interpolated
   {{ config.INTERPOLATE_AHEAD_S // 60 }} minutes ahead to allow for slewing.</p>
+  <p>Clock times on this page are <em>{{ tzname }}</em>, local to the
+  observatory; hover any of them for UT. The plan file and the ephemeris lines
+  inside it stay in <em>UT</em>, because that is what MPC and the 80-column
+  astrometry format require &mdash; changing them would break the format.</p>
 </footer>
 
 </div>
 <script>
 const POLL = {{ poll_interval }} * 1000;
+const TZ = {{ tzname|tojson }};
 const params = new URLSearchParams(window.location.search);
+
+// Which plan entries the observer has opened. Kept across refreshes so a
+// poll never closes something being read mid-slew.
+const openPlans = new Set();
+
+function applyOpenPlans() {
+  document.querySelectorAll('tr.planrow').forEach(tr => {
+    tr.hidden = !openPlans.has(tr.id.slice(5));
+  });
+}
+
+document.addEventListener('click', ev => {
+  const t = ev.target.closest('[data-plan]');
+  if (t) {
+    const d = t.dataset.plan;
+    openPlans.has(d) ? openPlans.delete(d) : openPlans.add(d);
+    applyOpenPlans();
+    return;
+  }
+  const c = ev.target.closest('[data-copy]');
+  if (c) {
+    const el = document.getElementById(c.dataset.copy);
+    navigator.clipboard.writeText(el.textContent).then(() => {
+      c.textContent = 'copied';
+      setTimeout(() => c.textContent = 'copy', 1200);
+    });
+  }
+});
+
 async function refresh() {
   try {
     const [rows, st] = await Promise.all([
@@ -160,11 +197,13 @@ async function refresh() {
       fetch('/status').then(r => r.json())
     ]);
     document.getElementById('rows').innerHTML = rows;
+    applyOpenPlans();
     document.getElementById('last-update').innerHTML =
-      st.last_update_utc.slice(11) + '<small> UT</small>';
+      st.last_update_local + '<small> ' + TZ + '</small>';
   } catch (e) { /* keep the last good render */ }
 }
 setInterval(refresh, POLL);
+applyOpenPlans();
 </script>
 </body>
 </html>
