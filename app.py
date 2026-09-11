@@ -92,6 +92,27 @@ def status(conn):
     }
 
 
+def pick_upcoming(rows, n=3):
+    """The cards answer 'what do I point at next', so they must look forward.
+
+    Sorting by peak time alone is right for the night's plan but wrong here:
+    midway through the night the earliest-peaking targets have already
+    peaked, and a card would advertise a best moment hours in the past.
+    Targets still to peak come first; if the night is nearly over, still-
+    observable ones that have passed their best top the list up, flagged so
+    the card can say so.
+    """
+    now = time.time()
+    observable = [r for r in rows if r["observable"]]
+    ahead, behind = [], []
+    for r in observable:
+        ts = r.get("max_alt_ts")
+        (ahead if ts and ts >= now else behind).append(r)
+    for r in behind:
+        r["past_peak"] = True
+    return (ahead + behind)[:n]
+
+
 def night_strip(rows, max_lanes=16):
     """Geometry for the night timeline: one lane per observable target,
     positioned as a percentage of the observable span.
@@ -155,7 +176,7 @@ def index():
     conn = get_conn()
     try:
         rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
-        upcoming = [r for r in rows if r["observable"]][:3]
+        upcoming = pick_upcoming(rows)
         return render_template(
             "index.html", rows=rows, strip=night_strip(rows),
             upcoming=upcoming, status=status(conn),

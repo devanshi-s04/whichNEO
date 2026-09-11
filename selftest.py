@@ -204,6 +204,41 @@ def test_chronological_sort():
           order == ["late", "early", "down"], order)
 
 
+def test_upcoming_cards_look_forward():
+    """The 'up next' cards must not advertise a peak that already happened.
+
+    Sorting by peak time is right for the night's plan, but midway through
+    the night the earliest-peaking targets have long since peaked.
+    """
+    import app
+    now = time.time()
+    rows = [
+        dict(desig="peaked_early", observable=True, max_alt_ts=now - 4 * 3600),
+        dict(desig="peaked_recently", observable=True, max_alt_ts=now - 600),
+        dict(desig="soon", observable=True, max_alt_ts=now + 1800),
+        dict(desig="later", observable=True, max_alt_ts=now + 7200),
+        dict(desig="not_up", observable=False, max_alt_ts=now + 60),
+    ]
+    picked = [r["desig"] for r in app.pick_upcoming(rows, n=3)]
+    check("still-to-peak targets come first",
+          picked[:2] == ["soon", "later"], picked)
+    check("unobservable target never appears in the cards",
+          "not_up" not in picked, picked)
+    check("past-peak targets are flagged, not silently shown as upcoming",
+          all(r.get("past_peak") for r in rows if r["max_alt_ts"] < now
+              and r["desig"] in picked) or "peaked_early" not in picked[:2],
+          picked)
+
+    # Late in the night nothing is still to peak; the cards should fall back
+    # rather than go empty.
+    late = [dict(desig="a", observable=True, max_alt_ts=now - 3600),
+            dict(desig="b", observable=True, max_alt_ts=now - 1800)]
+    got = app.pick_upcoming(late, n=3)
+    check("falls back to past-peak targets when none remain ahead",
+          len(got) == 2 and all(r.get("past_peak") for r in got),
+          [r["desig"] for r in got])
+
+
 def test_ranking_bounds():
     rows = [dict(score=100, arc_days=0.0, vmag=config.MAG_BRIGHT),
             dict(score=0, arc_days=99.0, vmag=config.MAX_MAG)]
@@ -246,7 +281,8 @@ def main():
                test_neocp_list_parse, test_neocp_info_column_collision,
                test_ephemeris_row, test_ephemeris_azimuth_convention,
                test_exposure_rule, test_night_bounds, test_chronological_sort,
-               test_ranking_bounds, test_row_rejection_reasons):
+               test_upcoming_cards_look_forward, test_ranking_bounds,
+               test_row_rejection_reasons):
         print(f"\n{fn.__name__}:")
         fn()
 

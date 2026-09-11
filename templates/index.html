@@ -64,7 +64,10 @@
 <section class="next">
   {% for r in upcoming %}
   <article class="card {{ 'lead' if loop.first else '' }}">
-    <div class="when">{{ 'UP NEXT &middot; '|safe if loop.first }}PEAKS {{ r.max_alt_ts|localt }} {{ tzname }}
+    <div class="when">
+      {%- if loop.first and not r.past_peak %}UP NEXT &middot; {% endif -%}
+      {%- if r.past_peak %}PAST BEST &middot; PEAKED{% else %}PEAKS{% endif %}
+      {{ r.max_alt_ts|localt }} {{ tzname }}
       <span class="dim">/ {{ r.max_alt_ts|utct }} UT</span></div>
     <div class="name"><a href="{{ url_for('target_detail', desig=r.desig) }}">{{ r.desig }}</a></div>
     <div class="facts">

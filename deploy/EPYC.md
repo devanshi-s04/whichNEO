@@ -4,48 +4,50 @@ Good for development and for showing the board to people at UW. Whether
 observers in Croatia can reach it depends on a firewall rule that has to be
 requested — see the bottom of this file.
 
-## Install
+## 1. Preflight — check the host can do this at all
 
 ```bash
 git clone https://github.com/devanshi-s04/whichNEO.git ~/whichNEO
 cd ~/whichNEO
-python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
-python3 selftest.py          # expect: all checks passed
+bash deploy/preflight.sh
 ```
 
-A virtualenv rather than the shared conda stack — this pulls in `waitress`,
-`beautifulsoup4` and `lxml`, and there is no reason to push those into an
-environment other people use.
+Read-only; changes nothing. It verifies Python 3.9+, `venv`, that
+`Europe/Zagreb` resolves (without tzdata the board silently falls back to
+UTC), that MPC is reachable and not proxied, whether `systemd --user` and
+lingering are available, free space, and that the port is free.
 
-## Run as user services (no root needed)
+If it fails, stop there — the failure tells you what to fix or whether epyc is
+the wrong host.
 
-`systemd --user` keeps both processes alive without sysadmin involvement:
+## 2. Install and start
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/whichneo-update.service deploy/whichneo-update.timer \
-   deploy/whichneo-web.service ~/.config/systemd/user/
-# edit WorkingDirectory to /home/<you>/whichNEO and point ExecStart at
-# .venv/bin/python
-systemctl --user daemon-reload
-systemctl --user enable --now whichneo-update.timer whichneo-web.service
-loginctl enable-linger "$USER"     # survives logout
+./deploy/epyc_setup.sh
 ```
 
-`enable-linger` matters: without it the services stop when you log out.
+Creates a virtualenv (not the shared conda stack — no reason to push
+`waitress`, `beautifulsoup4` and `lxml` into an environment other people use),
+installs dependencies, runs the selftest, primes the database with one cycle,
+then writes and enables `systemd --user` units with the correct absolute
+paths. No root at any point.
 
-Check:
+It also enables lingering, which matters: without it every service stops the
+moment you log out.
+
+Use a different port with `WHICHNEO_PORT=9000 ./deploy/epyc_setup.sh`.
+
+## 3. Check it
 
 ```bash
 systemctl --user status whichneo-web.service
+systemctl --user list-timers whichneo-update.timer
 journalctl --user -u whichneo-update.service -f
 curl -s localhost:8080/status | python3 -m json.tool
 ```
 
-If long-running user processes get reaped on that host, this approach will not
-survive and the answer is Docker on something persistent, or the observatory
-machine.
+If long-running user processes get reaped on that host, this will not survive
+and the answer is Docker on something persistent, or the observatory machine.
 
 ## Reaching it
 
