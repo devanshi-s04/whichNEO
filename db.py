@@ -135,13 +135,17 @@ def connect(path=None):
 
 
 def init(conn):
-    conn.executescript(SCHEMA)
-    # `targets` is rewritten every cycle, so when its columns drift from _COLS
-    # it is safe to rebuild. observer_state and ephemeris_cache are never
-    # dropped -- they hold state the updater cannot regenerate.
+    # Drop a stale `targets` BEFORE running the schema. The schema indexes
+    # columns an older table does not have, so creating it first fails
+    # outright and the migration never gets a chance to run. `targets` is
+    # rewritten every cycle so dropping it costs nothing; observer_state and
+    # ephemeris_cache are never dropped -- they hold state the updater cannot
+    # regenerate.
     have = {r[1] for r in conn.execute("PRAGMA table_info(targets)")}
     if have and have != set(_COLS):
-        conn.executescript("DROP TABLE targets;" + SCHEMA)
+        conn.execute("DROP INDEX IF EXISTS idx_targets_seq")
+        conn.execute("DROP TABLE targets")
+    conn.executescript(SCHEMA)
     conn.commit()
 
 

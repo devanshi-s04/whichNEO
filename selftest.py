@@ -239,6 +239,47 @@ def test_upcoming_cards_look_forward():
           [r["desig"] for r in got])
 
 
+def test_schema_migration_from_older_db():
+    """An existing database with an older `targets` must upgrade cleanly.
+
+    The schema indexes columns an old table lacks, so creating it before
+    dropping the stale table fails outright and the migration never runs --
+    which is exactly what happened on the first real upgrade.
+    """
+    import sqlite3
+
+    import db
+
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.executescript("""
+        CREATE TABLE targets (desig TEXT PRIMARY KEY, score INTEGER, vmag REAL);
+        CREATE TABLE observer_state (desig TEXT PRIMARY KEY, observed INTEGER,
+            observed_at_utc TEXT, hidden INTEGER, priority_bump REAL, note TEXT);
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO targets VALUES ('OLD001', 90, 20.0);
+        INSERT INTO observer_state (desig, observed) VALUES ('KEEPME', 1);
+    """)
+    c.commit()
+
+    db.init(c)
+
+    cols = {r[1] for r in c.execute("PRAGMA table_info(targets)")}
+    check("stale targets table is rebuilt to the current schema",
+          cols == set(db._COLS), f"{len(cols)} cols")
+    kept = c.execute(
+        "SELECT observed FROM observer_state WHERE desig='KEEPME'").fetchone()
+    check("observer state survives the migration",
+          kept is not None and kept["observed"] == 1, kept)
+    check("the index is rebuilt", bool(c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' "
+        "AND name='idx_targets_seq'").fetchone()))
+
+    db.init(c)  # must be idempotent
+    check("init is idempotent on an already-current database",
+          {r[1] for r in c.execute("PRAGMA table_info(targets)")} == set(db._COLS))
+
+
 def test_ranking_bounds():
     rows = [dict(score=100, arc_days=0.0, vmag=config.MAG_BRIGHT),
             dict(score=0, arc_days=99.0, vmag=config.MAX_MAG)]
@@ -281,8 +322,8 @@ def main():
                test_neocp_list_parse, test_neocp_info_column_collision,
                test_ephemeris_row, test_ephemeris_azimuth_convention,
                test_exposure_rule, test_night_bounds, test_chronological_sort,
-               test_upcoming_cards_look_forward, test_ranking_bounds,
-               test_row_rejection_reasons):
+               test_upcoming_cards_look_forward, test_schema_migration_from_older_db,
+               test_ranking_bounds, test_row_rejection_reasons):
         print(f"\n{fn.__name__}:")
         fn()
 
