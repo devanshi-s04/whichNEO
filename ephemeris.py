@@ -250,11 +250,13 @@ _OFFSET_RE = re.compile(r"([+-][0-9]+)\s+([+-][0-9]+).*?Ephemeris #\s*[0-9]+$",
                         re.M)
 
 
-def scatteredness(offsets_url):
-    """Spread of the uncertainty-map points in arcseconds, as (dRA, dDec).
+def offsets(offsets_url):
+    """The variant-orbit offsets behind MPC's uncertainty map.
 
-    Large values mean the predicted position is smeared over more sky than a
-    single pointing can cover.
+    Roughly 2000 (dRA, dDec) pairs in arcseconds from the nominal solution --
+    the points MPC plots. We already pay for this page to compute
+    scatteredness, so keeping the points costs no extra request and lets the
+    board draw the map itself.
     """
     if not offsets_url:
         return None
@@ -264,14 +266,28 @@ def scatteredness(offsets_url):
         pre = BeautifulSoup(r.text, "lxml").find("pre")
         if pre is None:
             return None
-        pts = _OFFSET_RE.findall(pre.get_text())
-        if not pts:
-            return None
-        ras = [int(a) for a, _ in pts]
-        decs = [int(b) for _, b in pts]
-        return (max(ras) - min(ras), max(decs) - min(decs))
+        pts = [(int(a), int(b)) for a, b in _OFFSET_RE.findall(pre.get_text())]
+        return pts or None
     except Exception:
         return None
+
+
+def spread(points):
+    """Extent of the uncertainty cloud in arcseconds, as (dRA, dDec).
+
+    Large values mean the predicted position is smeared over more sky than a
+    single pointing can cover.
+    """
+    if not points:
+        return None
+    ras = [a for a, _ in points]
+    decs = [b for _, b in points]
+    return (max(ras) - min(ras), max(decs) - min(decs))
+
+
+def scatteredness(offsets_url):
+    """Backwards-compatible helper: fetch and reduce in one step."""
+    return spread(offsets(offsets_url))
 
 
 def observed_from_site(observations_url, mpc_code=None):

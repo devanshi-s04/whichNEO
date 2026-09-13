@@ -159,6 +159,16 @@ def load_cache(conn):
                 "SELECT desig, signature, payload FROM ephemeris_cache")}
 
 
+def load_offsets(conn, desig):
+    """Uncertainty-map points for one object, or None if not cached."""
+    row = conn.execute("SELECT payload FROM ephemeris_cache WHERE desig=?",
+                       (desig,)).fetchone()
+    if not row:
+        return None
+    pts = json.loads(row["payload"]).get("offsets")
+    return [tuple(p) for p in pts] if pts else None
+
+
 def save_cache(conn, entries):
     """entries: {desig: (signature, payload dict)}"""
     now = utcnow()

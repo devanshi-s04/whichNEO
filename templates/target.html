@@ -95,8 +95,41 @@
   </section>
 </div>
 
-{% if row.map_url %}
-<p class="note" style="margin-top:16px"><a href="{{ row.map_url }}" rel="noopener">uncertainty map at MPC &rarr;</a></p>
+<h2 class="sect">Sky-plane uncertainty</h2>
+{% if unc_svg %}
+<div class="unc">
+  <div class="uncplot">{{ unc_svg|safe }}</div>
+  <table class="kv uncfacts">
+    <tr><th>Variant orbits</th><td>{{ unc_points }}</td></tr>
+    <tr><th>Cloud extent</th><td>
+      &plusmn;{{ '%.0f'|format(unc_extent[0]) }}&Prime; RA &middot;
+      &plusmn;{{ '%.0f'|format(unc_extent[1]) }}&Prime; Dec</td></tr>
+    <tr><th>Scatteredness</th><td>
+      {% if row.scatteredness %}{{ row.scatteredness[0] }}&Prime; &times; {{ row.scatteredness[1] }}&Prime;
+      {% else %}&mdash;{% endif %}</td></tr>
+    <tr><th>L01 field</th><td>{{ fov }}&Prime; &times; {{ fov }}&Prime;</td></tr>
+    <tr><th>One pointing covers</th><td>
+      {% if unc_coverage is not none %}
+        <strong class="{{ 'cov-full' if unc_coverage >= 0.999 else 'cov-part' }}">{{ '%.1f'|format(unc_coverage * 100) }}%</strong>
+        {% if unc_coverage < 0.999 %}<br><span class="dim">more than one pointing needed</span>{% endif %}
+      {% else %}&mdash;{% endif %}</td></tr>
+  </table>
+</div>
+<p class="note">
+  Drawn from MPC's own variant-orbit offsets &mdash; the same numbers behind
+  their uncertainty map, at the same epoch &mdash; so this should match
+  <a href="{{ row.map_url }}" rel="noopener">MPC's plot</a> point for point.
+  Each dot is one orbit consistent with the observations so far; the ring marks
+  the nominal solution. The field box is drawn only when it is comparable in
+  size to the cloud, otherwise it would be a hundred times off the edge.
+</p>
+{% else %}
+<p class="note">
+  No uncertainty points cached for this target
+  {%- if row.discard_reasons %} &mdash; it was rejected before an ephemeris was
+  fetched ({{ row.discard_reasons|join(', ')|lower|replace('_',' ') }}){% endif %}.
+  {% if row.map_url %}<a href="{{ row.map_url }}" rel="noopener">MPC's map &rarr;</a>{% endif %}
+</p>
 {% endif %}
 
 {% if row.plan_block %}

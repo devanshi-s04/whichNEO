@@ -332,6 +332,44 @@ def test_mpc_markers():
           order == ["plain_early", "flagged_late"], order)
 
 
+def test_uncertainty_plot():
+    """Coverage maths, and the scale decision that keeps the plot readable."""
+    import uncertainty as U
+
+    check("offsets parse out of the MPC page format",
+          [(int(a), int(b)) for a, b in ephemeris._OFFSET_RE.findall(
+              "      +0      +0      Ephemeris #    1\n"
+              "      -4      +3      Ephemeris #    2\n")] == [(0, 0), (-4, 3)])
+
+    tight = [(3, -2), (0, 0), (-5, 4), (10, -9)]
+    check("a cloud inside the field is fully covered",
+          U.coverage(tight, 2600) == 1.0, U.coverage(tight, 2600))
+    check("extent is the half-width in each axis",
+          U.extent(tight) == (10, 9), U.extent(tight))
+
+    # Half these points sit outside a 2600" field.
+    wide = [(0, 0), (5000, 0), (-5000, 0), (100, 100)]
+    check("a cloud larger than the field is partly covered",
+          abs(U.coverage(wide, 2600) - 0.5) < 1e-9, U.coverage(wide, 2600))
+
+    check("spread matches MPC's scatteredness definition",
+          ephemeris.spread(wide) == (10000, 100), ephemeris.spread(wide))
+
+    # The field is drawn only when it would be visible beside the cloud.
+    check("field box omitted when it dwarfs the cloud",
+          "field 2600" not in U.render_svg(tight, 2600))
+    check("field box drawn when the cloud overflows it",
+          "field 2600" in U.render_svg(wide, 2600))
+
+    svg = U.render_svg(tight, 2600)
+    check("one circle drawn per variant orbit, plus the nominal marker",
+          svg.count("<circle") == len(tight) + 1, svg.count("<circle"))
+    check("svg is well formed", svg.startswith("<svg") and svg.endswith("</svg>"))
+
+    check("no points yields no plot rather than an empty frame",
+          U.render_svg([]) is None and U.coverage([]) is None)
+
+
 def test_auth_protects_state_changes():
     """Reads stay open; anything that changes state must be protected once
     credentials are configured. Without this, anyone who can reach the URL
@@ -462,7 +500,7 @@ def main():
                test_exposure_rule, test_night_bounds, test_chronological_sort,
                test_upcoming_cards_look_forward, test_cache_signature_ignores_the_clock,
                test_plan_file_survives_dawn, test_mpc_markers,
-               test_auth_protects_state_changes,
+               test_uncertainty_plot, test_auth_protects_state_changes,
                test_schema_migration_from_older_db,
                test_ranking_bounds, test_row_rejection_reasons):
         print(f"\n{fn.__name__}:")
