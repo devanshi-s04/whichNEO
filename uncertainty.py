@@ -35,6 +35,16 @@ def extent(points):
     return (max(abs(x) for x, _ in points), max(abs(y) for _, y in points))
 
 
+def distinct(points):
+    """How many separate grid positions the variants occupy.
+
+    MPC serves offsets rounded to whole arcseconds. When a cloud is only a
+    few arcseconds across, thousands of variants land on a few positions, and
+    this number says how coarse the sampling has become.
+    """
+    return len(set(points)) if points else 0
+
+
 def _ticks(half):
     """A few round gridline values inside +/- half."""
     for step in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000):
@@ -116,9 +126,26 @@ def render_svg(points, fov_arcsec=None, size=420, title=None):
                      f'fill="#5fc9d4" font-size="9.5" '
                      f'font-family="monospace">field {fov:g}&#8243;</text>')
 
-    parts.append(f'<g fill="#f0a63c" fill-opacity="0.45">')
-    for x, y in points:
-        parts.append(f'<circle cx="{px(x):.1f}" cy="{py(y):.1f}" r="1.5"/>')
+    # MPC's Offsets page rounds to whole arcseconds, so for a tightly
+    # constrained object thousands of variants collapse onto a handful of grid
+    # positions -- P22pOYa's 2000 orbits land on 17. Drawing a dot per variant
+    # would stack them invisibly and look far sparser than MPC's picture,
+    # which is plotted from their unrounded values. Drawing one dot per
+    # position, sized by how many variants share it, puts that density back.
+    counts = {}
+    for p in points:
+        counts[p] = counts.get(p, 0) + 1
+    peak = max(counts.values())
+
+    parts.append('<g fill="#f0a63c">')
+    for (x, y), n in counts.items():
+        frac = (n / peak) ** 0.5          # area, not radius, tracks the count
+        r = 1.3 + 4.2 * frac
+        op = 0.32 + 0.5 * frac
+        parts.append(f'<circle cx="{px(x):.1f}" cy="{py(y):.1f}" '
+                     f'r="{r:.2f}" fill-opacity="{op:.2f}"><title>'
+                     f'{x:+d}&#8243;, {y:+d}&#8243; &mdash; {n} of {len(points)} '
+                     f'variants</title></circle>')
     parts.append("</g>")
 
     # Nominal solution: zero offset by definition.

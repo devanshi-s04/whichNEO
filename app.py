@@ -282,6 +282,7 @@ def target_detail(desig):
             "target.html", row=rows[0],
             unc_svg=uncertainty.render_svg(pts) if pts else None,
             unc_points=len(pts) if pts else 0,
+            unc_distinct=uncertainty.distinct(pts) if pts else 0,
             unc_coverage=cov,
             unc_extent=uncertainty.extent(pts) if pts else None,
             fov=config.FOV_ARCSEC)
