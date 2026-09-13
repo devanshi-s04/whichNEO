@@ -14,6 +14,7 @@ Run: python3 selftest.py
 """
 
 import os
+import re
 import sys
 import time
 
@@ -362,9 +363,26 @@ def test_uncertainty_plot():
           "field 2600" in U.render_svg(wide, 2600))
 
     svg = U.render_svg(tight, 2600)
-    check("one circle drawn per variant orbit, plus the nominal marker",
-          svg.count("<circle") == len(tight) + 1, svg.count("<circle"))
+    check("one circle per distinct position, plus the nominal marker",
+          svg.count("<circle") == len(set(tight)) + 1, svg.count("<circle"))
     check("svg is well formed", svg.startswith("<svg") and svg.endswith("</svg>"))
+
+    # MPC rounds offsets to whole arcseconds, so a small cloud collapses onto
+    # a few grid points. Drawing one dot per variant stacks them invisibly and
+    # looks far sparser than MPC's own picture.
+    stacked = [(0, 0)] * 600 + [(0, 1)] * 300 + [(1, 0)] * 100
+    check("duplicate positions collapse to one dot each",
+          U.distinct(stacked) == 3, U.distinct(stacked))
+    s2 = U.render_svg(stacked, 2600)
+    check("1000 stacked variants draw 3 dots, not 1000",
+          s2.count("<circle") == 4, s2.count("<circle"))
+
+    radii = sorted(float(m) for m in re.findall(r'<circle[^>]*r="([\d.]+)"', s2)
+                   if float(m) < 6.5)
+    check("the busiest position is drawn largest",
+          radii[-1] > radii[0], radii)
+    check("each dot carries its share as a tooltip",
+          s2.count("<title>") == 3, s2.count("<title>"))
 
     check("no points yields no plot rather than an empty frame",
           U.render_svg([]) is None and U.coverage([]) is None)
