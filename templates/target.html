@@ -44,8 +44,48 @@
         {% elif row.note_flag %}<span class="pill warnflag">{{ row.note_flag }}</span>
         {% elif not row.mpc_flag %}<span class="dim">none</span>{% endif %}
       </td></tr>
-      <tr><th>Survey (guess)</th><td>{{ row.survey or '—' }}</td></tr>
     </table>
+  </section>
+
+  <section class="panel">
+    <h2>Who observed it</h2>
+    {% if discovery_site and discovery_site.code %}
+    <table class="kv">
+      <tr><th>Discovered by</th><td>
+        <strong>{{ discovery_site.code }}</strong>
+        {% if discovery_site.name %}<br><span class="dim">{{ discovery_site.name }}</span>{% endif %}
+      </td></tr>
+      {% if discovery_site.telescope %}
+      <tr><th>Telescope</th><td class="dim">{{ discovery_site.telescope }}</td></tr>
+      {% endif %}
+      {% if discovery_site.observers %}
+      <tr><th>Usual observers</th><td>{{ discovery_site.observers }}</td></tr>
+      {% endif %}
+      {% if discovery_site.measurers %}
+      <tr><th>Usual measurers</th><td class="dim">{{ discovery_site.measurers }}</td></tr>
+      {% endif %}
+      {% if other_sites %}
+      <tr><th>Follow-up from</th><td>
+        {% for s in other_sites %}
+          <strong>{{ s.code }}</strong>{% if s.name %} <span class="dim">{{ s.name }}</span>{% endif %}
+          <span class="dim">&times;{{ row.obs_codes[s.code] }}</span>{{ '<br>'|safe if not loop.last }}
+        {% endfor %}
+      </td></tr>
+      {% endif %}
+    </table>
+    <p class="note" style="margin:10px 0 0">
+      Names are the people who <em>usually</em> observe at that site, from
+      Project Pluto's tables. MPC's astrometry records only the observatory
+      code, never the individual, so these are not the observer of this
+      particular object. Automated surveys list a telescope and no people.
+    </p>
+    {% else %}
+    <p class="note" style="margin:0">
+      No astrometry fetched for this target
+      {%- if row.discard_reasons %}, since it was rejected before the
+      observations were retrieved{% endif %}.
+    </p>
+    {% endif %}
   </section>
 
   <section class="panel">

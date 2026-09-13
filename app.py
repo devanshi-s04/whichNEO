@@ -13,6 +13,7 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 import auth
 import config
 import db
+import observatories
 import ranking
 import uncertainty
 
@@ -50,6 +51,12 @@ def localdt(ts):
     if ts is None:
         return "—"
     return datetime.fromtimestamp(float(ts), _TZ).strftime("%Y-%m-%d %H:%M")
+
+
+@app.template_filter("sitename")
+def sitename(code):
+    """Observatory name for a code, for tooltips in the queue."""
+    return observatories.site_name(code) or ""
 
 
 @app.template_filter("utct")
@@ -285,7 +292,12 @@ def target_detail(desig):
             unc_distinct=uncertainty.distinct(pts) if pts else 0,
             unc_coverage=cov,
             unc_extent=uncertainty.extent(pts) if pts else None,
-            fov=config.FOV_ARCSEC)
+            fov=config.FOV_ARCSEC,
+            discovery_site=observatories.lookup(rows[0].get("discovery_code")),
+            other_sites=[observatories.lookup(c)
+                         for c in sorted((rows[0].get("obs_codes") or {}),
+                                         key=lambda c: -rows[0]["obs_codes"][c])
+                         if c != rows[0].get("discovery_code")])
     finally:
         conn.close()
 

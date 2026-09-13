@@ -16,25 +16,10 @@ _UA = {"User-Agent": "visnjan_whichneo/0.2 "
 # are read from the front and the trailing four from the back.
 _MIN_TOKENS = 12
 
-# Designation prefix -> survey. Heuristic only: the tabular feed does not carry
-# the discovering observatory, so this is inferred and may be wrong.
-_SURVEY_PREFIXES = [
-    ("P1", "Pan-STARRS"),
-    ("P2", "Pan-STARRS"),
-    ("A10", "ATLAS"),
-    ("A11", "ATLAS"),
-    ("ZTF", "ZTF"),
-    ("C1", "Catalina"),
-    ("C2", "Catalina"),
-    ("CER", "Cerro Tololo"),
-]
-
-
-def guess_survey(desig):
-    for prefix, name in _SURVEY_PREFIXES:
-        if desig.startswith(prefix):
-            return name
-    return None
+# The discovering observatory used to be guessed from the designation prefix.
+# That heuristic is gone: the real observatory code is read from the object's
+# astrometry, where column 13 marks the discovery record and columns 78-80
+# carry the site. See ephemeris.observations().
 
 
 def parse_neocp(text):
@@ -75,7 +60,6 @@ def parse_neocp(text):
         # "Added" marks a first posting, "Updated" a re-posting -- a free
         # recency signal distinct from the discovery date.
         row["is_new"] = note.strip().lower().startswith("added")
-        row["survey"] = guess_survey(row["desig"])
         rows.append(row)
     return rows
 

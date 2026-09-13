@@ -85,10 +85,10 @@ def run_update(conn, source=None):
         entry = cache.get(t["desig"])
         if entry is None or entry[0] != ephemeris.signature(t):
             return True
-        # Backfill entries cached before uncertainty points were stored. The
-        # key being absent means never fetched; present-but-null means MPC had
-        # none, which must not trigger a refetch every cycle.
-        return "offsets" not in entry[1]
+        # Backfill entries cached before a field existed. A key being absent
+        # means never fetched; present-but-null means MPC had nothing, which
+        # must not trigger a refetch every cycle.
+        return any(k not in entry[1] for k in ("offsets", "obs_codes"))
 
     stale = [t for t in candidates if is_stale(t)]
     fresh = ephemeris.fetch_many(t["desig"] for t in stale)
@@ -104,6 +104,9 @@ def run_update(conn, source=None):
         # One fetch serves both: the spread feeds the filter cascade, the
         # points let the detail page draw the uncertainty map itself.
         pts = ephemeris.offsets(e.offsets_url)
+        # One fetch of the astrometry serves both the already-observed check
+        # and the discovering observatory.
+        obs = ephemeris.observations(e.observations_url) or {}
         return t["desig"], (ephemeris.signature(t), {
             "lines": [r.line for r in e.rows],
             "offsets_url": e.offsets_url,
@@ -111,8 +114,9 @@ def run_update(conn, source=None):
             "observations_url": e.observations_url,
             "offsets": pts,
             "scatteredness": ephemeris.spread(pts),
-            "observed_from_site": ephemeris.observed_from_site(
-                e.observations_url) if config.SKIP_ALREADY_OBSERVED else None,
+            "observed_from_site": obs.get("observed_from_site"),
+            "discovery_code": obs.get("discovery_code"),
+            "obs_codes": obs.get("codes"),
             "error": e.error,
         })
 
@@ -136,7 +140,8 @@ def run_update(conn, source=None):
                      eph_error=None, eph_report={}, map_url=None,
                      offsets_url=None, scatteredness=None,
                      observed_from_site=None, max_alt_row=None,
-                     nearest_row=None, interp_row=None, mpc_flag=None)
+                     nearest_row=None, interp_row=None, mpc_flag=None,
+                     discovery_code=None, obs_codes=None)
             continue
 
         entry = cache.get(t["desig"])
@@ -148,6 +153,8 @@ def run_update(conn, source=None):
         sc = payload.get("scatteredness")
         t["scatteredness"] = tuple(sc) if sc else None
         t["observed_from_site"] = payload.get("observed_from_site")
+        t["discovery_code"] = payload.get("discovery_code")
+        t["obs_codes"] = payload.get("obs_codes")
         pipeline.analyze(t, eph, orbits.get(t["desig"]), now=now)
     mark("analyze")
 
