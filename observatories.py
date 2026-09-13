@@ -60,13 +60,30 @@ def _load_details():
     except OSError:
         return out
 
-    code = None
+    # Current format, three wrinkles:
+    #   COD Multi F51  F52     one block shared by several codes
+    #   COD 249 A              a code with a sub-designation or site name
+    #   COM Valid: ... - ...   several dated rosters stacked under one code,
+    #                          newest first
+    # Only the first roster in a block is kept, so staff from different eras
+    # are never merged into one list. Selecting the roster matching an
+    # observation's date is tracked separately; see TBD.md.
+    codes, roster_index = [], 0
     for line in text.splitlines():
         if line.startswith("COD "):
-            code = line[4:].strip()
-            out.setdefault(code, {})
-        elif code and len(line) > 4 and line[:3] in ("OBS", "MEA", "TEL"):
-            out[code].setdefault(line[:3], []).append(line[4:].strip())
+            tok = line[4:].split()
+            if not tok:
+                continue
+            codes = tok[1:] if tok[0] == "Multi" else tok[:1]
+            roster_index = 0
+            for c in codes:
+                out.setdefault(c, {})
+        elif line.startswith("COM Valid:"):
+            roster_index += 1
+        elif (codes and roster_index <= 1 and len(line) > 4
+              and line[:3] in ("OBS", "MEA", "TEL")):
+            for c in codes:
+                out[c].setdefault(line[:3], []).append(line[4:].strip())
     return out
 
 
