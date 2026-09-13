@@ -14,6 +14,7 @@ import auth
 import config
 import db
 import ranking
+import uncertainty
 
 app = Flask(__name__)
 
@@ -274,7 +275,16 @@ def target_detail(desig):
                 if r["desig"] == desig]
         if not rows:
             return f"Unknown target {desig}", 404
-        return render_template("target.html", row=rows[0])
+        # Drawn from points already cached, so the page makes no network call.
+        pts = db.load_offsets(conn, desig)
+        cov = uncertainty.coverage(pts) if pts else None
+        return render_template(
+            "target.html", row=rows[0],
+            unc_svg=uncertainty.render_svg(pts) if pts else None,
+            unc_points=len(pts) if pts else 0,
+            unc_coverage=cov,
+            unc_extent=uncertainty.extent(pts) if pts else None,
+            fov=config.FOV_ARCSEC)
     finally:
         conn.close()
 

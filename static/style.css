@@ -313,3 +313,17 @@ tr.gone .bang { color: var(--faint); text-shadow: none; }
   color: var(--warn); border-color: rgba(217,164,65,.5);
   background: rgba(217,164,65,.09); font-weight: 700; cursor: help;
 }
+
+/* ---------- uncertainty map ---------- */
+h2.sect {
+  font-size: 10px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--muted); font-weight: 700; margin: 26px 0 10px;
+}
+.unc { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
+.uncplot {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 10px; flex: 0 0 auto;
+}
+.uncfacts { flex: 1 1 260px; min-width: 240px; }
+.cov-full { color: var(--go); }
+.cov-part { color: var(--warn); }

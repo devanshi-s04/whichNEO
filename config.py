@@ -104,6 +104,14 @@ NEO_E_MIN = 0.5                      # legacy
 # Discard objects our own site has already observed.
 SKIP_ALREADY_OBSERVED = True         # legacy
 
+# --- Telescope field ---------------------------------------------------------
+# Square field used to overlay the uncertainty map and report what fraction of
+# an object's cloud one pointing covers.
+# 2600 is Luka's figure. The legacy MPCS tool's own config (MPCS.ini) says
+# FOV = 2562; 1.5% apart, so one of them is rounded or stale. Recorded here so
+# the discrepancy is not lost.
+FOV_ARCSEC = 2600
+
 # --- Exposures ---------------------------------------------------------------
 # The observatory's real rule, recovered from the legacy planner:
 #     minutes = 10 + (magnitude - 18) * 5

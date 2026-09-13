@@ -81,8 +81,16 @@ def run_update(conn, source=None):
     cache = db.load_cache(conn)
     candidates = [t for t in targets if not t["cheap_reject"]]
 
-    stale = [t for t in candidates
-             if cache.get(t["desig"], (None,))[0] != ephemeris.signature(t)]
+    def is_stale(t):
+        entry = cache.get(t["desig"])
+        if entry is None or entry[0] != ephemeris.signature(t):
+            return True
+        # Backfill entries cached before uncertainty points were stored. The
+        # key being absent means never fetched; present-but-null means MPC had
+        # none, which must not trigger a refetch every cycle.
+        return "offsets" not in entry[1]
+
+    stale = [t for t in candidates if is_stale(t)]
     fresh = ephemeris.fetch_many(t["desig"] for t in stale)
     mark("fetch_ephemerides")
 
@@ -93,12 +101,16 @@ def run_update(conn, source=None):
         e = fresh.get(t["desig"])
         if e is None:
             return None
+        # One fetch serves both: the spread feeds the filter cascade, the
+        # points let the detail page draw the uncertainty map itself.
+        pts = ephemeris.offsets(e.offsets_url)
         return t["desig"], (ephemeris.signature(t), {
             "lines": [r.line for r in e.rows],
             "offsets_url": e.offsets_url,
             "map_url": e.map_url,
             "observations_url": e.observations_url,
-            "scatteredness": ephemeris.scatteredness(e.offsets_url),
+            "offsets": pts,
+            "scatteredness": ephemeris.spread(pts),
             "observed_from_site": ephemeris.observed_from_site(
                 e.observations_url) if config.SKIP_ALREADY_OBSERVED else None,
             "error": e.error,
