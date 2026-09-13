@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
+import auth
 import config
 import db
 import ranking
@@ -88,6 +89,7 @@ def status(conn):
         "plan_path": db.get_meta(conn, "plan_path"),
         "ok": db.get_meta(conn, "last_update_ok", "0") == "1",
         "error": db.get_meta(conn, "last_error"),
+        "auth": auth.ENABLED,
         "timings": json.loads(timings) if timings else {},
     }
 
@@ -239,6 +241,7 @@ def plan_text():
 
 
 @app.post("/mark/<desig>")
+@auth.required
 def mark(desig):
     action = request.form.get("action", "observed")
     conn = get_conn()

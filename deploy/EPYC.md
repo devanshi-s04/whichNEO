@@ -37,6 +37,36 @@ moment you log out.
 
 Use a different port with `WHICHNEO_PORT=9000 ./deploy/epyc_setup.sh`.
 
+## 2b. If there is no systemd — keep it alive with cron
+
+```bash
+./deploy/install_keepalive.sh
+```
+
+Adds a `@reboot` entry and a check every 3 minutes. It only acts when
+`/status` stops answering, so a healthy board is never touched. `run.sh`
+supervises its own two children, but nothing supervises `run.sh` — without
+this, a hard crash or a container restart leaves the board down until a human
+notices. Log: `data/keepalive.log`.
+
+## 2c. If the board is reachable from the internet — turn on auth
+
+Reads are open by design: observers should not fumble a password on a dome
+screen to see tonight's targets. But **mark observed, hide and priority
+changes are unauthenticated by default**, so anyone who finds the URL can
+reorder or clear the queue. That is fine on a LAN and not fine on a public
+port.
+
+```bash
+printf 'observer:choose-a-real-password\n' > data/auth
+chmod 600 data/auth
+# restart the web process to pick it up
+```
+
+or set `WHICHNEO_AUTH='observer:...'` in the environment. `data/` is
+gitignored, so the file is never committed. `GET /status` reports whether auth
+is active. With no credentials configured it stays off and nothing changes.
+
 ## 3. Check it
 
 ```bash

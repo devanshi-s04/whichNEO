@@ -292,6 +292,51 @@ def test_plan_file_survives_dawn():
               os.path.exists(p2))
 
 
+def test_auth_protects_state_changes():
+    """Reads stay open; anything that changes state must be protected once
+    credentials are configured. Without this, anyone who can reach the URL
+    can mark targets observed or reorder the queue."""
+    import importlib
+
+    import app as appmod
+
+    client = appmod.app.test_client()
+    for path in ("/", "/status", "/rows"):
+        check(f"{path} readable without credentials",
+              client.get(path).status_code == 200)
+
+    import auth
+    prev_env = os.environ.get("WHICHNEO_AUTH")
+    os.environ["WHICHNEO_AUTH"] = "obs:secret"
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+        check("state change rejected without credentials",
+              c.post("/mark/XYZ", data={"action": "hide"}).status_code == 401)
+        check("state change rejected with the wrong password",
+              c.post("/mark/XYZ", data={"action": "hide"},
+                     headers={"Authorization": "Basic b2JzOndyb25n"}
+                     ).status_code == 401)
+        import base64
+        good = base64.b64encode(b"obs:secret").decode()
+        check("state change accepted with correct credentials",
+              c.post("/mark/XYZ", data={"action": "hide"},
+                     headers={"Authorization": f"Basic {good}"}
+                     ).status_code in (200, 302))
+        check("reads remain open even with auth enabled",
+              c.get("/status").status_code == 200)
+    finally:
+        if prev_env is None:
+            os.environ.pop("WHICHNEO_AUTH", None)
+        else:
+            os.environ["WHICHNEO_AUTH"] = prev_env
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+    check("auth is off when no credentials are configured", not auth.ENABLED)
+
+
 def test_schema_migration_from_older_db():
     """An existing database with an older `targets` must upgrade cleanly.
 
@@ -376,7 +421,8 @@ def main():
                test_ephemeris_row, test_ephemeris_azimuth_convention,
                test_exposure_rule, test_night_bounds, test_chronological_sort,
                test_upcoming_cards_look_forward, test_cache_signature_ignores_the_clock,
-               test_plan_file_survives_dawn, test_schema_migration_from_older_db,
+               test_plan_file_survives_dawn, test_auth_protects_state_changes,
+               test_schema_migration_from_older_db,
                test_ranking_bounds, test_row_rejection_reasons):
         print(f"\n{fn.__name__}:")
         fn()
