@@ -290,9 +290,14 @@ def scatteredness(offsets_url):
     return spread(offsets(offsets_url))
 
 
-def observed_from_site(observations_url, mpc_code=None):
-    """True if our observatory code already appears in this object's
-    astrometry, i.e. we have contributed observations of it already."""
+def observations(observations_url, mpc_code=None):
+    """Who has observed this object, from its 80-column astrometry.
+
+    One fetch answers two questions: whether our own site is already among
+    the observers, and which observatory discovered it. Column 13 carries an
+    asterisk on the discovery record; columns 78-80 are the observatory code.
+    The format records no individual observer, only the site.
+    """
     if not observations_url:
         return None
     code = mpc_code or config.MPC_CODE
@@ -302,7 +307,38 @@ def observed_from_site(observations_url, mpc_code=None):
         r.raise_for_status()
         pre = BeautifulSoup(r.text, "lxml").find("pre")
         text = pre.get_text() if pre else r.text
-        # The observatory code is the final field of each 80-column record.
-        return re.search(rf"{re.escape(code)}\s*$", text, re.M) is not None
     except Exception:
         return None
+
+    return parse_observations(text, code)
+
+
+def parse_observations(text, mpc_code=None):
+    """Split out from the fetch so it can be tested without the network."""
+    code = mpc_code or config.MPC_CODE
+    counts, discovery, first = {}, None, None
+    for line in text.splitlines():
+        if len(line) < 80:
+            continue
+        obscode = line[77:80].strip()
+        if not obscode:
+            continue
+        counts[obscode] = counts.get(obscode, 0) + 1
+        if first is None:
+            first = obscode
+        if discovery is None and line[12] == "*":
+            discovery = obscode
+
+    if not counts:
+        return None
+    return {"codes": counts,
+            # Records are in time order, so the earliest stands in when no
+            # discovery asterisk is present.
+            "discovery_code": discovery or first,
+            "observed_from_site": code in counts}
+
+
+def observed_from_site(observations_url, mpc_code=None):
+    """Backwards-compatible helper."""
+    summary = observations(observations_url, mpc_code)
+    return summary["observed_from_site"] if summary else None

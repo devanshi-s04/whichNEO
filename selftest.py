@@ -333,6 +333,70 @@ def test_mpc_markers():
           order == ["plain_early", "flagged_late"], order)
 
 
+def test_observatory_identification():
+    """Real observatory codes out of the astrometry, and readable names for
+    them from the vendored tables. No Find_Orb execution involved."""
+    import observatories as O
+
+    def rec(code, discovery=False):
+        line = list(" " * 80)
+        line[5:12] = "P22pP3n"
+        line[12] = "*" if discovery else " "
+        line[77:80] = code
+        return "".join(line)
+
+    text = "\n".join([rec("F51", discovery=True), rec("F51"), rec("F51"),
+                      rec("474"), rec("474"), "short line, ignored"])
+    got = ephemeris.parse_observations(text, "L01")
+    check("counts records per observatory",
+          got["codes"] == {"F51": 3, "474": 2}, got["codes"])
+    check("finds the discovery site from the column-13 asterisk",
+          got["discovery_code"] == "F51", got["discovery_code"])
+    check("our own site is correctly absent",
+          got["observed_from_site"] is False)
+    check("our own site is detected when present",
+          ephemeris.parse_observations(text + "\n" + rec("L01"),
+                                       "L01")["observed_from_site"] is True)
+    check("no asterisk falls back to the earliest record",
+          ephemeris.parse_observations(rec("703"), "L01")["discovery_code"] == "703")
+    check("empty astrometry yields nothing rather than a blank record",
+          ephemeris.parse_observations("", "L01") is None)
+
+    sites, details = O.count()
+    check("vendored details parsed", details > 400, details)
+
+    # ObsCodes has two layouts: parallax fields run together on some lines and
+    # are space-padded on others. A regex tuned to the first silently dropped
+    # 1418 of 2361 lines, and went unnoticed because the codes being tested
+    # happened to use that form. Assert almost every line parses.
+    raw = sum(1 for line in open(
+        os.path.join(os.path.dirname(os.path.abspath(O.__file__)),
+                     "mpcdata", "ObsCodes.htm"), encoding="utf-8",
+        errors="replace") if re.match(r"^[A-Z0-9]{3}[ \d]", line))
+    check("nearly every ObsCodes line parses",
+          sites >= raw * 0.98, f"{sites} parsed of {raw} code lines")
+
+    check("compressed-layout code resolves (F51)",
+          "Pan-STARRS" in (O.site_name("F51") or ""), O.site_name("F51"))
+    check("space-padded-layout code resolves (L51)",
+          "Nauchnyi" in (O.site_name("L51") or ""), O.site_name("L51"))
+    check("L01 resolves to Visnjan",
+          "Visnjan" in (O.site_name("L01") or ""), O.site_name("L01"))
+    check("L01 observers include Korlevic",
+          "Korlevic" in (O.lookup("L01")["observers"] or ""),
+          O.lookup("L01")["observers"])
+    check("an automated survey has a telescope but no observers",
+          O.lookup("G96")["telescope"] and not O.lookup("G96")["observers"],
+          O.lookup("G96"))
+    check("an unknown code degrades to nulls, not an exception",
+          O.lookup("ZZZ")["name"] is None)
+
+    check("the designation-prefix survey guess is gone",
+          "survey" not in neocp.parse_neocp(
+              "TR0006  100 2026 09 04.9  21.8863 -14.6396 17.3 "
+              "Added Sept. 8.89 UT              3   0.01 18.5  3.975")[0])
+
+
 def test_uncertainty_plot():
     """Coverage maths, and the scale decision that keeps the plot readable."""
     import uncertainty as U
@@ -518,7 +582,8 @@ def main():
                test_exposure_rule, test_night_bounds, test_chronological_sort,
                test_upcoming_cards_look_forward, test_cache_signature_ignores_the_clock,
                test_plan_file_survives_dawn, test_mpc_markers,
-               test_uncertainty_plot, test_auth_protects_state_changes,
+               test_observatory_identification, test_uncertainty_plot,
+               test_auth_protects_state_changes,
                test_schema_migration_from_older_db,
                test_ranking_bounds, test_row_rejection_reasons):
         print(f"\n{fn.__name__}:")

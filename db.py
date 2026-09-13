@@ -30,9 +30,10 @@ CREATE TABLE IF NOT EXISTS targets (
     not_seen_days        REAL,
     update_note          TEXT,
     is_new               INTEGER,
-    survey               TEXT,
     note_flag            TEXT,
     mpc_flag             TEXT,
+    discovery_code       TEXT,
+    obs_codes            TEXT,
 
     q                    REAL,
     e                    REAL,
@@ -107,7 +108,8 @@ CREATE INDEX IF NOT EXISTS idx_targets_seq
 
 _COLS = [
     "desig", "score", "ra_deg", "dec_deg", "vmag", "hmag", "nobs", "arc_days",
-    "not_seen_days", "update_note", "is_new", "survey", "note_flag", "mpc_flag",
+    "not_seen_days", "update_note", "is_new", "note_flag", "mpc_flag",
+    "discovery_code", "obs_codes",
     "q", "e", "incl",
     "max_alt", "max_alt_ts", "max_alt_utc", "exposure_min", "window_minutes",
     "window_start_ts", "window_end_ts",
@@ -211,6 +213,7 @@ def replace_targets(conn, rows):
         d["observed_from_site"] = None if obs_site is None else int(bool(obs_site))
         d["discard_reasons"] = json.dumps(d.get("discard_reasons") or [])
         d["eph_report"] = json.dumps(d.get("eph_report") or {})
+        d["obs_codes"] = json.dumps(d["obs_codes"]) if d.get("obs_codes") else None
         d["crosscheck"] = json.dumps(d.get("crosscheck")) if d.get("crosscheck") else None
         d["observable"] = int(bool(d.get("observable")))
         d["is_new"] = int(bool(d.get("is_new")))
@@ -244,6 +247,7 @@ def load_targets(conn, include_hidden=False, include_observed=False,
         d = dict(r)
         d["discard_reasons"] = json.loads(d["discard_reasons"] or "[]")
         d["eph_report"] = json.loads(d["eph_report"] or "{}")
+        d["obs_codes"] = json.loads(d["obs_codes"]) if d["obs_codes"] else None
         d["crosscheck"] = json.loads(d["crosscheck"]) if d["crosscheck"] else None
         d["scatteredness"] = ((d["scat_ra"], d["scat_dec"])
                               if d["scat_ra"] is not None else None)
