@@ -13,6 +13,7 @@ Two of these guard against mistakes that would otherwise be invisible:
 Run: python3 selftest.py
 """
 
+import os
 import sys
 import time
 
@@ -239,6 +240,58 @@ def test_upcoming_cards_look_forward():
           [r["desig"] for r in got])
 
 
+def test_cache_signature_ignores_the_clock():
+    """The ephemeris cache key must not move on its own.
+
+    not_seen_days is the age of the last observation, so it advances with the
+    wall clock. Including it invalidated every cached ephemeris on every
+    cycle -- the cache silently did nothing and updates took 80 s instead of
+    2, which looked fine from outside for two days.
+    """
+    base = dict(nobs=4, arc_days=0.04, not_seen_days=0.081)
+    later = dict(nobs=4, arc_days=0.04, not_seen_days=0.084)   # only time passed
+    check("signature is stable as not_seen_days ticks up",
+          ephemeris.signature(base) == ephemeris.signature(later),
+          f"{ephemeris.signature(base)} vs {ephemeris.signature(later)}")
+
+    more_obs = dict(nobs=5, arc_days=0.04, not_seen_days=0.081)
+    check("signature changes when new observations arrive",
+          ephemeris.signature(base) != ephemeris.signature(more_obs))
+    longer_arc = dict(nobs=4, arc_days=0.09, not_seen_days=0.081)
+    check("signature changes when the arc extends",
+          ephemeris.signature(base) != ephemeris.signature(longer_arc))
+
+
+def test_plan_file_survives_dawn():
+    """An empty plan must not overwrite a night's record.
+
+    Nothing is observable after dawn, but the night label does not roll over
+    until 11:00 UT, so every cycle in between rewrites that night's file.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        full = [dict(desig="T1", observable=True, score=90, nobs=5,
+                     arc_days=0.5, not_seen_days=0.1, vmag=20.0,
+                     exposure_min=20.0, q=0.9, e=0.6, sun_elong_deg=120.0,
+                     scatteredness=(4, 5), map_url=None, max_alt_row=None,
+                     nearest_row=None, interp_row=None)]
+        p = output.write_plan(full, "2026-09-11", d)
+        size_with_content = os.path.getsize(p)
+        check("a plan with targets is written", size_with_content > len(output.HEADER))
+
+        # Dawn: same night label, nothing observable any more.
+        output.write_plan([dict(desig="T1", observable=False)], "2026-09-11", d)
+        check("an empty plan does not wipe the night's record",
+              os.path.getsize(p) == size_with_content,
+              f"{os.path.getsize(p)} vs {size_with_content}")
+
+        # A genuinely empty night should still produce a file.
+        p2 = output.write_plan([dict(desig="X", observable=False)], "2026-09-12", d)
+        check("a night with no targets still writes a file",
+              os.path.exists(p2))
+
+
 def test_schema_migration_from_older_db():
     """An existing database with an older `targets` must upgrade cleanly.
 
@@ -322,7 +375,8 @@ def main():
                test_neocp_list_parse, test_neocp_info_column_collision,
                test_ephemeris_row, test_ephemeris_azimuth_convention,
                test_exposure_rule, test_night_bounds, test_chronological_sort,
-               test_upcoming_cards_look_forward, test_schema_migration_from_older_db,
+               test_upcoming_cards_look_forward, test_cache_signature_ignores_the_clock,
+               test_plan_file_survives_dawn, test_schema_migration_from_older_db,
                test_ranking_bounds, test_row_rejection_reasons):
         print(f"\n{fn.__name__}:")
         fn()

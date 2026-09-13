@@ -167,8 +167,15 @@ def from_lines(desig, lines, offsets_url=None, map_url=None,
 
 def signature(target):
     """Changes only when new astrometry has altered the solution, which is
-    the only reason to re-request an ephemeris."""
-    return f"{target['nobs']}|{target['arc_days']}|{target['not_seen_days']}"
+    the only reason to re-request an ephemeris.
+
+    Deliberately excludes not_seen_days. That field is the age of the last
+    observation, so it advances with the wall clock even when nothing about
+    the object has changed -- including it invalidated every cached
+    ephemeris on every cycle, which silently disabled the cache entirely and
+    turned a two-second update into eighty.
+    """
+    return f"{target['nobs']}|{target['arc_days']}"
 
 
 def _post(desig, timeout=None):

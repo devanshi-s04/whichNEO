@@ -112,12 +112,26 @@ def render_plan(targets):
 
 
 def write_plan(targets, night_label, directory=None):
-    """Write plans/<night>.txt and return the path."""
+    """Write plans/<night>.txt and return the path.
+
+    Refuses to replace a plan that has content with an empty one. Once a
+    night ends nothing is observable any more, but the night label does not
+    roll over until 11:00 UT -- so the cycles between dawn and rollover
+    would otherwise overwrite the night's record with a bare header, which
+    is exactly what happened to the first two nights.
+    """
     directory = directory or config.PLAN_DIR
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, f"{night_label}.txt")
+
+    body = render_plan(targets)
+    has_targets = any(t.get("observable") for t in targets)
+    if not has_targets and os.path.exists(path):
+        if os.path.getsize(path) > len(HEADER) + 8:
+            return path
+
     with open(path, "w") as f:
-        f.write(render_plan(targets))
+        f.write(body)
     return path
 
 
