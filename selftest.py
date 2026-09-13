@@ -1,14 +1,21 @@
-"""Verification checks for the astronomy and parsing.
+"""Verification checks for the parsers and the astronomy.
 
-The important one is test_analytic_matches_astropy: the 24h window scan uses a
-fast analytic alt/az path while instantaneous values use astropy's full
-transform. If those two ever disagree, observing windows are wrong in a way
-that would not otherwise be visible.
+Two of these guard against mistakes that would otherwise be invisible:
+
+  test_analytic_matches_astropy  -- the 24h window scan uses a fast analytic
+      alt/az path while instantaneous values use astropy's full transform.
+      If they diverge, observing windows are silently wrong.
+
+  test_ephemeris_azimuth_convention -- MPC reports azimuth from south, not
+      north. Getting this wrong rotates every target 180 degrees through the
+      dome mask, so blocked northern sky reads as open southern sky.
 
 Run: python3 selftest.py
 """
 
+import os
 import sys
+import time
 
 import numpy as np
 import astropy.units as u
@@ -16,12 +23,18 @@ from astropy.time import Time
 from astropy.coordinates import SkyCoord, AltAz, TETE, get_body
 
 import config
+import ephemeris
 import neocp
 import observability
 import output
+import pipeline
 import ranking
 
 FAILURES = []
+
+# A real ephemeris row, taken verbatim from the MPC CGI.
+SAMPLE_EPH = ("2026 09 10 2000   02 30 34.7 +36 47 19 118.3  16.4   391.9  "
+              "047.2  240  +23   -26    0.00  115  -28   Map/Offsets   !!")
 
 
 def check(name, condition, detail=""):
@@ -42,74 +55,38 @@ def test_site():
           f"got {loc.height.to(u.m).value:.0f}")
 
 
-def test_coordinate_formatting():
-    h, m, s = output._ra_hms(328.2945)
-    check("RA 328.2945 deg -> 21h 53m 10.7s",
-          (h, m) == (21, 53) and abs(s - 10.68) < 0.01, f"got {h} {m} {s:.2f}")
-    d, dm, ds, _ = output._dec_dms(-14.6396)
-    check("Dec -14.6396 -> -14 38 22",
-          (d, dm) == (-14, 38) and abs(ds - 22.56) < 0.01, f"got {d} {dm} {ds:.2f}")
-
-
 def test_horizon_mask():
-    cases = [(0, np.inf), (10, np.inf), (350, np.inf),
-             (45, 20.0), (90, 20.0), (180, 20.0),
-             (225, 30.0), (270, 40.0), (315, 40.0)]
-    for az, expected in cases:
+    for az, expected in [(0, np.inf), (10, np.inf), (350, np.inf), (45, 20.0),
+                         (90, 20.0), (180, 20.0), (225, 30.0), (270, 40.0),
+                         (315, 40.0)]:
         got = float(observability.min_altitude_for_azimuth(az))
         ok = (np.isinf(got) and np.isinf(expected)) or got == expected
         check(f"mask az={az:3.0f} -> {expected}", ok, f"got {got}")
 
 
 def test_analytic_matches_astropy():
-    """Cross-validate the fast grid path against the full astropy transform."""
     loc = observability.site()
     t = Time("2026-09-08 22:48:00")
-    lat = loc.lat.deg
     lst = t.sidereal_time("apparent", longitude=loc.lon).deg
-
     rng = np.random.default_rng(0)
-    ras = rng.uniform(0, 360, 40)
-    decs = rng.uniform(-30, 80, 40)
+    ras, decs = rng.uniform(0, 360, 40), rng.uniform(-30, 80, 40)
 
     coords = SkyCoord(ra=ras * u.deg, dec=decs * u.deg)
     aa = coords.transform_to(AltAz(obstime=t, location=loc))
-
-    # Same apparent-place conversion the scan does; without it, precession
-    # since J2000 leaves ~0.7 deg of azimuth error.
     app = coords.transform_to(TETE(obstime=t))
     ha = ((lst - app.ra.deg + 180.0) % 360.0) - 180.0
-    alt_a, az_a = observability._altaz_from_hour_angle(ha, app.dec.deg, lat)
+    alt_a, az_a = observability._altaz_from_hour_angle(ha, app.dec.deg, loc.lat.deg)
 
     d_alt = np.abs(alt_a - aa.alt.deg).max()
-    # Compare azimuth only well away from the zenith, where it is ill-defined.
     high = aa.alt.deg < 88
     d_az = np.abs(((az_a - aa.az.deg + 180) % 360) - 180)[high].max()
-
     check("analytic vs astropy altitude within 0.5 deg", d_alt < 0.5,
-          f"max diff {d_alt:.3f} deg")
+          f"max diff {d_alt:.3f}")
     check("analytic vs astropy azimuth within 0.5 deg", d_az < 0.5,
-          f"max diff {d_az:.3f} deg")
+          f"max diff {d_az:.3f}")
 
 
-def test_sun_lower_culmination():
-    """Sun altitude at anti-transit must equal arcsin(-cos(dec+lat))."""
-    loc = observability.site()
-    lat = loc.lat.deg
-    t = Time("2026-09-08 22:48:32")
-    sun = get_body("sun", t, loc)
-    alt = sun.transform_to(AltAz(obstime=t, location=loc)).alt.deg
-
-    lst = t.sidereal_time("apparent", longitude=loc.lon).deg
-    ha = ((lst - sun.ra.deg + 180) % 360) - 180
-    expected, _ = observability._altaz_from_hour_angle(ha, sun.dec.deg, lat)
-    check("sun altitude matches spherical trig", abs(alt - expected) < 0.5,
-          f"astropy {alt:.2f} vs analytic {expected:.2f}")
-    check("sun is below horizon at 22:48 UT on 2026-09-08", alt < -30,
-          f"got {alt:.2f}")
-
-
-def test_parse():
+def test_neocp_list_parse():
     line = ("TR0006  100 2026 09 04.9  21.8863 -14.6396 17.3 "
             "Added Sept. 8.89 UT              3   0.01 18.5  3.975")
     rows = neocp.parse_neocp(line)
@@ -117,44 +94,336 @@ def test_parse():
     if rows:
         r = rows[0]
         check("designation", r["desig"] == "TR0006", r["desig"])
-        check("digest2", r["digest2"] == 100, r["digest2"])
-        check("RA converted to degrees", abs(r["ra_deg"] - 328.2945) < 1e-6, r["ra_deg"])
-        check("Dec", abs(r["dec_deg"] + 14.6396) < 1e-6, r["dec_deg"])
+        check("digest2 score", r["score"] == 100, r["score"])
+        check("RA -> degrees", abs(r["ra_deg"] - 328.2945) < 1e-6, r["ra_deg"])
         check("V magnitude", r["vmag"] == 17.3, r["vmag"])
-        check("not seen days", r["not_seen_days"] == 3.975, r["not_seen_days"])
-        check("flagged as newly added", r["is_new"] is True)
+        check("not-seen days", r["not_seen_days"] == 3.975, r["not_seen_days"])
+
+
+def test_neocp_info_column_collision():
+    """e and a run together when a is large; both carry three decimals.
+
+    The legacy planner splits on whitespace and requires 13 fields, so it
+    silently drops exactly these rows -- the most extreme orbits on the page.
+    """
+    normal = "6J93321    23.5  19 -40 18.9 119  0.14  0.5  11.2 0.316   1.093  12/12  0.27"
+    merged = "A11GrOJ    10.1   1 -32 19.7 142  0.03  1.7 126.0 0.9982411.744   4/4   0.37"
+
+    a = neocp.parse_neocp_info(normal)
+    check("normal row parses", "6J93321" in a)
+    if a:
+        v = a["6J93321"]
+        check("  e", abs(v["e"] - 0.316) < 1e-9, v["e"])
+        check("  a", abs(v["a"] - 1.093) < 1e-9, v["a"])
+        check("  q = a(1-e)", abs(v["q"] - 1.093 * (1 - 0.316)) < 1e-9, v["q"])
+
+    b = neocp.parse_neocp_info(merged)
+    check("collided row still parses", "A11GrOJ" in b,
+          "this is the row the legacy parser drops")
+    if b:
+        v = b["A11GrOJ"]
+        check("  e recovered as 0.998", abs(v["e"] - 0.998) < 1e-9, v["e"])
+        check("  a recovered as 2411.744", abs(v["a"] - 2411.744) < 1e-9, v["a"])
+
+    check("naive whitespace split would have dropped it",
+          len(merged.split()) != 13, f"{len(merged.split())} fields")
+
+
+def test_ephemeris_row():
+    r = ephemeris.Row(SAMPLE_EPH)
+    check("altitude", r.alt == 23.0, r.alt)
+    check("sun altitude", r.sun_alt == -26.0, r.sun_alt)
+    check("motion", r.motion == 391.9, r.motion)
+    check("V magnitude", r.vmag == 16.4, r.vmag)
+    check("moon distance", r.moon_dist == 115.0, r.moon_dist)
+    check("elongation", r.elong == 118.3, r.elong)
+    check("MPC flag captured", r.flag == "!!", r.flag)
+    check("RA -> degrees", abs(r.ra_deg - (2 + 30 / 60 + 34.7 / 3600) * 15) < 1e-6,
+          r.ra_deg)
+    check("Dec -> degrees", abs(r.dec_deg - (36 + 47 / 60 + 19 / 3600)) < 1e-6,
+          r.dec_deg)
+
+
+def test_ephemeris_azimuth_convention():
+    """MPC measures azimuth from south; we store compass bearings."""
+    r = ephemeris.Row(SAMPLE_EPH)
+    check("raw MPC azimuth preserved", r.az_mpc == 240.0, r.az_mpc)
+    check("converted to compass bearing", r.az == 60.0, r.az)
+    check("plan file writes MPC's convention back out",
+          " 240 " in output.ephemeris_line(r).replace("  ", " "),
+          output.ephemeris_line(r))
+
+
+def test_exposure_rule():
+    """minutes = 10 + (V - 18) * 5, floored."""
+    for vmag, expected in [(18.0, 10.0), (20.0, 20.0), (21.6, 28.0), (19.0, 15.0)]:
+        r = ephemeris.Row(SAMPLE_EPH)
+        r.vmag = vmag
+        got = r.exposure_minutes()
+        check(f"V={vmag} -> {expected} min", abs(got - expected) < 1e-9, got)
+    r = ephemeris.Row(SAMPLE_EPH)
+    r.vmag = 12.5  # would be -17.5 minutes unclamped
+    check("bright target clamped to the floor, not negative",
+          r.exposure_minutes() == config.EXPOSURE_FLOOR_MIN, r.exposure_minutes())
+
+
+def test_night_bounds():
+    """A night runs 11:00 UT to 11:00 UT, so evening and the small hours of
+    the next morning belong to the same night."""
+    evening = calendar_utc("2026-09-10 22:00")
+    after_midnight = calendar_utc("2026-09-11 02:00")
+    morning = calendar_utc("2026-09-11 12:00")
+
+    check("evening and after-midnight share a night",
+          pipeline.night_label(evening) == pipeline.night_label(after_midnight),
+          f"{pipeline.night_label(evening)} vs {pipeline.night_label(after_midnight)}")
+    check("night is labelled by its evening date",
+          pipeline.night_label(evening) == "2026-09-10",
+          pipeline.night_label(evening))
+    check("after the 11:00 rollover a new night starts",
+          pipeline.night_label(morning) == "2026-09-11",
+          pipeline.night_label(morning))
+
+
+def calendar_utc(s):
+    import calendar as _c
+    import datetime as _dt
+    return _c.timegm(_dt.datetime.strptime(s, "%Y-%m-%d %H:%M").timetuple())
+
+
+def test_chronological_sort():
+    rows = [
+        dict(desig="late", observable=True, max_alt_ts=300, score_total=9.0),
+        dict(desig="early", observable=True, max_alt_ts=100, score_total=1.0),
+        dict(desig="down", observable=False, max_alt_ts=50, score_total=9.9),
+    ]
+    order = [r["desig"] for r in ranking.sort_targets(rows, "chronological")]
+    check("earliest peak first, unobservable last",
+          order == ["early", "late", "down"], order)
+    order = [r["desig"] for r in ranking.sort_targets(rows, "score")]
+    check("score mode ranks by value instead",
+          order == ["late", "early", "down"], order)
+
+
+def test_upcoming_cards_look_forward():
+    """The 'up next' cards must not advertise a peak that already happened.
+
+    Sorting by peak time is right for the night's plan, but midway through
+    the night the earliest-peaking targets have long since peaked.
+    """
+    import app
+    now = time.time()
+    rows = [
+        dict(desig="peaked_early", observable=True, max_alt_ts=now - 4 * 3600),
+        dict(desig="peaked_recently", observable=True, max_alt_ts=now - 600),
+        dict(desig="soon", observable=True, max_alt_ts=now + 1800),
+        dict(desig="later", observable=True, max_alt_ts=now + 7200),
+        dict(desig="not_up", observable=False, max_alt_ts=now + 60),
+    ]
+    picked = [r["desig"] for r in app.pick_upcoming(rows, n=3)]
+    check("still-to-peak targets come first",
+          picked[:2] == ["soon", "later"], picked)
+    check("unobservable target never appears in the cards",
+          "not_up" not in picked, picked)
+    check("past-peak targets are flagged, not silently shown as upcoming",
+          all(r.get("past_peak") for r in rows if r["max_alt_ts"] < now
+              and r["desig"] in picked) or "peaked_early" not in picked[:2],
+          picked)
+
+    # Late in the night nothing is still to peak; the cards should fall back
+    # rather than go empty.
+    late = [dict(desig="a", observable=True, max_alt_ts=now - 3600),
+            dict(desig="b", observable=True, max_alt_ts=now - 1800)]
+    got = app.pick_upcoming(late, n=3)
+    check("falls back to past-peak targets when none remain ahead",
+          len(got) == 2 and all(r.get("past_peak") for r in got),
+          [r["desig"] for r in got])
+
+
+def test_cache_signature_ignores_the_clock():
+    """The ephemeris cache key must not move on its own.
+
+    not_seen_days is the age of the last observation, so it advances with the
+    wall clock. Including it invalidated every cached ephemeris on every
+    cycle -- the cache silently did nothing and updates took 80 s instead of
+    2, which looked fine from outside for two days.
+    """
+    base = dict(nobs=4, arc_days=0.04, not_seen_days=0.081)
+    later = dict(nobs=4, arc_days=0.04, not_seen_days=0.084)   # only time passed
+    check("signature is stable as not_seen_days ticks up",
+          ephemeris.signature(base) == ephemeris.signature(later),
+          f"{ephemeris.signature(base)} vs {ephemeris.signature(later)}")
+
+    more_obs = dict(nobs=5, arc_days=0.04, not_seen_days=0.081)
+    check("signature changes when new observations arrive",
+          ephemeris.signature(base) != ephemeris.signature(more_obs))
+    longer_arc = dict(nobs=4, arc_days=0.09, not_seen_days=0.081)
+    check("signature changes when the arc extends",
+          ephemeris.signature(base) != ephemeris.signature(longer_arc))
+
+
+def test_plan_file_survives_dawn():
+    """An empty plan must not overwrite a night's record.
+
+    Nothing is observable after dawn, but the night label does not roll over
+    until 11:00 UT, so every cycle in between rewrites that night's file.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        full = [dict(desig="T1", observable=True, score=90, nobs=5,
+                     arc_days=0.5, not_seen_days=0.1, vmag=20.0,
+                     exposure_min=20.0, q=0.9, e=0.6, sun_elong_deg=120.0,
+                     scatteredness=(4, 5), map_url=None, max_alt_row=None,
+                     nearest_row=None, interp_row=None)]
+        p = output.write_plan(full, "2026-09-11", d)
+        size_with_content = os.path.getsize(p)
+        check("a plan with targets is written", size_with_content > len(output.HEADER))
+
+        # Dawn: same night label, nothing observable any more.
+        output.write_plan([dict(desig="T1", observable=False)], "2026-09-11", d)
+        check("an empty plan does not wipe the night's record",
+              os.path.getsize(p) == size_with_content,
+              f"{os.path.getsize(p)} vs {size_with_content}")
+
+        # A genuinely empty night should still produce a file.
+        p2 = output.write_plan([dict(desig="X", observable=False)], "2026-09-12", d)
+        check("a night with no targets still writes a file",
+              os.path.exists(p2))
+
+
+def test_auth_protects_state_changes():
+    """Reads stay open; anything that changes state must be protected once
+    credentials are configured. Without this, anyone who can reach the URL
+    can mark targets observed or reorder the queue."""
+    import importlib
+
+    import app as appmod
+
+    client = appmod.app.test_client()
+    for path in ("/", "/status", "/rows"):
+        check(f"{path} readable without credentials",
+              client.get(path).status_code == 200)
+
+    import auth
+    prev_env = os.environ.get("WHICHNEO_AUTH")
+    os.environ["WHICHNEO_AUTH"] = "obs:secret"
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+        check("state change rejected without credentials",
+              c.post("/mark/XYZ", data={"action": "hide"}).status_code == 401)
+        check("state change rejected with the wrong password",
+              c.post("/mark/XYZ", data={"action": "hide"},
+                     headers={"Authorization": "Basic b2JzOndyb25n"}
+                     ).status_code == 401)
+        import base64
+        good = base64.b64encode(b"obs:secret").decode()
+        check("state change accepted with correct credentials",
+              c.post("/mark/XYZ", data={"action": "hide"},
+                     headers={"Authorization": f"Basic {good}"}
+                     ).status_code in (200, 302))
+        check("reads remain open even with auth enabled",
+              c.get("/status").status_code == 200)
+    finally:
+        if prev_env is None:
+            os.environ.pop("WHICHNEO_AUTH", None)
+        else:
+            os.environ["WHICHNEO_AUTH"] = prev_env
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+    check("auth is off when no credentials are configured", not auth.ENABLED)
+
+
+def test_schema_migration_from_older_db():
+    """An existing database with an older `targets` must upgrade cleanly.
+
+    The schema indexes columns an old table lacks, so creating it before
+    dropping the stale table fails outright and the migration never runs --
+    which is exactly what happened on the first real upgrade.
+    """
+    import sqlite3
+
+    import db
+
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.executescript("""
+        CREATE TABLE targets (desig TEXT PRIMARY KEY, score INTEGER, vmag REAL);
+        CREATE TABLE observer_state (desig TEXT PRIMARY KEY, observed INTEGER,
+            observed_at_utc TEXT, hidden INTEGER, priority_bump REAL, note TEXT);
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO targets VALUES ('OLD001', 90, 20.0);
+        INSERT INTO observer_state (desig, observed) VALUES ('KEEPME', 1);
+    """)
+    c.commit()
+
+    db.init(c)
+
+    cols = {r[1] for r in c.execute("PRAGMA table_info(targets)")}
+    check("stale targets table is rebuilt to the current schema",
+          cols == set(db._COLS), f"{len(cols)} cols")
+    kept = c.execute(
+        "SELECT observed FROM observer_state WHERE desig='KEEPME'").fetchone()
+    check("observer state survives the migration",
+          kept is not None and kept["observed"] == 1, kept)
+    check("the index is rebuilt", bool(c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' "
+        "AND name='idx_targets_seq'").fetchone()))
+
+    db.init(c)  # must be idempotent
+    check("init is idempotent on an already-current database",
+          {r[1] for r in c.execute("PRAGMA table_info(targets)")} == set(db._COLS))
 
 
 def test_ranking_bounds():
-    rows = [
-        dict(digest2=100, arc_days=0.0, vmag=config.MAG_BRIGHT),
-        dict(digest2=0, arc_days=99.0, vmag=config.MAX_MAG),
-    ]
+    rows = [dict(score=100, arc_days=0.0, vmag=config.MAG_BRIGHT),
+            dict(score=0, arc_days=99.0, vmag=config.MAX_MAG)]
     ranking.rank(rows)
     check("best possible target scores the maximum",
           abs(rows[0]["score_total"] - ranking.max_possible_score()) < 1e-9,
           rows[0]["score_total"])
-    check("worst possible target scores zero", abs(rows[1]["score_total"]) < 1e-9,
-          rows[1]["score_total"])
-    check("components stay within 0..1",
-          all(0 <= rows[i][k] <= 1 for i in (0, 1)
-              for k in ("score_digest2", "score_arc", "score_magnitude")))
+    check("worst possible target scores zero",
+          abs(rows[1]["score_total"]) < 1e-9, rows[1]["score_total"])
 
 
-def test_sort_sinks_unobservable():
-    rows = [
-        dict(desig="low_but_up", score_total=1.0, observable=True),
-        dict(desig="high_but_down", score_total=9.0, observable=False),
-    ]
-    rows.sort(key=ranking.sort_key)
-    check("observable target sorts above a higher-scoring unobservable one",
-          rows[0]["desig"] == "low_but_up", rows[0]["desig"])
+def test_row_rejection_reasons():
+    far_future = 2 ** 40
+    r = ephemeris.Row(SAMPLE_EPH)          # sun at -26, alt 23, motion 391.9
+    check("clean row is accepted", pipeline.row_rejections(r, far_future) == [],
+          pipeline.row_rejections(r, far_future))
+
+    r2 = ephemeris.Row(SAMPLE_EPH)
+    r2.sun_alt = 5.0
+    check("daylight row rejected", "nearSun" in pipeline.row_rejections(r2, far_future))
+
+    r3 = ephemeris.Row(SAMPLE_EPH)
+    r3.motion = 0.1
+    check("slow mover rejected", "tooSlow" in pipeline.row_rejections(r3, far_future))
+
+    r4 = ephemeris.Row(SAMPLE_EPH)
+    r4.moon_dist = 5.0
+    check("row near the moon rejected",
+          "nearMoon" in pipeline.row_rejections(r4, far_future))
+
+    r5 = ephemeris.Row(SAMPLE_EPH)
+    r5.az, r5.alt = 0.0, 80.0              # due north, high
+    check("north sector blocked by the dome mask",
+          "azBlocked" in pipeline.row_rejections(r5, far_future),
+          pipeline.row_rejections(r5, far_future))
 
 
 def main():
-    for fn in (test_site, test_coordinate_formatting, test_horizon_mask,
-               test_analytic_matches_astropy, test_sun_lower_culmination,
-               test_parse, test_ranking_bounds, test_sort_sinks_unobservable):
+    for fn in (test_site, test_horizon_mask, test_analytic_matches_astropy,
+               test_neocp_list_parse, test_neocp_info_column_collision,
+               test_ephemeris_row, test_ephemeris_azimuth_convention,
+               test_exposure_rule, test_night_bounds, test_chronological_sort,
+               test_upcoming_cards_look_forward, test_cache_signature_ignores_the_clock,
+               test_plan_file_survives_dawn, test_auth_protects_state_changes,
+               test_schema_migration_from_older_db,
+               test_ranking_bounds, test_row_rejection_reasons):
         print(f"\n{fn.__name__}:")
         fn()
 

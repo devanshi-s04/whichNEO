@@ -5,6 +5,9 @@ import requests
 
 import config
 
+_UA = {"User-Agent": "visnjan_whichneo/0.2 "
+                     "(Visnjan Observatory L01 follow-up planning)"}
+
 # Columns in neocp.txt, in order:
 #   desig  score  Y M D.d  RA(hours)  Dec(deg)  V  <"Added|Updated <date> UT">
 #   NObs  Arc(days)  H  NotSeen(days)
@@ -44,7 +47,7 @@ def parse_neocp(text):
         try:
             row = dict(
                 desig=tok[0],
-                digest2=int(tok[1]),
+                score=int(tok[1]),  # MPC's digest2 NEO score
                 disc_year=int(tok[2]),
                 disc_month=int(tok[3]),
                 disc_day=float(tok[4]),
@@ -73,9 +76,56 @@ def fetch_neocp(url=None, timeout=None):
     """Download the live NEOCP list. Raises on HTTP or network failure."""
     url = url or config.NEOCP_URL
     timeout = timeout or config.NEOCP_TIMEOUT_S
-    r = requests.get(url, timeout=timeout, headers={
-        "User-Agent": "visnjan_whichneo/0.1 (Visnjan Observatory L01 follow-up planning)"
-    })
+    r = requests.get(url, timeout=timeout, headers=_UA)
+    r.raise_for_status()
+    return r.text
+
+
+# --- neocp_info: orbital parameters ----------------------------------------
+#
+# Fixed-width table, e.g.
+#   desig        H   ra dec  V  elong  arc  gap    i    e       a  used/nobs rms C
+#   6J93321    23.5  19 -40 18.9 119  0.14  0.5  11.2 0.316   1.093  12/12  0.27
+#
+# Both e and a are printed with exactly three decimals, and when a is large the
+# two columns run together with no separating space:
+#   A11GrOJ    10.1   1 -32 19.7 142  0.03  1.7 126.0 0.9982411.744   4/4  0.37
+#                                                     ^^^^^^^^^^^^ e=0.998 a=2411.744
+# Anchoring on the three-decimal shape recovers those rows. Splitting on
+# whitespace and requiring 13 fields — what the legacy planner does — silently
+# drops them, and they are exactly the extreme orbits worth looking at.
+_INFO_RE = re.compile(
+    r"^(?P<desig>\S+)\s+(?P<H>-?[\d.]+)\s+(?P<ra>-?\d+)\s+(?P<dec>-?\d+)\s+"
+    r"(?P<V>[\d.]+)\s+(?P<elong>\d+)\s+(?P<arc>[\d.]+)\s+(?P<gap>[\d.]+)\s+"
+    r"(?P<i>[\d.]+)\s+(?P<e>\d+\.\d{3})\s*(?P<a>\d+\.\d{3})\s+"
+    r"(?P<used>\d+)/(?P<nobs>\d+)\s+(?P<rms>[\d.]+)"
+)
+
+
+def parse_neocp_info(text):
+    """Parse the neocp_info table into {designation: {q, e, a, i, ...}}."""
+    out = {}
+    for line in text.splitlines():
+        line = line.split("<a href")[0].rstrip()
+        m = _INFO_RE.match(line)
+        if not m:
+            continue
+        g = m.groupdict()
+        e, a = float(g["e"]), float(g["a"])
+        q = a * (1.0 - e)
+        out[g["desig"]] = dict(
+            q=q if q > 0 else None,  # a*(1-e) is meaningless for e >= 1
+            e=e, a=a, incl=float(g["i"]), abs_mag=float(g["H"]),
+            used=int(g["used"]), nobs_info=int(g["nobs"]), rms=float(g["rms"]),
+        )
+    return out
+
+
+def fetch_neocp_info(timeout=None):
+    """Orbital parameters for everything currently on NEOCP. One request."""
+    r = requests.get(config.NEOCP_INFO_URL,
+                     timeout=timeout or config.NEOCP_TIMEOUT_S,
+                     headers=_UA)
     r.raise_for_status()
     return r.text
 
@@ -94,8 +144,6 @@ def fetch_ephemeris(desig, timeout=30):
     url = ephemeris_url(desig)
     if not url.startswith(config.ALLOWED_HOSTS):
         raise ValueError(f"refusing to fetch disallowed URL: {url}")
-    r = requests.get(url, timeout=timeout, headers={
-        "User-Agent": "visnjan_whichneo/0.1 (Visnjan Observatory L01 follow-up planning)"
-    })
+    r = requests.get(url, timeout=timeout, headers=_UA)
     r.raise_for_status()
     return r.text

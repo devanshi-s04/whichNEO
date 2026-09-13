@@ -7,82 +7,192 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
+<div class="wrap">
 
-<header>
-  <h1>WhichNEO <span class="sub">NEOCP follow-up &middot; L01 Ti&#269;an / Vi&#353;njan</span></h1>
-  <div class="status">
-    <span class="dot {{ 'ok' if status.ok else 'bad' }}"></span>
-    Last NEOCP update: <strong id="last-update">{{ status.last_update_utc }} UTC</strong>
-    &middot; <span id="count">{{ status.count }}</span> targets
-    {% if status.timings %}
-      &middot; cycle {{ status.timings.get('total', '?') }} ms
-    {% endif %}
-    {% if not status.ok and status.error %}
-      <span class="err">&middot; {{ status.error }}</span>
+<div class="top">
+  <div class="brand">
+    <h1>Which<b>NEO</b></h1>
+    <div class="where">L01 &middot; TI&#268;AN STATION, VI&#352;NJAN &middot; 45.2909&deg;N 13.74930&deg;E 381 m &middot; 1.0-m f/2.9</div>
+  </div>
+  <div class="live">
+    <div class="stat"><div class="k">Night</div>
+      <div class="v">{{ status.night }}</div></div>
+    <div class="stat"><div class="k">Observable</div>
+      <div class="v amber">{{ status.observable }} <small>/ {{ status.count }}</small></div></div>
+    <div class="stat"><div class="k">Last update</div>
+      <div class="v {{ 'go' if status.ok else 'bad' }}" id="last-update">{{ status.last_update_ts|localt }}<small> {{ tzname }}</small></div></div>
+    <div class="stat"><div class="k">Cycle</div>
+      <div class="v">{{ '%.1f'|format((status.timings.get('total',0))/1000) }}<small>s</small></div></div>
+    {% if status.mismatches and status.mismatches != '0' %}
+    <div class="stat"><div class="k">Cross-check</div>
+      <div class="v bad">{{ status.mismatches }}</div></div>
     {% endif %}
   </div>
-</header>
+</div>
 
-<nav class="filters">
-  <a href="{{ url_for('index') }}" class="{{ '' if show_observed or show_hidden else 'active' }}">Active queue</a>
-  <a href="{{ url_for('index', observed=1) }}" class="{{ 'active' if show_observed else '' }}">Include observed</a>
-  <a href="{{ url_for('index', hidden=1) }}" class="{{ 'active' if show_hidden else '' }}">Include hidden</a>
-  <span class="legend">
-    Limits: mag &le; {{ config.MAX_MAG }} &middot; sun &lt; {{ config.SUN_ALT_MAX }}&deg;
-    &middot; moon sep &ge; {{ config.MOON_SEP_MIN }}&deg; &middot; horizon mask active
-    <a href="#" onclick="document.getElementById('mask').open=true;return false;">(mask)</a>
-  </span>
-</nav>
-
-<details id="mask" class="mask">
-  <summary>Dome / horizon mask &mdash; <strong>TBD, needs confirmation from Luka</strong></summary>
-  <table class="masktable">
-    <tr><th>Sector</th><th>Azimuth</th><th>Min altitude</th></tr>
-    {% for start, end, minalt in config.HORIZON_MASK %}
-    <tr>
-      <td>{{ ['N','NE','E','SE','S','SW','W','NW'][loop.index0] }}</td>
-      <td>{{ start }}&ndash;{{ end }}&deg;</td>
-      <td>{{ 'BLOCKED' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td>
-    </tr>
+{% if strip %}
+<section class="strip">
+  <h2>Tonight</h2>
+  <p class="cap">Observable window for each target,
+    {{ strip.start }}&ndash;{{ strip.end }} {{ tzname }}
+    <span class="dim">({{ strip.start_ut }}&ndash;{{ strip.end_ut }} UT)</span>.
+    The dot marks its best altitude &mdash; that is where it sits in the running order.</p>
+  <div class="axis">
+    {% for h in strip.hours %}<span style="left:{{ h.pct }}%">{{ h.label }}</span>{% endfor %}
+  </div>
+  <div class="lanes">
+    {% if strip.now_pct is not none %}
+      <div class="nowline" style="left:calc(104px + (100% - 104px) * {{ strip.now_pct }} / 100)"></div>
+    {% endif %}
+    {% for l in strip.lanes %}
+    <div class="lane">
+      <div class="who">{{ l.desig }}</div>
+      <div class="track">
+        <div class="bar" style="left:{{ l.left }}%;width:{{ l.width }}%"></div>
+        {% if l.peak is not none %}
+          <div class="peak" style="left:{{ l.peak }}%" title="best altitude {{ '%.0f'|format(l.alt) }}&deg;"></div>
+        {% endif %}
+      </div>
+    </div>
     {% endfor %}
+  </div>
+  {% if strip.hidden %}<p class="cap" style="margin:9px 0 0">&hellip;and {{ strip.hidden }} more below.</p>{% endif %}
+</section>
+{% endif %}
+
+{% if upcoming %}
+<section class="next">
+  {% for r in upcoming %}
+  <article class="card {{ 'lead' if loop.first else '' }}">
+    <div class="when">
+      {%- if loop.first and not r.past_peak %}UP NEXT &middot; {% endif -%}
+      {%- if r.past_peak %}PAST BEST &middot; PEAKED{% else %}PEAKS{% endif %}
+      {{ r.max_alt_ts|localt }} {{ tzname }}
+      <span class="dim">/ {{ r.max_alt_ts|utct }} UT</span></div>
+    <div class="name"><a href="{{ url_for('target_detail', desig=r.desig) }}">{{ r.desig }}</a></div>
+    <div class="facts">
+      <div><div class="k">Exposure</div><div class="n">{{ '%.0f'|format(r.exposure_min) if r.exposure_min else '—' }}<span class="dim"> min</span></div></div>
+      <div><div class="k">Mag</div><div class="n">{{ '%.1f'|format(r.vmag) }}</div></div>
+      <div><div class="k">Alt</div><div class="n">{{ '%.0f'|format(r.max_alt) if r.max_alt else '—' }}&deg;</div></div>
+      <div><div class="k">Motion</div><div class="n">{{ '%.1f'|format(r.cur_motion) if r.cur_motion is not none else '—' }}<span class="dim">&Prime;/m</span></div></div>
+      <div><div class="k">Score</div><div class="n">{{ r.score }}</div></div>
+      <div><div class="k">Moon</div><div class="n">{{ '%.0f'|format(r.cur_moon_dist) if r.cur_moon_dist is not none else '—' }}&deg;</div></div>
+    </div>
+    {% if r.plan_block %}<pre>{{ r.plan_block.split('\n')[-1] }}</pre>{% endif %}
+  </article>
+  {% endfor %}
+</section>
+{% endif %}
+
+<div class="bar-row">
+  <div class="seg">
+    <a href="{{ url_for('index', sort='chronological') }}" class="{{ 'on' if mode != 'score' }}">Sequence</a>
+    <a href="{{ url_for('index', sort='score') }}" class="{{ 'on' if mode == 'score' }}">By value</a>
+  </div>
+  <a class="chip {{ 'on' if show_observed }}" href="{{ url_for('index', sort=mode, observed=1) }}">observed</a>
+  <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=1) }}">hidden</a>
+  <a class="chip" href="{{ url_for('plan_text') }}">plan file</a>
+  <span class="rules">
+    score&nbsp;&ge;&nbsp;{{ config.MIN_SCORE }} &middot; V&nbsp;&le;&nbsp;{{ config.MAX_MAG }} &middot;
+    motion&nbsp;&ge;&nbsp;{{ config.MIN_MOTION }}&Prime;/min &middot; moon&nbsp;&ge;&nbsp;{{ config.MOON_SEP_MIN }}&deg; &middot;
+    sun&nbsp;&lt;&nbsp;{{ config.SUN_ALT_MAX }}&deg;
+  </span>
+</div>
+
+<div class="panel tablewrap">
+  <table class="grid">
+    <thead><tr>
+      <th class="l">#</th><th>Peak</th><th class="l">Target</th>
+      <th>Score</th><th>V</th><th>Exp</th><th>&Prime;/min</th>
+      <th>Alt</th><th>Az</th><th>Moon</th><th>Unseen</th><th>q / e</th>
+      <th>Value</th><th class="l">Status</th><th></th>
+    </tr></thead>
+    <tbody id="rows">{% include "_rows.html" %}</tbody>
   </table>
-  <p class="note">
-    Unresolved conflicts in the source notes: NW given as both 50&deg; and 40&deg;
-    (using 40&deg;); W given as both &ldquo;30&ndash;40&rdquo; and 40&deg; (using 40&deg;);
-    SW never specified (interpolated to 30&deg;). Upper elevation limit mentioned
-    but no value given &mdash; <code>MAX_ALTITUDE</code> is currently
-    {{ config.MAX_ALTITUDE or 'unset' }}. Exposure default
-    {{ config.EXPOSURE_COUNT }} &times; {{ config.EXPOSURE_SECONDS }} s is a placeholder.
-  </p>
+</div>
+
+<details class="fold">
+  <summary>Dome mask, exposure rule and what still needs confirming</summary>
+  <div class="folded">
+    <table class="mini">
+      <tr><th>Sector</th><th>Azimuth</th><th>Min alt</th></tr>
+      {% for start, end, minalt in config.HORIZON_MASK %}
+      <tr><td style="color:var(--ink)">{{ ['N','NE','E','SE','S','SW','W','NW'][loop.index0] }}</td>
+          <td>{{ start }}&ndash;{{ end }}&deg;</td>
+          <td style="{{ 'color:var(--no)' if minalt is none }}">{{ 'blocked' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td></tr>
+      {% endfor %}
+    </table>
+    <p class="note">
+      Azimuths are compass bearings from north. MPC reports azimuth from
+      <em>south</em>; it is converted on parse and verified against an
+      independent astropy calculation every cycle. That convention was
+      confirmed against 579 ephemeris lines of the observatory's own output
+      &mdash; read as compass, five of 579 targets fall in the north; read
+      raw, north would be the busiest sector on the sky.
+      <br><br>
+      Exposure follows the observatory's own rule,
+      <code>{{ config.EXPOSURE_BASE_MIN|int }} + (V &minus; {{ config.EXPOSURE_REF_MAG|int }}) &times; {{ config.EXPOSURE_MIN_PER_MAG|int }}</code>
+      minutes, floored at {{ config.EXPOSURE_FLOOR_MIN|int }}.
+      <br><br>
+      <strong>Still open:</strong> SW was never specified and is interpolated to
+      30&deg;; NW was given as both 50&deg; and 40&deg;; W as both
+      &ldquo;30&ndash;40&rdquo; and 40&deg;; and an upper elevation limit was
+      mentioned but never valued.
+    </p>
+  </div>
 </details>
 
-<table class="targets">
-  <thead>
-    <tr>
-      <th>#</th><th>Target</th><th>D2</th><th>V</th><th>Arc</th><th>Unseen</th><th>N</th>
-      <th>Alt</th><th>Az</th><th>AM</th><th>Transit</th><th>Moon</th><th>Window</th>
-      <th>Score</th><th>Status</th><th>Actions</th>
-    </tr>
-  </thead>
-  <tbody id="rows">
-    {% include "_rows.html" %}
-  </tbody>
-</table>
-
 <footer>
-  <p>
-    Scoring is intrinsic only (digest2 {{ config.RANK_WEIGHTS.digest2 }} &middot;
-    arc {{ config.RANK_WEIGHTS.arc }} &middot; magnitude {{ config.RANK_WEIGHTS.magnitude }}),
-    deliberately excluding altitude so the ordering is stable through the day.
-    Unobservable targets sink below observable ones.
-    Positions are NEOCP-listed, not live ephemerides &mdash; treat targets with a
-    large <em>Unseen</em> value as approximate and open the target for a real ephemeris.
-  </p>
+  <p>Ordered by when each target reaches its best <em>observable</em> altitude,
+  so working down the list keeps every target near its peak &mdash; the same
+  sequencing the observatory's own planner uses. <em>Value</em> is a separate
+  intrinsic score from digest2, arc length and magnitude; it excludes altitude
+  on purpose so it stays meaningful in daylight, and it does not drive this
+  order.</p>
+  <p>Positions come from MPC ephemerides generated for L01 and are recomputed
+  independently with astropy each cycle, so a disagreement is flagged rather
+  than hidden. The pointing line is interpolated
+  {{ config.INTERPOLATE_AHEAD_S // 60 }} minutes ahead to allow for slewing.</p>
+  <p>Clock times on this page are <em>{{ tzname }}</em>, local to the
+  observatory; hover any of them for UT. The plan file and the ephemeris lines
+  inside it stay in <em>UT</em>, because that is what MPC and the 80-column
+  astrometry format require &mdash; changing them would break the format.</p>
 </footer>
 
+</div>
 <script>
 const POLL = {{ poll_interval }} * 1000;
+const TZ = {{ tzname|tojson }};
 const params = new URLSearchParams(window.location.search);
+
+// Which plan entries the observer has opened. Kept across refreshes so a
+// poll never closes something being read mid-slew.
+const openPlans = new Set();
+
+function applyOpenPlans() {
+  document.querySelectorAll('tr.planrow').forEach(tr => {
+    tr.hidden = !openPlans.has(tr.id.slice(5));
+  });
+}
+
+document.addEventListener('click', ev => {
+  const t = ev.target.closest('[data-plan]');
+  if (t) {
+    const d = t.dataset.plan;
+    openPlans.has(d) ? openPlans.delete(d) : openPlans.add(d);
+    applyOpenPlans();
+    return;
+  }
+  const c = ev.target.closest('[data-copy]');
+  if (c) {
+    const el = document.getElementById(c.dataset.copy);
+    navigator.clipboard.writeText(el.textContent).then(() => {
+      c.textContent = 'copied';
+      setTimeout(() => c.textContent = 'copy', 1200);
+    });
+  }
+});
+
 async function refresh() {
   try {
     const [rows, st] = await Promise.all([
@@ -90,19 +200,13 @@ async function refresh() {
       fetch('/status').then(r => r.json())
     ]);
     document.getElementById('rows').innerHTML = rows;
-    document.getElementById('last-update').textContent = st.last_update_utc + ' UTC';
-    document.getElementById('count').textContent = st.count;
-  } catch (e) { /* keep showing the last good render */ }
+    applyOpenPlans();
+    document.getElementById('last-update').innerHTML =
+      st.last_update_local + '<small> ' + TZ + '</small>';
+  } catch (e) { /* keep the last good render */ }
 }
 setInterval(refresh, POLL);
-
-function copyBlock(id) {
-  const el = document.getElementById(id);
-  navigator.clipboard.writeText(el.textContent).then(() => {
-    const b = el.parentElement.querySelector('.copybtn');
-    if (b) { b.textContent = 'copied'; setTimeout(() => b.textContent = 'copy', 1200); }
-  });
-}
+applyOpenPlans();
 </script>
 </body>
 </html>

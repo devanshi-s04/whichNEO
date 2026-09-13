@@ -1,97 +1,133 @@
 # Open questions for Luka
 
-Everything here is a placeholder in `config.py`. Nothing below was invented to
-look complete — each item is a real gap, and each has a concrete default that
-is almost certainly wrong in some way.
+Every item is a placeholder in `config.py`. Nothing here was invented to look
+complete — each is a real gap with a default that is probably wrong somewhere.
 
-## 1. Dome / horizon geometry (highest impact)
+Thresholds recovered from the observatory's own planner (`planets-new.py`) are
+marked **legacy**; they are almost certainly right, but worth confirming that
+they are still what you actually use rather than what the code drifted to.
 
-The current mask came from observer notes that contain two direct conflicts:
+## 1. Dome / horizon geometry — highest impact
 
-| Sector | Azimuth | Currently using | Conflict in the notes |
+This is the one rule the legacy planner does **not** have. Its code carries
+only a flat altitude floor, so the sector geometry below exists nowhere except
+in your notes, and it is what most changes which targets we show.
+
+| Sector | Azimuth | Using | Problem |
 |---|---|---|---|
-| N  | 337.5–22.5° | **blocked** | "avoid north completely" — need the exact azimuth range that counts as north |
+| N  | 337.5–22.5° | **blocked** | is the blocked sector really 45° wide? |
 | NE | 22.5–67.5°  | 20° | from "above 20 in South and East" |
 | E  | 67.5–112.5° | 20° | ” |
 | SE | 112.5–157.5°| 20° | ” |
 | S  | 157.5–202.5°| 20° | ” |
-| SW | 202.5–247.5°| 30° | **never specified** — interpolated between S and W |
-| W  | 247.5–292.5°| 40° | "below 30-40 degrees in the west" vs "West = 40" |
-| NW | 292.5–337.5°| 40° | "northwest is 50 degrees" vs "Northwest = 40" |
+| SW | 202.5–247.5°| 30° | **never specified — we interpolated** |
+| W  | 247.5–292.5°| 40° | "below 30-40 in the west" vs "West = 40" |
+| NW | 292.5–337.5°| 40° | "northwest is 50" vs "Northwest = 40" |
 
-Questions:
-- Is the blocked north sector really 45° wide, or narrower/wider?
-- Is the restriction a hard dome obstruction, or a practical preference?
-- Is the real mask smooth rather than eight discrete sectors? Find_Orb supports
-  a continuous horizon profile (`site_L01.txt`) — if one exists, we should use it.
+- Is this a hard dome obstruction or a working preference?
+- Is the real mask a smooth profile rather than eight sectors? Find_Orb
+  supports a continuous horizon (`site_L01.txt`) — if one exists, we should
+  use it directly.
+
+**Azimuth convention: RESOLVED, no longer a question.** MPC reports azimuth
+from south; we convert to compass bearings on parse. That the notes are also
+compass bearings was confirmed empirically against 579 ephemeris lines in the
+legacy planner's own nightly output for 2026-03 to 2026-09:
+
+| Sector | read as compass | read as raw MPC |
+|---|---|---|
+| N  | **5** | **228** |
+| NE | 18 | 27 |
+| E  | 98 | 10 |
+| SE | 182 | 11 |
+| S  | 228 | 5 |
+| SW | 27 | 18 |
+| W  | 10 | 98 |
+| NW | 11 | 182 |
+
+Read as compass, 88% of six months of real targets sit in E/SE/S, five of 579
+fall in the north, and W/NW are nearly empty — matching "avoid north
+completely", "above 20 in South and East", "West/Northwest = 40" and "before
+it crosses meridian". Read as raw MPC, north would be the busiest sector of
+all. Only the compass reading is consistent.
+
+What remains open is the *numbers*, not the convention.
 
 ## 2. Upper elevation limit
 
-The notes mention "lower **and upper** elevation" but give no upper value. Fork
-mounts commonly have a zenith blind spot. `MAX_ALTITUDE` is currently unset, so
-no upper limit is applied at all.
+You mentioned "lower **and upper** elevation" but gave no upper value. Fork
+mounts commonly have a zenith blind spot. `MAX_ALTITUDE` is unset, so no upper
+limit is applied at all.
 
-## 3. Exposure rules
+## 3. Exposure floor
 
-`EXPOSURE_SECONDS = 30` was specified. `EXPOSURE_COUNT = 6` is **our** choice —
-it preserves the 180 s total from the `36 x 05 sec` example in the original
-notes. The real rule almost certainly depends on target magnitude and sky
-motion (a fast mover trails and needs shorter frames).
+The rule itself is now known — `minutes = 10 + (V − 18) × 5`, **legacy**.
 
-- What sets the number of frames?
-- What sets the exposure length?
-- Is there a maximum total integration per target?
+But it is unbounded below: at V=12.5 it returns −17.5 minutes, which the legacy
+planner prints verbatim. We clamp at `EXPOSURE_FLOOR_MIN = 1.0`. What should
+the real floor be? Is there also a maximum total integration per target?
 
-## 4. Magnitude limit
+## 4. Confirm the recovered thresholds
 
-`MAX_MAG = 21.7` came from the notes. Confirm this is for L01 (1.0-m f/2.9) and
-whether it varies with moon, seeing, or target motion.
+All **legacy**, all now active:
 
-## 5. Moon rule
+| Setting | Value |
+|---|---|
+| `MIN_SCORE` | 25 |
+| `MIN_ARC_DAYS` | 0.01 |
+| `MAX_NOT_SEEN_DAYS` | 4 |
+| `MAX_MAG` | 21.6 |
+| `MIN_MOTION` | 0.7 ″/min |
+| `MOON_SEP_MIN` | 20° |
+| `SUN_ALT_MAX` | −15° |
+| `MAX_SCATTEREDNESS` | (2000, 2000)″ |
+| `NEO_ONLY` | q < 1.3 or e > 0.5 |
 
-`MOON_SEP_MIN = 20°`, applied only when the moon is above the horizon. The notes
-said not to over-engineer this. Does separation alone suffice, or should it
-scale with lunar phase?
+Note `MIN_ALT = 15` is effectively dead: we pass `oalt=20` to MPC (as the
+legacy planner does), so the server never returns anything below 20°. The 15
+can only matter if raised above 20. Worth deciding which number you actually
+want.
 
-## 6. Ranking
+## 5. Already-observed rule
 
-Current score is intrinsic only — digest2 (weight 2.0), arc (1.5), magnitude
-(1.5) — with altitude deliberately excluded so the ordering is stable through
-the day. Unobservable targets sink below observable ones.
+The legacy planner discards any object whose astrometry already contains an
+`L01` observation. We reproduce this (`SKIP_ALREADY_OBSERVED`). Should a target
+really drop out after a single night, or should it come back for a second
+epoch after some interval?
 
-- Are these the right three factors?
-- Are the weights sensible?
-- **Known artifact:** because brighter scores higher without a cap, a cluster of
-  very bright near-duplicate NEOCP entries can dominate the top of the list.
-  See "Things to look at" below.
+## 6. Does anything read the plan file?
+
+We write `plans/YYYY-MM-DD.txt` in the legacy format every cycle. Is that file
+consumed by a script or by the telescope software, or only read by a person? It
+determines how strictly we need to match byte-for-byte.
+
+One known difference: our lines omit the trailing `Map/Offsets` text. That is
+HTML link text scraped along with the row, not data. Easy to add back if
+something parses positionally.
 
 ## 7. Survey priorities
 
-`HIGH_PRIORITY_SURVEYS` / `LOW_PRIORITY_SURVEYS` are empty. The tabular NEOCP
-feed does not carry the discovering survey at all — we currently guess it from
-the designation prefix, which is a heuristic. If survey matters for ranking, we
-need to decide whether it is worth pulling per-object observation data.
+`HIGH_PRIORITY_SURVEYS` / `LOW_PRIORITY_SURVEYS` are empty. The tabular feed
+does not carry the discovering survey; we guess it from the designation prefix,
+which is a heuristic. Does survey affect your priorities in practice?
 
-## 8. Meridian preference
+## 8. Ordering
 
-The notes said "basically before it crosses meridian". That currently falls out
-of the W/NW restrictions rather than being a separate rule, and pre/post
-meridian is shown as a column. Should it also be an explicit scoring term?
+We now order chronologically by time of best observable altitude, matching the
+legacy planner. Our intrinsic score is a separate column. Is the chronological
+sequence what you actually work from, or do you re-order by hand in practice?
 
 ---
 
-## Things to look at in the current output
+## Worth a look in the current output
 
-**Near-duplicate bright entries.** A recent run put six `SK000a*` objects at the
-top: nearly identical coordinates (all within arcminutes), V ≈ 12.4–13.0,
-digest2 83–94. Objects that bright on NEOCP are unusual, and six of them
-co-located suggests either one object submitted as multiple tracklets, or
-satellite/debris contamination. An observer would likely dismiss these
-instantly — which is exactly the kind of rule we want captured. Options: a
-brightness ceiling, a positional de-duplication pass, or a designation-prefix
-filter.
+**Bright near-duplicate clusters.** A recent run surfaced six `SK000a*` objects
+at nearly identical coordinates with V ≈ 12.5. Objects that bright on NEOCP are
+unusual, and six co-located ones suggests one object submitted as several
+tracklets, or satellite debris. Should we de-duplicate by position, or cap
+brightness?
 
-**Stale positions.** NEOCP gives one position per object, not a live ephemeris.
-For anything with a large "Unseen" value the listed position is well out of
-date. The per-target page fetches a real MPC ephemeris on demand; the queue
-view does not.
+**Long-period comets.** `A11GrOJ` came through with e=0.998, a=2411 AU, i=126°
+(retrograde) — a comet, not a NEO. It is correctly excluded by the q/e rule,
+but only because we parse it at all; the legacy parser drops such rows before
+the filter ever sees them. Are comets ever wanted?
