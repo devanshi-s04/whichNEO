@@ -297,3 +297,19 @@ button.ghost {
 }
 button.ghost:hover { color: var(--cyan); border-color: rgba(95,201,212,.4); }
 .card .when .dim { color: var(--faint); }
+
+/* ---------- MPC markers ---------- */
+/* ! and !! come from MPC's ephemeris and mark fast sky motion.
+   S and B come from the NEOCP Note column and are warnings, not endorsements,
+   so they are deliberately styled as caution rather than emphasis. */
+td.mark { white-space: nowrap; min-width: 52px; }
+.bang {
+  font-family: var(--mono); font-weight: 700; font-size: 13px;
+  color: var(--amber); letter-spacing: -.5px;
+}
+.bang.bang2 { color: #ff8c42; text-shadow: 0 0 10px rgba(255,140,66,.35); }
+tr.gone .bang { color: var(--faint); text-shadow: none; }
+.pill.warnflag {
+  color: var(--warn); border-color: rgba(217,164,65,.5);
+  background: rgba(217,164,65,.09); font-weight: 700; cursor: help;
+}

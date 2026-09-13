@@ -34,6 +34,16 @@
       <tr><th>Arc</th><td>{{ '%.3f'|format(row.arc_days) }} d</td></tr>
       <tr><th>Not seen</th><td>{{ '%.2f'|format(row.not_seen_days) }} d</td></tr>
       <tr><th>NEOCP note</th><td>{{ row.update_note }}</td></tr>
+      <tr><th>MPC markers</th><td>
+        {% if row.mpc_flag %}<span class="bang {{ 'bang2' if row.mpc_flag == '!!' }}">{{ row.mpc_flag }}</span>
+          <span class="dim">fast-moving in the ephemeris</span><br>{% endif %}
+        {% if row.note_flag == 'S' %}<span class="pill warnflag">S</span>
+          <span class="dim">possibly geocentric &mdash; likely a satellite, may be removed</span>
+        {% elif row.note_flag == 'B' %}<span class="pill warnflag">B</span>
+          <span class="dim">possible bad tracklet or failed orbit fit</span>
+        {% elif row.note_flag %}<span class="pill warnflag">{{ row.note_flag }}</span>
+        {% elif not row.mpc_flag %}<span class="dim">none</span>{% endif %}
+      </td></tr>
       <tr><th>Survey (guess)</th><td>{{ row.survey or '—' }}</td></tr>
     </table>
   </section>

@@ -64,6 +64,14 @@ def parse_neocp(text):
 
         note = " ".join(tok[8:-4])
         row["update_note"] = note
+        # MPC's Note column, carried at the end of the note text. Both values
+        # are warnings, not endorsements: "S" means the object is possibly in
+        # geocentric orbit (so probably a satellite, and due for removal),
+        # "B" that the tracklet or orbit fit may be bad and the ephemeris
+        # unreliable. Surfaced so an observer can judge; never used to promote.
+        row["note_flag"] = note.split()[-1] if (
+            note and len(note.split()[-1]) == 1 and note.split()[-1].isupper()
+        ) else None
         # "Added" marks a first posting, "Updated" a re-posting -- a free
         # recency signal distinct from the discovery date.
         row["is_new"] = note.strip().lower().startswith("added")

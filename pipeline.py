@@ -124,8 +124,15 @@ def analyze(target, eph, orbit, now=None):
         target.update(max_alt_row=None, nearest_row=None, interp_row=None,
                       max_alt_ts=None, max_alt=None, exposure_min=None,
                       window_minutes=0.0, window_start_ts=None,
-                      window_end_ts=None)
+                      window_end_ts=None, mpc_flag=None)
     else:
+        # MPC marks fast-moving ephemeris rows with ! or !!. It is a per-row
+        # property that can change through a night, so the object-level badge
+        # is the strongest marker over the rows we could actually observe.
+        target["mpc_flag"] = ("!!" if any(r.flag == "!!" for r in rows)
+                              else "!" if any(r.flag == "!" for r in rows)
+                              else None)
+
         best = max(rows, key=lambda r: r.alt)
         target["max_alt_row"] = best
         target["max_alt_ts"] = best.ts

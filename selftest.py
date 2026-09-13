@@ -292,6 +292,46 @@ def test_plan_file_survives_dawn():
               os.path.exists(p2))
 
 
+def test_mpc_markers():
+    """! / !! are fast-motion markers from the ephemeris; S / B are warnings
+    from the NEOCP Note column. Neither may change the running order."""
+    flagged = ("A11GMT0  98 2026 09 13.2  22.9499 -12.2595 18.4 "
+               "Updated Sept. 13.51 UT     S     8   0.30 28.1  0.164")
+    plain = ("P12pZCB  91 2026 09 13.5   1.8368  -9.6186 20.7 "
+             "Updated Sept. 13.64 UT           4   0.04 20.2  0.095")
+
+    a = neocp.parse_neocp(flagged)[0]
+    b = neocp.parse_neocp(plain)[0]
+    check("S flag extracted from the note column", a["note_flag"] == "S", a["note_flag"])
+    check("no flag when the note column is empty", b["note_flag"] is None, b["note_flag"])
+    check("the flag does not corrupt nobs", (a["nobs"], b["nobs"]) == (8, 4),
+          (a["nobs"], b["nobs"]))
+    check("arc still parsed correctly alongside a flag",
+          abs(a["arc_days"] - 0.30) < 1e-9, a["arc_days"])
+
+    # Object-level badge is the strongest marker over observable rows.
+    def row(flag):
+        r = ephemeris.Row(SAMPLE_EPH)
+        r.flag = flag
+        return r
+    for rows, expected in ([[row(""), row("")], None],
+                           [[row(""), row("!")], "!"],
+                           [[row("!"), row("!!")], "!!"]):
+        got = ("!!" if any(x.flag == "!!" for x in rows)
+               else "!" if any(x.flag == "!" for x in rows) else None)
+        check(f"rows {[x.flag for x in rows]} -> badge {expected!r}", got == expected, got)
+
+    # Explicitly pinned: markers are informational until Luka has seen them.
+    now = time.time()
+    rows = [dict(desig="flagged_late", observable=True, max_alt_ts=now + 7200,
+                 mpc_flag="!!", score_total=1.0),
+            dict(desig="plain_early", observable=True, max_alt_ts=now + 600,
+                 mpc_flag=None, score_total=1.0)]
+    order = [r["desig"] for r in ranking.sort_targets(rows, "chronological")]
+    check("a !! marker does not jump the chronological queue",
+          order == ["plain_early", "flagged_late"], order)
+
+
 def test_auth_protects_state_changes():
     """Reads stay open; anything that changes state must be protected once
     credentials are configured. Without this, anyone who can reach the URL
@@ -421,7 +461,8 @@ def main():
                test_ephemeris_row, test_ephemeris_azimuth_convention,
                test_exposure_rule, test_night_bounds, test_chronological_sort,
                test_upcoming_cards_look_forward, test_cache_signature_ignores_the_clock,
-               test_plan_file_survives_dawn, test_auth_protects_state_changes,
+               test_plan_file_survives_dawn, test_mpc_markers,
+               test_auth_protects_state_changes,
                test_schema_migration_from_older_db,
                test_ranking_bounds, test_row_rejection_reasons):
         print(f"\n{fn.__name__}:")

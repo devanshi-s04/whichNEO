@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS targets (
     update_note          TEXT,
     is_new               INTEGER,
     survey               TEXT,
+    note_flag            TEXT,
+    mpc_flag             TEXT,
 
     q                    REAL,
     e                    REAL,
@@ -105,7 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_targets_seq
 
 _COLS = [
     "desig", "score", "ra_deg", "dec_deg", "vmag", "hmag", "nobs", "arc_days",
-    "not_seen_days", "update_note", "is_new", "survey",
+    "not_seen_days", "update_note", "is_new", "survey", "note_flag", "mpc_flag",
     "q", "e", "incl",
     "max_alt", "max_alt_ts", "max_alt_utc", "exposure_min", "window_minutes",
     "window_start_ts", "window_end_ts",

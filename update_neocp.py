@@ -124,7 +124,7 @@ def run_update(conn, source=None):
                      eph_error=None, eph_report={}, map_url=None,
                      offsets_url=None, scatteredness=None,
                      observed_from_site=None, max_alt_row=None,
-                     nearest_row=None, interp_row=None)
+                     nearest_row=None, interp_row=None, mpc_flag=None)
             continue
 
         entry = cache.get(t["desig"])
