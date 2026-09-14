@@ -1,0 +1,9 @@
+# Code owners for whichNEO.
+#
+# Every pull request into the default branch requires a review from an owner
+# listed here. The last matching pattern wins, so the catch-all comes first.
+#
+# See the "OG" ruleset for the rules this pairs with:
+#   https://github.com/devanshi-s04/whichNEO/rules/23308488
+
+*       @devanshi-s04
