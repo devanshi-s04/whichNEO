@@ -115,7 +115,10 @@ body {
 .mk circle, .mk line { transition: none; }
 .mk.lit circle { stroke: var(--ink); stroke-width: 2; }
 .mk.lit line { stroke: var(--ink); }
-tr.lit > td { background: rgba(240,166,60,.09); }
+/* The matching `tr.lit > td` rule lives down in the table section, after the
+   done/hidden row colours. It has to: those carry the same specificity, so
+   whichever is written last wins, and a highlight that loses to them would
+   silently stop working on exactly the rows most worth pointing at. */
 
 /* ---------- night strip ---------- */
 .strip {
@@ -251,7 +254,22 @@ table.grid tbody td {
 table.grid tbody td.l { text-align: left; }
 table.grid tbody tr:hover td { background: rgba(255,255,255,.022); }
 tr.gone td { color: var(--faint); }
-tr.done td { opacity: .4; }
+tr.done td { opacity: .72; background: rgba(85,179,126,.10); }
+tr.done td.nm a { color: var(--go); }
+/* Hidden rows read as clearly dimmer without becoming unreadable. The only
+   place they render is the `hidden` view, whose whole purpose is finding a row
+   you hid so you can restore it -- if the designation is illegible the view
+   does not work.
+   Two things were fighting: at .3 opacity a rejected row measured 1.29:1
+   against its own background, invisible rather than dim, because `tr.gone`
+   already dims the colour and the opacity then halves that again. Dimming
+   twice by different mechanisms multiplies. So opacity carries it alone and
+   the colour is restored, giving 4.42:1 -- still visibly darker than any
+   other row. */
+tr.row-hidden td { opacity: .5; background: rgba(0,0,0,.4); color: var(--ink); }
+tr.row-hidden td.nm a { color: var(--ink); }
+/* Must stay after the two rules above: same specificity, so last one wins. */
+tr.lit > td { background: rgba(240,166,60,.09); }
 
 td.idx { color: var(--faint); font-size: 11px; width: 30px; }
 td.peakt { color: var(--cyan); font-weight: 500; }
