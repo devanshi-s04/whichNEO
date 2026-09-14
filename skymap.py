@@ -70,14 +70,25 @@ def _wedge_path(cx, cy, r_out, r_in, az0, az1):
 # --- turning the queue into markers ----------------------------------------
 
 def _interpolate(track, ts):
-    """Alt/az at `ts`, between the bracketing ephemeris samples."""
+    """Alt/az at `ts`, between the bracketing ephemeris samples.
+
+    Outside the track it clamps to the nearer END. Falling back to track[0]
+    regardless -- which this did originally -- puts a target that has just run
+    off the end of its ephemeris back at the position it held when the
+    ephemeris began, which can be a day earlier and most of the sky away. It
+    showed up as A11GP9t reading azimuth 112 while it was actually near 76.
+    """
+    if ts <= track[0][0]:
+        return track[0][1], track[0][2]
+    if ts >= track[-1][0]:
+        return track[-1][1], track[-1][2]
     for a, b in zip(track, track[1:]):
         if a[0] <= ts <= b[0]:
             span = b[0] - a[0]
             f = 0.0 if span == 0 else (ts - a[0]) / span
             d_az = ((b[1] - a[1] + 180.0) % 360.0) - 180.0
             return (a[1] + d_az * f) % 360.0, a[2] + (b[2] - a[2]) * f
-    return track[0][1], track[0][2]
+    return track[-1][1], track[-1][2]
 
 
 def _spacing(track):

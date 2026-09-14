@@ -31,6 +31,16 @@ EPHEMERIS_TIMEOUT_S = 60
 # service and the update loop has 300 s of headroom.
 EPHEMERIS_WORKERS = 4
 
+# An ephemeris is cached against a signature of the object's NEOCP row, so it
+# is refetched when new astrometry changes the solution. But MPC generates it
+# over a fixed window starting when it was asked, so one cached against
+# unchanged astrometry still goes out of date with the clock: after a day it
+# no longer covers tonight, and the night's plan silently becomes last
+# night's. When a cached ephemeris has no row left at or after now, it is
+# refetched -- but no more often than this, so an object that genuinely never
+# rises again is not requested every single cycle.
+EPHEMERIS_REFETCH_BACKOFF_S = 1800
+
 # Altitude floor handed to MPC as the `oalt` parameter, so the server never
 # returns rows below it. Note this dominates MIN_ALT below -- the legacy
 # planner sets minAlt=15 while also passing oalt=20, so its 15 can never fire.

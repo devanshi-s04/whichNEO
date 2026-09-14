@@ -32,6 +32,7 @@ import output
 import pipeline
 import ranking
 import skymap
+import update_neocp
 
 FAILURES = []
 
@@ -760,6 +761,82 @@ def test_skymap_marks():
           clear and not clear[0]["mask"], clear)
 
 
+def test_interpolate_clamps_to_the_right_end():
+    """Past the end of a track, clamp to the LAST sample, not the first.
+
+    Falling back to track[0] put a target that had just run off the end of its
+    ephemeris back where it was when the ephemeris began -- a day earlier and
+    most of the sky away. On the live board A11GP9t read azimuth 112 while it
+    was actually near 76.
+    """
+    t0 = 1_760_000_000.0
+    track = [(t0, 100.0, 20.0), (t0 + 1800, 110.0, 30.0), (t0 + 3600, 120.0, 40.0)]
+
+    az, alt = skymap._interpolate(track, t0 + 900)
+    check("interpolates inside the track", abs(az - 105.0) < 1e-6
+          and abs(alt - 25.0) < 1e-6, (az, alt))
+
+    az, alt = skymap._interpolate(track, t0 + 7200)
+    check("past the end clamps to the last sample",
+          (az, alt) == (120.0, 40.0), (az, alt))
+
+    az, alt = skymap._interpolate(track, t0 - 7200)
+    check("before the start clamps to the first sample",
+          (az, alt) == (100.0, 20.0), (az, alt))
+
+    # Azimuth still takes the short way round the wrap.
+    wrap = [(t0, 350.0, 30.0), (t0 + 1800, 10.0, 30.0)]
+    az, _ = skymap._interpolate(wrap, t0 + 900)
+    check("azimuth wraps the short way", abs(az - 0.0) < 1e-6 or abs(az - 360.0) < 1e-6,
+          az)
+
+
+def test_ephemeris_refetched_when_its_window_runs_out():
+    """The cache must notice an ephemeris that no longer covers tonight.
+
+    The signature tracks the orbit solution, not the span MPC computed. An
+    object attracting no new astrometry was therefore never re-requested, and
+    its cached ephemeris silently became last night's -- 15 of 38 observable
+    targets on the live board.
+    """
+    now = 1_760_000_000.0
+    target = {"desig": "TEST01", "nobs": 12, "arc_days": 0.5}
+    sig = ephemeris.signature(target)
+    full = {"offsets": [], "obs_codes": {}, "fetched_ts": now - 600,
+            "last_row_ts": now + 6 * 3600}
+
+    check("a covering ephemeris is left alone",
+          not update_neocp.needs_refetch((sig, full), target, now))
+    check("no cache entry means fetch",
+          update_neocp.needs_refetch(None, target, now))
+    check("a changed solution means fetch",
+          update_neocp.needs_refetch(("99|9.9", full), target, now))
+
+    # The case that was silently broken.
+    ended = dict(full, last_row_ts=now - 14 * 3600, fetched_ts=now - 20 * 3600)
+    check("an ephemeris whose window has ended is refetched",
+          update_neocp.needs_refetch((sig, ended), target, now))
+
+    # ...but not on every cycle, or an object that never rises again would be
+    # requested forever: a fresh fetch would also end in the past.
+    just_tried = dict(ended, fetched_ts=now - 60)
+    check("but not again within the backoff",
+          not update_neocp.needs_refetch((sig, just_tried), target, now))
+    later = dict(ended, fetched_ts=now - config.EPHEMERIS_REFETCH_BACKOFF_S - 60)
+    check("and is retried once the backoff expires",
+          update_neocp.needs_refetch((sig, later), target, now))
+
+    # Entries cached before these fields existed must backfill exactly once.
+    old = {"offsets": [], "obs_codes": {}}
+    check("entries predating the coverage fields are refetched once",
+          update_neocp.needs_refetch((sig, old), target, now))
+
+    # An object MPC returned nothing for must not spin.
+    empty = dict(full, last_row_ts=None)
+    check("an empty ephemeris does not spin the fetcher",
+          not update_neocp.needs_refetch((sig, empty), target, now))
+
+
 def test_moon_phase_geometry():
     """The drawn lune must enclose exactly the illuminated fraction.
 
@@ -814,7 +891,9 @@ def main():
                test_ranking_bounds, test_row_rejection_reasons,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
-               test_moon_phase_geometry, test_ephemeris_track_matches_row):
+               test_moon_phase_geometry, test_ephemeris_track_matches_row,
+               test_interpolate_clamps_to_the_right_end,
+               test_ephemeris_refetched_when_its_window_runs_out):
         print(f"\n{fn.__name__}:")
         fn()
 
