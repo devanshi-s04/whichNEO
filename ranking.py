@@ -65,7 +65,25 @@ def sort_key_score(row):
             row["desig"])
 
 
+def sort_key_magnitude_asc(row):
+    """Brightest (lowest V) first."""
+    return (0 if row.get("observable") else 1, row["vmag"], row["desig"])
+
+
+def sort_key_magnitude_desc(row):
+    """Faintest (highest V) first."""
+    return (0 if row.get("observable") else 1, -row["vmag"], row["desig"])
+
+
+_SORT_KEYS = {
+    "chronological": sort_key_chronological,
+    "score": sort_key_score,
+    "mag_asc": sort_key_magnitude_asc,
+    "mag_desc": sort_key_magnitude_desc,
+}
+
+
 def sort_targets(rows, mode=None):
     mode = mode or config.DEFAULT_SORT
-    key = sort_key_score if mode == "score" else sort_key_chronological
+    key = _SORT_KEYS.get(mode, sort_key_chronological)
     return sorted(rows, key=key)
