@@ -72,6 +72,51 @@ body {
 .stat .v.bad { color: var(--no); }
 .stat .v small { font-size: 11px; color: var(--muted); font-weight: 400; }
 
+/* ---------- sky map ----------
+   Zenith centre, horizon rim, north up and east RIGHT: the map convention,
+   not the planisphere one. Laid out beside its legend, collapsing to a single
+   column when there is no room for both. */
+.sky {
+  display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 20px;
+  align-items: start;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 16px 18px; margin-bottom: 18px;
+}
+@media (max-width: 860px) { .sky { grid-template-columns: minmax(0, 1fr); } }
+
+.skyplot { min-width: 0; }
+.skyplot svg { overflow: visible; }
+.skyside h2 {
+  margin: 0 0 2px; font-size: 10px; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--muted); font-weight: 700;
+}
+.skyside .cap { font-size: 12px; color: var(--faint); margin: 0 0 13px; }
+.skyside .cap strong { color: var(--ink); font-weight: 600; }
+
+.legend { width: 100%; margin: 0 0 13px; }
+.legend td { padding: 3px 0; vertical-align: middle; }
+.legend td.n {
+  text-align: right; font-family: var(--mono); color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.legend td:first-child { width: 22px; }
+.sw {
+  display: inline-block; width: 11px; height: 11px; border-radius: 50%;
+  vertical-align: -1px;
+}
+.sw.up   { background: var(--amber); }
+.sw.done { background: var(--go); }
+.sw.tick { border-radius: 1px; width: 3px; height: 12px; background: var(--amber); }
+.sw.poll { background: rgba(207,97,84,.30); border: 1px dashed var(--no); }
+.sw.moon { background: #e8ecf5; border: 1px solid var(--cyan); }
+
+/* Marker <-> row highlight, driven from the page script. */
+.mk { cursor: pointer; }
+.mk circle, .mk line { transition: none; }
+.mk.lit circle { stroke: var(--ink); stroke-width: 2; }
+.mk.lit line { stroke: var(--ink); }
+tr.lit > td { background: rgba(240,166,60,.09); }
+
 /* ---------- night strip ---------- */
 .strip {
   background: var(--panel); border: 1px solid var(--line);
@@ -229,6 +274,8 @@ td.expo { color: var(--amber); }
 .pill.new { color: var(--cyan); border-color: rgba(95,201,212,.4); }
 .pill.xc { color: var(--warn); border-color: rgba(217,164,65,.45); }
 .pill.ob { color: var(--faint); border-color: var(--line); }
+/* Poor sky, not blocked sky. Amber, never red: nothing was removed. */
+.pill.sky { color: var(--warn); border-color: rgba(217,164,65,.45); background: rgba(217,164,65,.07); }
 .warn { color: var(--warn); }
 .dim { color: var(--faint); }
 

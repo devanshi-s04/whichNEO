@@ -50,6 +50,56 @@ def cheap_reject(t):
     return out
 
 
+def needs_refetch(entry, target, now):
+    """Whether this object's cached ephemeris has to be requested again.
+
+    `entry` is (signature, payload) from the cache, or None.
+
+    Two independent reasons, and missing either one produces a board that is
+    confidently wrong:
+
+    1. **The solution changed.** New astrometry moves the object, so the
+       signature no longer matches. This is the usual case.
+
+    2. **The window ran out.** MPC computes an ephemeris over a fixed span
+       beginning when we ask, roughly a day. The signature says nothing about
+       that span, so an object attracting no new observations is never
+       re-requested and its cached ephemeris eventually stops covering
+       tonight. usable_rows() then returns LAST night's window without
+       complaint -- peak time, azimuth, exposure, the whole plan, a day stale.
+       Measured on the live board: 15 of 38 observable targets, one of them 14
+       hours past the end of its ephemeris, showing a position most of the sky
+       away from the truth.
+
+    Reason 2 is the shadow of an earlier fix. `not_seen_days` was removed from
+    the signature because it advances with the wall clock and so invalidated
+    every entry on every cycle -- correct, but it was also the only
+    time-varying term, and taking it out left nothing watching the calendar.
+    The answer is not to put it back but to ask the precise question: does this
+    ephemeris still say anything about the rest of tonight?
+
+    The backoff keeps an object that genuinely never rises again from being
+    re-requested every cycle, since a fresh fetch would end in the past too.
+    """
+    if entry is None:
+        return True
+    signature, payload = entry
+    if signature != ephemeris.signature(target):
+        return True
+    # Backfill entries cached before a field existed. A key being absent means
+    # never fetched; present-but-null means MPC had nothing, which must not
+    # trigger a refetch every cycle.
+    if any(k not in payload for k in
+           ("offsets", "obs_codes", "last_row_ts", "fetched_ts")):
+        return True
+
+    last = payload.get("last_row_ts")
+    if last is None or last >= now:
+        return False
+    return now - (payload.get("fetched_ts") or 0) > \
+        config.EPHEMERIS_REFETCH_BACKOFF_S
+
+
 def run_update(conn, source=None):
     timings = {}
     t0 = time.perf_counter()
@@ -81,16 +131,7 @@ def run_update(conn, source=None):
     cache = db.load_cache(conn)
     candidates = [t for t in targets if not t["cheap_reject"]]
 
-    def is_stale(t):
-        entry = cache.get(t["desig"])
-        if entry is None or entry[0] != ephemeris.signature(t):
-            return True
-        # Backfill entries cached before a field existed. A key being absent
-        # means never fetched; present-but-null means MPC had nothing, which
-        # must not trigger a refetch every cycle.
-        return any(k not in entry[1] for k in ("offsets", "obs_codes"))
-
-    stale = [t for t in candidates if is_stale(t)]
+    stale = [t for t in candidates if needs_refetch(cache.get(t["desig"]), t, now)]
     fresh = ephemeris.fetch_many(t["desig"] for t in stale)
     mark("fetch_ephemerides")
 
@@ -109,6 +150,11 @@ def run_update(conn, source=None):
         obs = ephemeris.observations(e.observations_url) or {}
         return t["desig"], (ephemeris.signature(t), {
             "lines": [r.line for r in e.rows],
+            # When this was fetched, and how far forward it reaches. Together
+            # these are what let is_stale() notice an ephemeris that has run
+            # out of night without waiting for new astrometry to arrive.
+            "fetched_ts": now,
+            "last_row_ts": max((r.ts for r in e.rows), default=None),
             "offsets_url": e.offsets_url,
             "map_url": e.map_url,
             "observations_url": e.observations_url,
@@ -135,7 +181,8 @@ def run_update(conn, source=None):
     for t in targets:
         if t["cheap_reject"]:
             t.update(discard_reasons=t["cheap_reject"], observable=False,
-                     max_alt=None, max_alt_ts=None, exposure_min=None,
+                     max_alt=None, max_alt_ts=None, max_alt_az=None,
+                     mask_flags=[], exposure_min=None,
                      window_minutes=0.0, eph_rows_total=0, eph_rows_usable=0,
                      eph_error=None, eph_report={}, map_url=None,
                      offsets_url=None, scatteredness=None,

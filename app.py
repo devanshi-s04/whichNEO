@@ -13,8 +13,11 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 import auth
 import config
 import db
+import ephemeris
+import observability
 import observatories
 import ranking
+import skymap
 import uncertainty
 
 app = Flask(__name__)
@@ -174,6 +177,60 @@ def night_strip(rows, max_lanes=16):
     }
 
 
+def sky_view(conn, rows, now=None):
+    """The all-sky map, drawn fresh for this instant.
+
+    Deliberately computed per request rather than stored by the updater: a
+    fast mover crosses several degrees in the five minutes between cycles, so
+    a cached picture would be visibly behind the sky it claims to show.
+
+    The moon is pure astronomy from site and time. Target positions come from
+    ephemeris lines already cached, so this makes no network call.
+    """
+    now = now if now is not None else time.time()
+    shown = [r for r in rows if r["observable"]]
+    tracks = {d: ephemeris.track(lines)
+              for d, lines in db.load_tracks(
+                  conn, [r["desig"] for r in shown]).items()}
+    marks = skymap.target_marks(shown, tracks, now)
+    try:
+        moon = observability.moon_state(now)
+    except Exception:
+        moon = None                       # never take the board down for this
+    return {
+        "svg": skymap.render_svg(marks, moon, localt=localt),
+        "moon": moon,
+        "up": sum(1 for m in marks if m["up"]),
+        "pending": sum(1 for m in marks if not m["up"]),
+        "flagged": sum(1 for m in marks if m["up"] and m["mask"]),
+        "total": len(shown),
+    }
+
+
+def true_now(conn, desig, now=None):
+    """Where the object genuinely is at this instant, or why it is not shown.
+
+    The stored cur_alt/cur_az are taken from the nearest *usable* ephemeris
+    row, which during daylight can be hours away -- fine for "where do I point
+    next", wrong for "where is it now". This reads the cached ephemeris
+    directly so the two questions get two answers.
+    """
+    now = now if now is not None else time.time()
+    lines = db.load_tracks(conn, [desig]).get(desig)
+    track = ephemeris.track(lines) if lines else None
+    if not track:
+        return None
+    nearest = min(track, key=lambda p: abs(p[0] - now))
+    if abs(nearest[0] - now) <= skymap._spacing(track):
+        az, alt = skymap._interpolate(track, now)
+        return {"up": True, "alt": alt, "az": az}
+    ahead = [p for p in track if p[0] > now]
+    return {"up": False,
+            "next_ts": ahead[0][0] if ahead else None,
+            "next_alt": ahead[0][2] if ahead else None,
+            "next_az": ahead[0][1] if ahead else None}
+
+
 def _view_args():
     return dict(show_observed=request.args.get("observed") == "1",
                 show_hidden=request.args.get("hidden") == "1",
@@ -189,9 +246,23 @@ def index():
         upcoming = pick_upcoming(rows)
         return render_template(
             "index.html", rows=rows, strip=night_strip(rows),
-            upcoming=upcoming, status=status(conn),
+            upcoming=upcoming, status=status(conn), sky=sky_view(conn, rows),
             max_score=ranking.max_possible_score(),
             poll_interval=config.WEB_POLL_INTERVAL_S, **v)
+    finally:
+        conn.close()
+
+
+@app.route("/skymap.svg")
+def skymap_svg():
+    """Just the map, so the page can refresh it without a full reload."""
+    v = _view_args()
+    conn = get_conn()
+    try:
+        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
+        return (sky_view(conn, rows)["svg"], 200,
+                {"Content-Type": "image/svg+xml; charset=utf-8",
+                 "Cache-Control": "no-store"})
     finally:
         conn.close()
 
@@ -293,6 +364,7 @@ def target_detail(desig):
             unc_coverage=cov,
             unc_extent=uncertainty.extent(pts) if pts else None,
             fov=config.FOV_ARCSEC,
+            now_pos=true_now(conn, desig),
             discovery_site=observatories.lookup(rows[0].get("discovery_code")),
             other_sites=[observatories.lookup(c)
                          for c in sorted((rows[0].get("obs_codes") or {}),
