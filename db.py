@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS targets (
     max_alt              REAL,
     max_alt_ts           REAL,
     max_alt_utc          TEXT,
+    max_alt_az           REAL,
+    mask_flags           TEXT,
     exposure_min         REAL,
     window_minutes       REAL,
     window_start_ts      REAL,
@@ -111,7 +113,8 @@ _COLS = [
     "not_seen_days", "update_note", "is_new", "note_flag", "mpc_flag",
     "discovery_code", "obs_codes",
     "q", "e", "incl",
-    "max_alt", "max_alt_ts", "max_alt_utc", "exposure_min", "window_minutes",
+    "max_alt", "max_alt_ts", "max_alt_utc", "max_alt_az", "mask_flags",
+    "exposure_min", "window_minutes",
     "window_start_ts", "window_end_ts",
     "cur_alt", "cur_az", "cur_motion", "cur_moon_dist", "cur_sun_alt",
     "cur_vmag", "cur_ts",
@@ -171,6 +174,27 @@ def load_offsets(conn, desig):
     return [tuple(p) for p in pts] if pts else None
 
 
+def load_tracks(conn, desigs):
+    """Cached ephemeris lines for several objects, as {desig: [line, ...]}.
+
+    Feeds the sky map, which is redrawn on each page load so its positions
+    are current rather than up to a cycle stale. Reading raw lines back out of
+    the cache costs no network and no astronomy.
+    """
+    want = list(desigs)
+    if not want:
+        return {}
+    out = {}
+    marks = ",".join("?" * len(want))
+    for r in conn.execute(
+            f"SELECT desig, payload FROM ephemeris_cache WHERE desig IN ({marks})",
+            want):
+        lines = json.loads(r["payload"]).get("lines")
+        if lines:
+            out[r["desig"]] = lines
+    return out
+
+
 def save_cache(conn, entries):
     """entries: {desig: (signature, payload dict)}"""
     now = utcnow()
@@ -212,6 +236,7 @@ def replace_targets(conn, rows):
         obs_site = d.get("observed_from_site")
         d["observed_from_site"] = None if obs_site is None else int(bool(obs_site))
         d["discard_reasons"] = json.dumps(d.get("discard_reasons") or [])
+        d["mask_flags"] = json.dumps(d.get("mask_flags") or [])
         d["eph_report"] = json.dumps(d.get("eph_report") or {})
         d["obs_codes"] = json.dumps(d["obs_codes"]) if d.get("obs_codes") else None
         d["crosscheck"] = json.dumps(d.get("crosscheck")) if d.get("crosscheck") else None
@@ -246,6 +271,7 @@ def load_targets(conn, include_hidden=False, include_observed=False,
     for r in conn.execute(sql):
         d = dict(r)
         d["discard_reasons"] = json.loads(d["discard_reasons"] or "[]")
+        d["mask_flags"] = json.loads(d["mask_flags"] or "[]")
         d["eph_report"] = json.loads(d["eph_report"] or "{}")
         d["obs_codes"] = json.loads(d["obs_codes"]) if d["obs_codes"] else None
         d["crosscheck"] = json.loads(d["crosscheck"]) if d["crosscheck"] else None

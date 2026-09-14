@@ -60,25 +60,41 @@ NIGHT_ROLLOVER_HOUR_UT = 11
 INTERPOLATE_AHEAD_S = 600
 
 # --- Horizon / dome mask -----------------------------------------------------
-# Azimuth sector -> minimum observable altitude (deg). None means blocked.
+# Azimuth sector -> (start, end, minimum observable altitude, hardness).
+# A minimum of None means the whole sector is discouraged at every altitude.
 # Sectors are 45 deg wide starting at 337.5; N wraps through 0.
+#
+# HARDNESS is the important field:
+#
+#   "soft"  the sky there is poor, not unreachable. Rows are KEPT and the
+#           target stays in the queue carrying a warning. Nothing is deleted.
+#   "hard"  the telescope genuinely cannot point there -- terrain, a building,
+#           a mount limit. Rows are rejected outright.
+#
+# Everything is soft today because every limit we have is a preference, not an
+# obstruction: north is avoided because Trieste sits 41 km away at bearing 3
+# deg and lights up that sky, not because anything blocks it. Deleting targets
+# for that reason would mean an impactor discovered in the north simply never
+# appeared on this board. It is also how the observatory's own planner behaves
+# -- planets-new.py has no azimuth mask at all, only a flat altitude floor.
+#
+# Mark a sector "hard" only once Luka confirms it is a physical obstruction.
 #
 # TBD -- from observer notes containing two unresolved conflicts:
 #   * "northwest is 50 degrees" vs later "Northwest = 40"  -> using 40
 #   * "below 30-40 degrees in the west" vs "West = 40"     -> using 40
 #   * SW was never specified                               -> interpolated 30
-# The legacy planner has no azimuth-dependent mask at all, only a flat floor,
-# so this is knowledge we hold that its code does not.
 HORIZON_MASK = [
-    (337.5, 22.5, None),   # N  - "avoid north completely"
-    (22.5, 67.5, 20.0),    # NE - "above 20 in South and East"
-    (67.5, 112.5, 20.0),   # E
-    (112.5, 157.5, 20.0),  # SE
-    (157.5, 202.5, 20.0),  # S
-    (202.5, 247.5, 30.0),  # SW - TBD, interpolated between S and W
-    (247.5, 292.5, 40.0),  # W  - "West = 40"
-    (292.5, 337.5, 40.0),  # NW - "Northwest = 40"
+    (337.5, 22.5, None, "soft"),   # N  - "avoid north completely" (Trieste)
+    (22.5, 67.5, 20.0, "soft"),    # NE - "above 20 in South and East"
+    (67.5, 112.5, 20.0, "soft"),   # E
+    (112.5, 157.5, 20.0, "soft"),  # SE
+    (157.5, 202.5, 20.0, "soft"),  # S
+    (202.5, 247.5, 30.0, "soft"),  # SW - TBD, interpolated between S and W
+    (247.5, 292.5, 40.0, "soft"),  # W  - "West = 40"
+    (292.5, 337.5, 40.0, "soft"),  # NW - "Northwest = 40"
 ]
+SECTOR_NAMES = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 # Flat floor applied in addition to the mask.
 MIN_ALT = 15.0                       # legacy
 # Zenith blind spot. The observer mentioned an upper elevation limit but gave
@@ -111,6 +127,19 @@ SKIP_ALREADY_OBSERVED = True         # legacy
 # FOV = 2562; 1.5% apart, so one of them is rounded or stale. Recorded here so
 # the discrepancy is not lost.
 FOV_ARCSEC = 2600
+
+# --- Sky map -----------------------------------------------------------------
+# All-sky view drawn on the board: zenith at the centre, horizon at the rim,
+# radius linear in altitude.
+#
+# Orientation is the MAP convention -- north up, east RIGHT, south down, west
+# left -- so it reads like looking down on the observatory, matching how dome
+# azimuth is thought about. Note this is the mirror of a planisphere, which
+# puts east on the left because you hold it up against the sky. Verified by
+# the bearing to Trieste: 3.0 deg true, which must land at the top of the disc.
+SKYMAP_SIZE = 560                    # px, square
+SKYMAP_RINGS = (20, 40, 60, 80)      # altitude circles drawn inside the rim
+SKYMAP_MOON_RING_POINTS = 180        # samples around the lunar exclusion locus
 
 # --- Exposures ---------------------------------------------------------------
 # The observatory's real rule, recovered from the legacy planner:

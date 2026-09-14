@@ -98,6 +98,34 @@ class Row:
         return {k: getattr(self, k) for k in self.__slots__}
 
 
+def track(lines):
+    """Just (ts, compass azimuth, altitude) for each parseable line.
+
+    The sky map redraws on every page load so its positions are current
+    rather than up to five minutes stale, which means re-reading the cached
+    ephemeris of every observable target on each request. Building full Row
+    objects for that is wasted work -- the map needs three numbers per line.
+
+    It deliberately reuses the same field indices and the same +180 azimuth
+    conversion as Row rather than repeating them: a second, drifting copy of
+    the south-versus-north convention is exactly the bug that would rotate
+    the whole map through half a turn without anything failing.
+    """
+    out = []
+    for line in lines:
+        p = line.split()
+        if len(p) < _MIN_FIELDS:
+            continue
+        try:
+            out.append((_to_unix_utc(p[0], p[1], p[2], p[3]),
+                        (float(p[_I_AZ]) + 180.0) % 360.0,
+                        float(p[_I_ALT])))
+        except (ValueError, IndexError):
+            continue
+    out.sort()
+    return out
+
+
 class ObjectEphemeris:
     def __init__(self, desig, rows, offsets_url=None, map_url=None,
                  observations_url=None, error=None):
