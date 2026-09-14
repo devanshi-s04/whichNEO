@@ -7,15 +7,25 @@ Thresholds recovered from the observatory's own planner (`planets-new.py`) are
 marked **legacy**; they are almost certainly right, but worth confirming that
 they are still what you actually use rather than what the code drifted to.
 
-## 1. Dome / horizon geometry — highest impact
+## 1. Dome / horizon geometry — which sectors are real obstructions?
 
-This is the one rule the legacy planner does **not** have. Its code carries
-only a flat altitude floor, so the sector geometry below exists nowhere except
-in your notes, and it is what most changes which targets we show.
+**The question has changed shape.** The mask no longer removes anything. Every
+sector is now marked `"soft"` in `config.HORIZON_MASK`, meaning a target in
+poor sky stays in the queue carrying a warning badge rather than vanishing.
 
-| Sector | Azimuth | Using | Problem |
+That change was made because the reason for avoiding the north is Trieste's
+light dome — the town sits 41 km away at bearing 3.0° true — and light
+pollution makes a target *poor*, not *unreachable*. An impactor discovered in
+the north has to appear on this board. It also matches the legacy planner,
+which has no azimuth mask at all, only a flat altitude floor.
+
+On the night this was built, that reprieved **105 ephemeris rows** that the
+old code was deleting outright: 69 in the west, 27 in the south-west, 6 in the
+north-west and 3 in the north.
+
+| Sector | Azimuth | Prefer above | Problem |
 |---|---|---|---|
-| N  | 337.5–22.5° | **blocked** | is the blocked sector really 45° wide? |
+| N  | 337.5–22.5° | any altitude | is the avoided sector really 45° wide? |
 | NE | 22.5–67.5°  | 20° | from "above 20 in South and East" |
 | E  | 67.5–112.5° | 20° | ” |
 | SE | 112.5–157.5°| 20° | ” |
@@ -24,10 +34,16 @@ in your notes, and it is what most changes which targets we show.
 | W  | 247.5–292.5°| 40° | "below 30-40 in the west" vs "West = 40" |
 | NW | 292.5–337.5°| 40° | "northwest is 50" vs "Northwest = 40" |
 
-- Is this a hard dome obstruction or a working preference?
-- Is the real mask a smooth profile rather than eight sectors? Find_Orb
-  supports a continuous horizon (`site_L01.txt`) — if one exists, we should
-  use it directly.
+**What we need from you:**
+
+1. **Is any sector a genuine physical obstruction** — terrain, a building, a
+   mount limit — rather than a preference? Mark that one `"hard"` and it will
+   reject again. Nothing is hard today.
+2. The numbers above, particularly SW, which we invented.
+3. Is the real mask a smooth profile rather than eight sectors? Find_Orb
+   supports a continuous horizon (`site_L01.txt`) — if one exists, we should
+   use it directly. The sky map draws the sectors as a visible staircase, so
+   the eight-step approximation is easy to judge by eye.
 
 **Azimuth convention: RESOLVED, no longer a question.** MPC reports azimuth
 from south; we convert to compass bearings on parse. That the notes are also

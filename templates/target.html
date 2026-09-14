@@ -113,11 +113,41 @@
     <table class="kv">
       <tr><th>Best altitude</th><td>
         {% if row.max_alt_utc %}{{ '%.1f'|format(row.max_alt) }}&deg; at {{ row.max_alt_utc[11:] }} UT
+        {%- if row.max_alt_az is not none %} <span class="dim">&middot; azimuth {{ '%.0f'|format(row.max_alt_az) }}&deg;</span>{% endif %}
         {% else %}<span class="dim">no window</span>{% endif %}</td></tr>
+      {% if row.mask_flags %}
+      <tr><th>Sky quality</th><td>
+        <span class="pill sky">{{ 'sky!' if 'allNight' in row.mask_flags else 'sky' }}</span>
+        <span class="dim">
+        {%- if 'allNight' in row.mask_flags %}
+          every usable moment tonight falls in sky the observatory prefers to
+          avoid
+        {%- else %}
+          its best moment falls in sky the observatory prefers to avoid
+        {%- endif %}.
+        Kept in the queue deliberately &mdash; that limit is light pollution,
+        not an obstruction.</span></td></tr>
+      {% endif %}
       <tr><th>Exposure</th><td>{{ '%.1f'|format(row.exposure_min) ~ ' min' if row.exposure_min else '—' }}</td></tr>
       <tr><th>Window</th><td>{{ '%.0f'|format(row.window_minutes) }} min</td></tr>
       <tr><th>Alt / Az now</th><td>
+        {% if now_pos and now_pos.up %}
+          {{ '%.1f'|format(now_pos.alt) }}&deg; / {{ '%.1f'|format(now_pos.az) }}&deg;
+        {% elif now_pos and now_pos.next_ts %}
+          <span class="dim">below {{ config.MPC_SERVER_MIN_ALT|int }}&deg; &mdash; not up</span>
+        {% elif now_pos %}
+          <span class="dim">not up again tonight</span>
+        {% else %}<span class="dim">no ephemeris cached</span>{% endif %}</td></tr>
+      {% if now_pos and not now_pos.up and now_pos.next_ts %}
+      <tr><th>Next usable</th><td>
+        {{ '%.1f'|format(now_pos.next_alt) }}&deg; / {{ '%.1f'|format(now_pos.next_az) }}&deg;
+        <span class="dim">at {{ now_pos.next_ts|localt }} {{ tzname }}
+          ({{ now_pos.next_ts|utct }} UT)</span></td></tr>
+      {% endif %}
+      <tr><th>Pointing row</th><td>
         {% if row.cur_alt is not none %}{{ '%.1f'|format(row.cur_alt) }}&deg; / {{ '%.1f'|format(row.cur_az) }}&deg;
+          <span class="dim">&mdash; the nearest usable ephemeris row, interpolated
+          {{ config.INTERPOLATE_AHEAD_S // 60 }} min ahead for slewing</span>
         {% else %}—{% endif %}</td></tr>
       <tr><th>Sky motion</th><td>{{ '%.2f'|format(row.cur_motion) ~ '&Prime;/min'|safe if row.cur_motion is not none else '—' }}</td></tr>
       <tr><th>Moon separation</th><td>{{ '%.0f'|format(row.cur_moon_dist) ~ '&deg;'|safe if row.cur_moon_dist is not none else '—' }}</td></tr>

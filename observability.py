@@ -19,7 +19,12 @@ _A_EARTH_M = 6378137.0
 _SIDEREAL_RATE = 1.0027379093
 
 _MIN_ALT_BY_SECTOR = np.array(
-    [np.inf if m is None else m for (_, _, m) in config.HORIZON_MASK]
+    [np.inf if m is None else m for (_, _, m, _h) in config.HORIZON_MASK]
+)
+# Whether violating a sector's limit is a refusal or a warning. See the
+# HARDNESS note in config.HORIZON_MASK: soft sectors never remove a target.
+_HARD_BY_SECTOR = np.array(
+    [h == "hard" for (_, _, _m, h) in config.HORIZON_MASK]
 )
 
 
@@ -33,14 +38,51 @@ def site():
     )
 
 
-def min_altitude_for_azimuth(az_deg):
-    """Horizon-mask floor for a given azimuth. inf means the sector is blocked.
+def sector_index(az_deg):
+    """Index into config.HORIZON_MASK for an azimuth.
 
     Sectors are 45 deg wide starting at 337.5, matching config.HORIZON_MASK
-    order, so the sector index is a direct arithmetic lookup.
+    order, so the lookup is direct arithmetic rather than a search.
     """
-    idx = np.floor(((np.asarray(az_deg) - 337.5) % 360.0) / 45.0).astype(int)
-    return _MIN_ALT_BY_SECTOR[idx]
+    return np.floor(((np.asarray(az_deg) - 337.5) % 360.0) / 45.0).astype(int)
+
+
+def min_altitude_for_azimuth(az_deg):
+    """Horizon-mask floor for a given azimuth. inf means the whole sector is
+    discouraged at every altitude."""
+    return _MIN_ALT_BY_SECTOR[sector_index(az_deg)]
+
+
+def sector_is_hard(az_deg):
+    """True where the sector is a real obstruction rather than a preference."""
+    return _HARD_BY_SECTOR[sector_index(az_deg)]
+
+
+def hard_min_altitude(az_deg):
+    """The altitude floor that actually rejects, per azimuth.
+
+    Soft sectors impose none (-inf), so a discouraged direction never
+    shortens a computed observing window -- it only earns a warning.
+    """
+    idx = sector_index(az_deg)
+    return np.where(_HARD_BY_SECTOR[idx], _MIN_ALT_BY_SECTOR[idx], -np.inf)
+
+
+def mask_violation(az_deg, alt_deg):
+    """How a single position sits against the mask.
+
+    Returns (reason, hard) where reason is None when the position is clear.
+    A soft violation is information, not a rejection -- it must never be used
+    to drop a target, only to warn about one.
+    """
+    idx = int(sector_index(az_deg))
+    floor = float(_MIN_ALT_BY_SECTOR[idx])
+    hard = bool(_HARD_BY_SECTOR[idx])
+    if np.isinf(floor):
+        return "azBlocked", hard
+    if alt_deg < floor:
+        return "belowMask", hard
+    return None, hard
 
 
 def _altaz_from_hour_angle(ha_deg, dec_deg, lat_deg):
@@ -75,6 +117,55 @@ def moon_illumination(t, loc):
     phase = np.arctan2(sun.distance * np.sin(elong),
                        moon.distance - sun.distance * np.cos(elong))
     return float((1 + np.cos(phase)) / 2.0)
+
+
+def moon_state(unix_ts=None):
+    """Where the moon is and how full it is, for the sky map.
+
+    Azimuth is returned as a compass bearing, the same convention the horizon
+    mask and the parsed ephemeris rows use. compute() below calculates the
+    moon's altitude for the filter cascade and used to discard the azimuth;
+    the map needs both, so this returns the pair.
+    """
+    loc = site()
+    t = Time(float(unix_ts), format="unix") if unix_ts is not None else Time.now()
+    moon = get_body("moon", t, loc)
+    aa = moon.transform_to(AltAz(obstime=t, location=loc))
+    return {"alt": float(aa.alt.deg), "az": float(aa.az.deg),
+            "illum": moon_illumination(t, loc), "ts": float(t.unix)}
+
+
+def angular_separation(alt1, az1, alt2, az2):
+    """Great-circle separation between two horizon positions, in degrees.
+
+    On the alt/az sphere altitude plays the part of latitude and azimuth of
+    longitude, so this is the ordinary spherical distance. Used to place the
+    lunar exclusion locus and to verify that it really is MOON_SEP_MIN wide.
+    """
+    a1, a2 = np.radians(alt1), np.radians(alt2)
+    d_az = np.radians(np.asarray(az2) - np.asarray(az1))
+    cos_d = np.sin(a1) * np.sin(a2) + np.cos(a1) * np.cos(a2) * np.cos(d_az)
+    return np.degrees(np.arccos(np.clip(cos_d, -1.0, 1.0)))
+
+
+def offset_position(alt_deg, az_deg, sep_deg, bearing_deg):
+    """The point `sep_deg` away from (alt, az) along a given bearing.
+
+    The standard destination-point formula on the alt/az sphere. Sampling
+    bearings all the way round traces the true locus of constant separation,
+    which is what the moon circle on the sky map has to be: a fixed angular
+    radius is NOT a fixed radius on the projected disc, and drawing it as a
+    plain circle would be wrong everywhere except directly overhead.
+    """
+    lat = np.radians(alt_deg)
+    d = np.radians(sep_deg)
+    brg = np.radians(np.asarray(bearing_deg, dtype=float))
+
+    sin_lat2 = np.sin(lat) * np.cos(d) + np.cos(lat) * np.sin(d) * np.cos(brg)
+    lat2 = np.arcsin(np.clip(sin_lat2, -1.0, 1.0))
+    d_lon = np.arctan2(np.sin(brg) * np.sin(d) * np.cos(lat),
+                       np.cos(d) - np.sin(lat) * np.sin(lat2))
+    return np.degrees(lat2), (az_deg + np.degrees(d_lon)) % 360.0
 
 
 def altaz_batch(ra_degs, dec_degs, unix_ts):
@@ -125,7 +216,11 @@ def compute(rows, when=None, scan_hours=24, scan_step_min=2):
     sun_now = get_body("sun", now, loc)
     moon_now = get_body("moon", now, loc)
     sun_alt_now = float(sun_now.transform_to(frame_now).alt.deg)
-    moon_alt_now = float(moon_now.transform_to(frame_now).alt.deg)
+    moon_aa_now = moon_now.transform_to(frame_now)
+    moon_alt_now = float(moon_aa_now.alt.deg)
+    # Kept, not discarded: the sky map draws the moon and its exclusion locus,
+    # both of which need the azimuth as well as the altitude.
+    moon_az_now = float(moon_aa_now.az.deg)
     illum = moon_illumination(now, loc)
     # Separate in the bodies' own topocentric GCRS frame. Mixing ICRS targets
     # with GCRS bodies makes astropy warn that the result is direction
@@ -163,6 +258,7 @@ def compute(rows, when=None, scan_hours=24, scan_step_min=2):
         r["sun_alt_deg"] = sun_alt_now
         r["moon_sep_deg"] = float(moon_sep[i])
         r["moon_alt_deg"] = moon_alt_now
+        r["moon_az_deg"] = moon_az_now
         r["moon_illum"] = illum
         r["sun_elong_deg"] = float(sun_elong[i])
 
@@ -179,7 +275,9 @@ def compute(rows, when=None, scan_hours=24, scan_step_min=2):
 
         alt_grid, az_grid = _altaz_from_hour_angle(
             ((lst_grid - ra_app[i] + 180.0) % 360.0) - 180.0, dec_app[i], lat)
-        ok_grid = (alt_grid >= min_altitude_for_azimuth(az_grid)) & dark_grid
+        # Only hard limits close a window. A soft sector is poor sky, not
+        # unreachable sky, so it must not shorten what we report as available.
+        ok_grid = (alt_grid >= hard_min_altitude(az_grid)) & dark_grid
         if config.MAX_ALTITUDE is not None:
             ok_grid &= alt_grid <= config.MAX_ALTITUDE
 
@@ -208,11 +306,13 @@ def evaluate_flags(r):
     if r["sun_alt_deg"] >= config.SUN_ALT_MAX:
         flags.append("SUN_UP")
 
-    floor = float(min_altitude_for_azimuth(r["az_deg"]))
-    if np.isinf(floor):
-        flags.append("AZ_BLOCKED")
-    elif r["alt_deg"] < floor:
-        flags.append("TOO_LOW")
+    # A mask violation only refuses when the sector is hard. Soft sectors
+    # record a warning instead, so nothing is ever dropped for poor sky.
+    reason, hard = mask_violation(r["az_deg"], r["alt_deg"])
+    if reason and hard:
+        flags.append("AZ_BLOCKED" if reason == "azBlocked" else "TOO_LOW")
+    elif reason:
+        r["mask_warning"] = reason
     if config.MAX_ALTITUDE is not None and r["alt_deg"] > config.MAX_ALTITUDE:
         flags.append("TOO_HIGH")
 
