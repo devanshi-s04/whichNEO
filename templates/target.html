@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ row.desig }} &mdash; WhichNEO</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<script src="{{ url_for('static', filename='svg_zoom.js') }}" defer></script>
 </head>
 <body>
 <div class="wrap">
@@ -139,6 +140,27 @@
 {% if unc_svg %}
 <div class="unc">
   <div class="uncplot">{{ unc_svg|safe }}</div>
+  {% if moon_svg %}
+  <div class="uncplot moonplot">
+    {{ moon_svg|safe }}
+    <p class="note" style="margin:8px 2px 0">
+      In the staralt style: the object's altitude (solid) and the Moon's
+      altitude (dashed), across every ephemeris row MPC sent for the night.
+      The shaded band is the window pipeline.py judged actually usable; the
+      red dashed line is L01's {{ config.MIN_ALT|int }}&deg; elevation floor.
+      Hover a point on the object's curve for its exact Moon separation.
+    </p>
+  </div>
+  {% else %}
+  <div class="uncplot moonplot dim" style="display:flex;align-items:center;justify-content:center;min-height:120px;max-width:420px">
+    <p class="note" style="margin:0">
+      No ephemeris cached for this target
+      {%- if row.discard_reasons %} &mdash; rejected before one was fetched
+      ({{ row.discard_reasons|join(', ')|lower|replace('_',' ') }}){% endif %},
+      so there's no altitude track to plot.
+    </p>
+  </div>
+  {% endif %}
   <table class="kv uncfacts">
     <tr><th>Variant orbits</th><td>{{ unc_points }}</td></tr>
     <tr><th>Distinct positions</th><td>
@@ -149,7 +171,11 @@
       {%- endif %}</td></tr>
     <tr><th>Cloud extent</th><td>
       &plusmn;{{ '%.0f'|format(unc_extent[0]) }}&Prime; RA &middot;
-      &plusmn;{{ '%.0f'|format(unc_extent[1]) }}&Prime; Dec</td></tr>
+      &plusmn;{{ '%.0f'|format(unc_extent[1]) }}&Prime; Dec
+      {%- if unc_extent[0] > unc_axis_half or unc_extent[1] > unc_axis_half %}
+        <br><span class="warn">wider than the plot's fixed &plusmn;{{ unc_axis_half|int }}&Prime;
+        frame &mdash; some variants are clipped off-canvas</span>
+      {%- endif %}</td></tr>
     <tr><th>Scatteredness</th><td>
       {% if row.scatteredness %}{{ row.scatteredness[0] }}&Prime; &times; {{ row.scatteredness[1] }}&Prime;
       {% else %}&mdash;{% endif %}</td></tr>
@@ -165,8 +191,10 @@
   Drawn from MPC's own variant-orbit offsets, at the same epoch as
   <a href="{{ row.map_url }}" rel="noopener">their plot</a>. Each orbit is one
   solution consistent with the observations so far; the ring marks the nominal
-  position, and the field box appears only when it is comparable in size to the
-  cloud.
+  position. Axes are fixed at &plusmn;{{ unc_axis_half|int }}&Prime; on every
+  target so the panels are directly comparable at a glance; the field box
+  appears only when it is comparable in size to that frame.
+  <span class="dim">Scroll to zoom, drag to pan, double-click to reset.</span>
   <br><br>
   <strong>Dot size shows how many variants share a position.</strong> MPC
   publishes these offsets rounded to whole arcseconds, so a tightly constrained

@@ -171,6 +171,21 @@ def load_offsets(conn, desig):
     return [tuple(p) for p in pts] if pts else None
 
 
+def load_ephemeris_lines(conn, desig):
+    """Raw MPC ephemeris lines for one object, or None if not cached.
+
+    These are the same lines update_neocp.py already fetched and cached for
+    the night; re-parsing them (via ephemeris.from_lines) costs no network
+    call and gives every per-row field -- moon distance included -- not just
+    the offsets kept for the uncertainty plot.
+    """
+    row = conn.execute("SELECT payload FROM ephemeris_cache WHERE desig=?",
+                       (desig,)).fetchone()
+    if not row:
+        return None
+    return json.loads(row["payload"]).get("lines") or None
+
+
 def save_cache(conn, entries):
     """entries: {desig: (signature, payload dict)}"""
     now = utcnow()

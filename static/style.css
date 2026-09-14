@@ -325,6 +325,7 @@ h2.sect {
   border-radius: var(--r); padding: 10px; flex: 0 0 auto;
 }
 .uncfacts { flex: 1 1 260px; min-width: 240px; }
+.moonplot { max-width: 100%; overflow-x: auto; }
 .cov-full { color: var(--go); }
 .cov-part { color: var(--warn); }
 

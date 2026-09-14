@@ -13,6 +13,8 @@ from flask import Flask, jsonify, redirect, render_template, request, url_for
 import auth
 import config
 import db
+import ephemeris
+import moonplot
 import observatories
 import ranking
 import uncertainty
@@ -282,9 +284,16 @@ def target_detail(desig):
                 if r["desig"] == desig]
         if not rows:
             return f"Unknown target {desig}", 404
-        # Drawn from points already cached, so the page makes no network call.
+        # Drawn from points/rows already cached, so the page makes no network call.
         pts = db.load_offsets(conn, desig)
         cov = uncertainty.coverage(pts) if pts else None
+
+        eph_lines = db.load_ephemeris_lines(conn, desig)
+        eph_rows = ephemeris.from_lines(desig, eph_lines).rows if eph_lines else []
+        moon_svg = moonplot.render_svg(
+            eph_rows, rows[0]["window_start_ts"], rows[0]["window_end_ts"]
+        ) if eph_rows else None
+
         return render_template(
             "target.html", row=rows[0],
             unc_svg=uncertainty.render_svg(pts) if pts else None,
@@ -292,6 +301,8 @@ def target_detail(desig):
             unc_distinct=uncertainty.distinct(pts) if pts else 0,
             unc_coverage=cov,
             unc_extent=uncertainty.extent(pts) if pts else None,
+            unc_axis_half=uncertainty.AXIS_HALF_ARCSEC,
+            moon_svg=moon_svg,
             fov=config.FOV_ARCSEC,
             discovery_site=observatories.lookup(rows[0].get("discovery_code")),
             other_sites=[observatories.lookup(c)
