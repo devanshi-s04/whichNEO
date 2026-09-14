@@ -1,5 +1,18 @@
 # Open questions for Luka
 
+**Quick index — what actually needs deciding:**
+
+| # | Question | Blocking |
+|---|---|---|
+| 1 | Dome mask numbers (SW never specified, NW and W conflict, no upper limit) | which targets we show |
+| 3b | **Exposure frame length and count** | PR #3, not deployed |
+| 4 | Confirm the recovered legacy thresholds | filter behaviour |
+| 5 | Should an object drop out after one night from L01? | queue contents |
+| 6 | Does anything read the nightly plan file? | output format |
+
+Everything else is lower stakes. The convention question that was open in §1 is
+now resolved and recorded there.
+
 Every item is a placeholder in `config.py`. Nothing here was invented to look
 complete — each is a real gap with a default that is probably wrong somewhere.
 
@@ -66,6 +79,46 @@ The rule itself is now known — `minutes = 10 + (V − 18) × 5`, **legacy**.
 But it is unbounded below: at V=12.5 it returns −17.5 minutes, which the legacy
 planner prints verbatim. We clamp at `EXPOSURE_FLOOR_MIN = 1.0`. What should
 the real floor be? Is there also a maximum total integration per target?
+
+## 3b. Exposure plan — frame length and frame count
+
+**This is the biggest open question, and there is a complete implementation
+waiting on it in PR #3 (not deployed).**
+
+The legacy rule is magnitude-only and ignores sky motion entirely. Since a
+moving target trails across the detector, motion is what really limits a single
+frame. PR #3 sets frame length from the trailing limit and derives the count
+from the legacy total:
+
+```
+t = 60 × TRAIL_BUDGET_ARCSEC ÷ motion(″/min)
+n = legacy_total ÷ t,  capped at MAX_FRAMES
+```
+
+That reproduces ~44 frames for a typical target without anything being
+hardcoded, which is close to the "about 48" observers describe.
+
+**The decision needed.** The frame cap binds on **14 of 36** observable
+targets. Fast movers then get far less integration than their magnitude asks
+for — `A11GP9t` wants 12 minutes and receives 1. One of these must be true:
+
+1. `MAX_FRAMES = 60` is too low; raise it and accept longer sequences.
+2. `TRAIL_BUDGET_ARCSEC = 2` is too tight; loosening it lengthens frames and
+   cuts the count.
+3. Fast movers genuinely cannot be done to full depth in one sequence.
+
+**Values that are guesses:**
+
+| Setting | Default | Why |
+|---|---|---|
+| `TRAIL_BUDGET_ARCSEC` | 2″ | We hold no pixel scale for L01. Should it be seeing FWHM, or a pixel or two? |
+| `MIN_EXPOSURE_S` | 1 s | Below this, readout dominates |
+| `MAX_EXPOSURE_S` | 300 s | Guess for the slowest movers |
+| `MAX_FRAMES` | 60 | Just above the typical ~44 |
+
+Also worth asking: **what is the per-frame readout time?** We deliberately do
+not model it, but at 1-second frames it dominates everything, and without it we
+cannot report honest wall-clock time per target.
 
 ## 4. Confirm the recovered thresholds
 
