@@ -127,11 +127,24 @@
 
 <div class="bar-row">
   <div class="seg">
-    <a href="{{ url_for('index', sort='chronological') }}" class="{{ 'on' if mode == 'chronological' }}">Sequence</a>
-    <a href="{{ url_for('index', sort='score') }}" class="{{ 'on' if mode == 'score' }}">By value</a>
-    <a href="{{ url_for('index', sort='mag_asc') }}" class="{{ 'on' if mode == 'mag_asc' }}">Mag &uarr;</a>
-    <a href="{{ url_for('index', sort='mag_desc') }}" class="{{ 'on' if mode == 'mag_desc' }}">Mag &darr;</a>
+    <a href="{{ url_for('index', sort='chronological') }}" data-sort="chronological"
+       class="{{ 'on' if mode == 'chronological' }}">Sequence</a>
+    <a href="{{ url_for('index', sort='score') }}" data-sort="score"
+       class="{{ 'on' if mode == 'score' }}">By value</a>
+    {% set mag_active = mode in ('mag_asc', 'mag_desc') %}
+    <a href="{{ url_for('index', sort='chronological' if mag_active else 'mag_asc') }}"
+       id="magToggle" class="{{ 'on' if mag_active }}">Sort by Magnitude</a>
   </div>
+  <a href="{{ url_for('index', sort='mag_desc' if mode == 'mag_asc' else 'mag_asc') }}"
+     id="magDir" class="magdir-btn{{ ' flip' if mode == 'mag_desc' }}" title="Flip sort direction"
+     {{ 'hidden' if not mag_active }}>
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"
+      stroke-linecap="round" stroke-linejoin="round">
+      <path d="M17 2l4 4-4 4"/><path d="M21 6H8a4 4 0 0 0-4 4"/>
+      <path d="M7 22l-4-4 4-4"/><path d="M3 18h13a4 4 0 0 0 4-4"/>
+    </svg>
+  </a>
+  <span id="magLabel" class="dim" {{ 'hidden' if not mag_active }}>{{ 'brightest first' if mode == 'mag_asc' else 'faintest first' }}</span>
   <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=1) }}">hidden</a>
   <a class="chip" href="{{ url_for('plan_text') }}">plan file</a>
   <span class="rules">
@@ -232,7 +245,44 @@ function applyOpenPlans() {
   });
 }
 
+// Sort-bar links carry the new mode in their own href's ?sort=, so clicking
+// them can be handled without a full page reload -- just refetch /rows.
+// A full navigation here would re-render the whole page (night strip, upcoming
+// cards, everything) for a change that only affects table order, which is
+// both slow and resets scroll position, making the page visibly jump.
+function updateSortBar(mode) {
+  document.querySelectorAll('.seg a[data-sort]').forEach(a => {
+    a.classList.toggle('on', a.dataset.sort === mode);
+  });
+  const magActive = mode === 'mag_asc' || mode === 'mag_desc';
+  const magToggle = document.getElementById('magToggle');
+  const magDir = document.getElementById('magDir');
+  const magLabel = document.getElementById('magLabel');
+  magToggle.classList.toggle('on', magActive);
+  magDir.hidden = !magActive;
+  magLabel.hidden = !magActive;
+  if (magActive) {
+    magDir.classList.toggle('flip', mode === 'mag_desc');
+    magLabel.textContent = mode === 'mag_asc' ? 'brightest first' : 'faintest first';
+  }
+  const withSort = s => { const p = new URLSearchParams(params); p.set('sort', s); return '?' + p; };
+  document.querySelector('.seg a[data-sort="chronological"]').href = withSort('chronological');
+  document.querySelector('.seg a[data-sort="score"]').href = withSort('score');
+  magToggle.href = withSort(magActive ? 'chronological' : 'mag_asc');
+  magDir.href = withSort(mode === 'mag_asc' ? 'mag_desc' : 'mag_asc');
+}
+
 document.addEventListener('click', ev => {
+  const sortLink = ev.target.closest('.seg a[data-sort], #magToggle, #magDir');
+  if (sortLink) {
+    ev.preventDefault();
+    const newSort = new URL(sortLink.href, location.href).searchParams.get('sort');
+    params.set('sort', newSort);
+    history.replaceState(null, '', location.pathname + '?' + params);
+    updateSortBar(newSort);
+    refresh();
+    return;
+  }
   const t = ev.target.closest('[data-plan]');
   if (t) {
     const d = t.dataset.plan;
