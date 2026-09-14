@@ -894,6 +894,71 @@ def test_altitude_plot():
     check("the legend moves to the clearer corner for a setting target",
           legend_x(setting) > legend_x(rising),
           (legend_x(setting), legend_x(rising)))
+def test_done_targets_stay_in_the_list():
+    """Marking a target done must not remove it from the board.
+
+    It used to vanish the moment you clicked done, which hid three things at
+    once: the green row, the green marker on the sky map, and the undo button
+    -- so correcting a misclick meant hunting for the row in a separate view.
+    """
+    import app
+    now = time.time()
+    rows = [
+        dict(desig="fresh", observable=True, observed=0, max_alt_ts=now + 1800),
+        dict(desig="finished", observable=True, observed=1, max_alt_ts=now + 900),
+        dict(desig="later", observable=True, observed=0, max_alt_ts=now + 7200),
+    ]
+
+    # The board always loads observed rows now; the ?observed flag is gone.
+    with app.app.test_request_context("/"):
+        v = app._view_args()
+    check("the default view asks for observed rows", v["show_observed"] is True, v)
+    with app.app.test_request_context("/?observed=0"):
+        v = app._view_args()
+    check("and no query string can turn them back off",
+          v["show_observed"] is True, v)
+
+    picked = [r["desig"] for r in app.pick_upcoming(rows, n=3)]
+    check("a done target never headlines an up-next card",
+          "finished" not in picked, picked)
+    check("the cards still offer the outstanding targets in order",
+          picked == ["fresh", "later"], picked)
+
+    # ...but it keeps its lane on the night strip, tinted rather than dropped.
+    for r in rows:
+        r.update(window_start_ts=now - 3600, window_end_ts=now + 3600,
+                 max_alt=40.0)
+    strip = app.night_strip(rows)
+    lanes = {l["desig"]: l for l in strip["lanes"]}
+    check("a done target keeps its lane on the night strip",
+          "finished" in lanes, sorted(lanes))
+    check("and the lane is marked as observed so it can be tinted",
+          lanes["finished"]["observed"] is True
+          and lanes["fresh"]["observed"] is False,
+          {k: v["observed"] for k, v in lanes.items()})
+
+
+def test_done_target_is_green_on_the_sky_map():
+    """A target done while it is still up shows a green marker.
+
+    This path existed and was tested from the day the map was built, but was
+    unreachable on the default view: the row was filtered out before the map
+    ever saw it, so the marker could never be drawn.
+    """
+    now = 1_760_000_000.0
+    track = [(now - 1800, 100.0, 30.0), (now, 110.0, 40.0),
+             (now + 1800, 120.0, 50.0)]
+    base = dict(desig="T1", vmag=19.0, score=80, mask_flags=[])
+
+    done = skymap.target_marks([dict(base, observed=True)], {"T1": track}, now)
+    check("a done, still-observable target is drawn",
+          len(done) == 1 and done[0]["up"], done)
+    check("and it is drawn green",
+          "#55b37e" in skymap.render_svg(done, None, size=400))
+
+    fresh = skymap.target_marks([dict(base, observed=False)], {"T1": track}, now)
+    check("an outstanding target stays amber",
+          "#f0a63c" in skymap.render_svg(fresh, None, size=400))
 
 
 def test_moon_phase_geometry():
@@ -952,6 +1017,8 @@ def main():
                test_moon_exclusion_locus, test_skymap_marks,
                test_altitude_plot,
                test_moon_phase_geometry, test_ephemeris_track_matches_row,
+               test_done_targets_stay_in_the_list,
+               test_done_target_is_green_on_the_sky_map,
                test_interpolate_clamps_to_the_right_end,
                test_ephemeris_refetched_when_its_window_runs_out):
         print(f"\n{fn.__name__}:")
