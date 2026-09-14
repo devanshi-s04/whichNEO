@@ -67,8 +67,8 @@ def _twilight_bounds(pts):
 
 
 def render_svg(rows, window_start_ts=None, window_end_ts=None,
-                size_w=560, size_h=320):
-    """Inline SVG: object altitude and Moon altitude vs. time (UT), with the
+                size_w=560, size_h=320, localt=None, tzlabel=None):
+    """Inline SVG: object altitude and Moon altitude vs. time, with the
     angular separation to the Moon printed under every point.
 
     rows: ephemeris.Row objects (or anything with .ts, .alt, .moon_alt,
@@ -78,10 +78,16 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
     window_end_ts, when given, are shaded as the sub-span pipeline.py
     determined to actually be usable, but never clip the curves themselves.
 
+    localt formats a timestamp for the axis. The board shows observatory local
+    time everywhere, because the people reading it are standing in the dome;
+    UT stays in the hover text, since that is what MPC and the plan file use.
+    Without it the axis falls back to UT.
+
     size_w is a floor, not a fixed width: one label per point needs its own
     horizontal slot, so the plot widens automatically once there are enough
     points that a fixed width would run them into each other.
     """
+    fmt = localt or (lambda ts: time.strftime("%H:%M", time.gmtime(ts)))
     pts = sorted(rows, key=lambda r: r.ts) if rows else []
     if len(pts) < 2:
         return None
@@ -178,20 +184,27 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
         xx = px(ts)
         parts.append(f'<line x1="{xx:.1f}" y1="{pad_t}" x2="{xx:.1f}" '
                      f'y2="{pad_t + inner_h}" stroke="#171d28"/>')
-        label = time.strftime("%H:%M", time.gmtime(ts))
+        label = fmt(ts)
         parts.append(f'<text x="{xx:.1f}" y="{pad_t + inner_h + 13}" '
                      f'fill="#556074" font-size="9" text-anchor="middle" '
                      f'font-family="monospace">{label}</text>')
 
-    # The observatory's own elevation floor -- the staralt convention of a
-    # dashed cutoff line, same threshold pipeline.py filters against.
-    if lo <= config.MIN_ALT <= hi:
-        yy = py(config.MIN_ALT)
+    # The dashed cutoff line, in the staralt convention. It draws MPC's own
+    # floor rather than config.MIN_ALT: we pass oalt=20 in ephemeris._post, so
+    # MPC never returns a row below 20 degrees and the curve physically cannot
+    # go under this line. MIN_ALT is 15 and therefore dead -- drawing it would
+    # imply a dome limit that never actually applies, and leave empty space
+    # beneath the curve that no data could ever occupy. Which of the two the
+    # observatory really wants is open question 4 in TBD.md.
+    floor = config.MPC_SERVER_MIN_ALT
+    if lo <= floor <= hi:
+        yy = py(floor)
         parts.append(f'<line x1="{pad_l}" y1="{yy:.1f}" x2="{pad_l + inner_w}" '
                      f'y2="{yy:.1f}" stroke="#c75c5c" stroke-dasharray="4 3"/>')
         parts.append(f'<text x="{pad_l + inner_w - 4}" y="{yy - 4:.1f}" '
                      f'fill="#c75c5c" font-size="9" text-anchor="end" '
-                     f'font-family="monospace">min {config.MIN_ALT:g}&#176;</text>')
+                     f'font-family="monospace">MPC cutoff {floor:g}&#176;'
+                     f'</text>')
 
     # A straight line across one of the gaps found above would claim data
     # that was never returned; break the path there instead.
@@ -212,15 +225,18 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
     # orange when it does not -- independent of whether the row also failed
     # some other criterion (altitude, sun, azimuth) that kept it out of the
     # shaded usable window above.
-    label_y0 = pad_t + inner_h + 13 + 6   # below the UT tick-label row
+    label_y0 = pad_t + inner_h + 13 + 6   # below the tick-label row
     for r in pts:
         clear = r.moon_dist > config.MOON_SEP_MIN
         color = "var(--go)" if clear else "var(--warn)"
         cx = px(r.ts)
+        # Local on the axis, both here: UT is what MPC, the plan file and the
+        # 80-column astrometry all speak, so it has to stay reachable.
+        stamp = f'{fmt(r.ts)} ({time.strftime("%H:%M", time.gmtime(r.ts))} UT)'
         parts.append(f'<circle cx="{cx:.1f}" cy="{py(r.alt):.1f}" r="2.2" '
                      f'fill="{color}" stroke="#0a0c14" stroke-width="0.6">'
-                     f'<title>{time.strftime("%H:%M", time.gmtime(r.ts))} '
-                     f'UT &mdash; object {r.alt:.0f}&#176;, Moon {r.moon_alt:.0f}&#176;, '
+                     f'<title>{stamp}'
+                     f' &#8212; object {r.alt:.0f}&#176;, Moon {r.moon_alt:.0f}&#176;, '
                      f'{r.moon_dist:.0f}&#176; apart '
                      f'({"clears" if clear else "within"} the '
                      f'{config.MOON_SEP_MIN:g}&#176; limit)</title></circle>')
@@ -235,9 +251,32 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
     # Legend, top-left inside the plot -- line style doubles for colour-blind
     # readers, since object is solid and Moon is dashed. Backed by a solid
     # panel: the object curve's peak often sits right behind it otherwise.
-    lx, ly = pad_l + 8, pad_t + 12
-    parts.append(f'<rect x="{lx - 6}" y="{ly - 10}" width="132" height="56" '
-                 f'fill="#0a0c14" fill-opacity="0.88" rx="3"/>')
+    # Placed in whichever top corner the curves come nearest to missing, rather
+    # than pinned left behind an opaque panel. Masking the overlap hides real
+    # data: a target setting through the night starts high on the left, so a
+    # fixed left-hand legend swallowed its first couple of hours entirely.
+    # Rising and setting targets want opposite corners, so measure instead of
+    # guessing.
+    legend_w, legend_h = 132, 56
+
+    def _clearance(ox, oy):
+        """Smallest distance from a legend box at (ox, oy) to any plotted point."""
+        x0, x1 = ox - 6, ox - 6 + legend_w
+        y0, y1 = oy - 10, oy - 10 + legend_h
+        worst = float("inf")
+        for r in pts:
+            for value in (r.alt, r.moon_alt):
+                x, y = px(r.ts), py(value)
+                dx = max(x0 - x, 0.0, x - x1)
+                dy = max(y0 - y, 0.0, y - y1)
+                worst = min(worst, (dx * dx + dy * dy) ** 0.5)
+        return worst
+
+    lx, ly = max([(pad_l + 8, pad_t + 12),
+                  (pad_l + inner_w - legend_w - 2, pad_t + 12)],
+                 key=lambda c: _clearance(*c))
+    parts.append(f'<rect x="{lx - 6}" y="{ly - 10}" width="{legend_w}" '
+                 f'height="{legend_h}" fill="#0a0c14" fill-opacity="0.88" rx="3"/>')
     parts.append(f'<line x1="{lx}" y1="{ly}" x2="{lx + 16}" y2="{ly}" '
                  f'stroke="#5fc9d4" stroke-width="1.6"/>')
     parts.append(f'<text x="{lx + 20}" y="{ly + 3}" fill="#9fb0c3" '
@@ -251,11 +290,12 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
                  f'font-family="monospace">&gt;{config.MOON_SEP_MIN:g}&#176; from Moon</text>')
     parts.append(f'<circle cx="{lx + 8}" cy="{ly + 39}" r="2.2" fill="var(--warn)"/>')
     parts.append(f'<text x="{lx + 20}" y="{ly + 42}" fill="#9fb0c3" font-size="9" '
-                 f'font-family="monospace">&le;{config.MOON_SEP_MIN:g}&#176; from Moon</text>')
+                 f'font-family="monospace">&#8804;{config.MOON_SEP_MIN:g}&#176; '
+                 f'from Moon</text>')
 
     parts.append(f'<text x="{size_w / 2:.0f}" y="{size_h - 4}" fill="#556074" '
                  f'font-size="9.5" text-anchor="middle" font-family="monospace">'
-                 f'time (UT)</text>')
+                 f'time ({tzlabel or "UT"})</text>')
     parts.append(f'<text x="11" y="{size_h / 2:.0f}" fill="#556074" font-size="9.5" '
                  f'text-anchor="middle" font-family="monospace" '
                  f'transform="rotate(-90 11 {size_h / 2:.0f})">Altitude</text>')

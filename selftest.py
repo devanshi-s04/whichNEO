@@ -13,6 +13,7 @@ Two of these guard against mistakes that would otherwise be invisible:
 Run: python3 selftest.py
 """
 
+import importlib
 import os
 import re
 import sys
@@ -30,6 +31,9 @@ import observability
 import output
 import pipeline
 import ranking
+import moonplot
+import skymap
+import update_neocp
 
 FAILURES = []
 
@@ -568,11 +572,369 @@ def test_row_rejection_reasons():
     check("row near the moon rejected",
           "nearMoon" in pipeline.row_rejections(r4, far_future))
 
+    # The horizon mask must NOT delete anything while its sectors are soft.
+    # An impactor discovered toward Trieste is still an impactor; the light
+    # dome makes it a poor target, not an invisible one.
     r5 = ephemeris.Row(SAMPLE_EPH)
     r5.az, r5.alt = 0.0, 80.0              # due north, high
-    check("north sector blocked by the dome mask",
-          "azBlocked" in pipeline.row_rejections(r5, far_future),
+    check("north target survives the soft mask",
+          pipeline.row_rejections(r5, far_future) == [],
           pipeline.row_rejections(r5, far_future))
+    check("north target is flagged instead",
+          any(f.startswith("azBlocked:") for f in pipeline.row_mask_flags(r5)),
+          pipeline.row_mask_flags(r5))
+    check("flag names the sector",
+          pipeline.row_mask_flags(r5) == ["azBlocked:N"],
+          pipeline.row_mask_flags(r5))
+
+    r6 = ephemeris.Row(SAMPLE_EPH)
+    r6.az, r6.alt = 270.0, 25.0            # west, under its 40 deg preference
+    check("low western row kept but flagged",
+          pipeline.row_rejections(r6, far_future) == []
+          and pipeline.row_mask_flags(r6) == ["belowMask:W"],
+          (pipeline.row_rejections(r6, far_future), pipeline.row_mask_flags(r6)))
+
+    # ...but a sector marked hard still refuses, which is the whole point of
+    # keeping the distinction configurable.
+    saved = config.HORIZON_MASK[:]
+    try:
+        config.HORIZON_MASK[0] = (337.5, 22.5, None, "hard")
+        importlib.reload(observability)
+        importlib.reload(pipeline)
+        check("a sector marked hard does reject",
+              "azBlocked" in pipeline.row_rejections(r5, far_future),
+              pipeline.row_rejections(r5, far_future))
+    finally:
+        config.HORIZON_MASK[:] = saved
+        importlib.reload(observability)
+        importlib.reload(pipeline)
+    check("mask restored to soft after the test",
+          pipeline.row_rejections(r5, far_future) == [])
+
+
+def test_skymap_orientation():
+    """North up, east right, south down, west left.
+
+    The ground truth is geographic: Trieste lies at bearing 3.0 deg true from
+    L01, 41 km away, so it must land essentially at the top of the disc. Any
+    mirrored or rotated projection fails this.
+    """
+    size, cx, cy, radius = 400, 200.0, 200.0, 180.0
+    horizon = [("N", 0, cx, cy - radius), ("E", 90, cx + radius, cy),
+               ("S", 180, cx, cy + radius), ("W", 270, cx - radius, cy)]
+    for name, az, ex, ey in horizon:
+        x, y = skymap.project(az, 0.0, cx, cy, radius)
+        check(f"{name} (az {az}) projects to the expected edge",
+              abs(x - ex) < 1e-6 and abs(y - ey) < 1e-6, f"got {x:.2f},{y:.2f}")
+
+    tx, ty = skymap.project(3.0, 0.0, cx, cy, radius)
+    check("Trieste at bearing 3.0 deg lands at the top of the disc",
+          abs(tx - cx) < radius * 0.06 and ty < cy - radius * 0.99,
+          f"got {tx:.1f},{ty:.1f} vs centre {cx},{cy}")
+
+    zx, zy = skymap.project(123.0, 90.0, cx, cy, radius)
+    check("zenith lands on the centre at any azimuth",
+          abs(zx - cx) < 1e-9 and abs(zy - cy) < 1e-9, f"got {zx},{zy}")
+
+    # Radius linear in altitude: 45 deg must sit exactly half way out.
+    hx, hy = skymap.project(90.0, 45.0, cx, cy, radius)
+    check("altitude 45 sits half way to the rim",
+          abs((hx - cx) - radius / 2) < 1e-6, f"got {hx - cx:.3f}")
+
+    # East on the RIGHT is the map convention, the mirror of a planisphere.
+    ex, _ = skymap.project(90.0, 0.0, cx, cy, radius)
+    wx, _ = skymap.project(270.0, 0.0, cx, cy, radius)
+    check("east is right of west (map convention, not planisphere)",
+          ex > cx > wx, f"east {ex:.1f}, west {wx:.1f}")
+
+
+def test_skymap_mask_wedges():
+    """Every sector wedge must cover the sector it claims, and no other."""
+    svg = skymap.render_svg([], None, size=400)
+    for name in config.SECTOR_NAMES:
+        check(f"{name} wedge present in the map",
+              f">{name} &mdash;" in svg or f">{name}</text>" in svg)
+
+    idx = {n: i for i, n in enumerate(config.SECTOR_NAMES)}
+    for name, az in [("N", 0), ("NE", 45), ("E", 90), ("SE", 135),
+                     ("S", 180), ("SW", 225), ("W", 270), ("NW", 315)]:
+        got = int(observability.sector_index(az))
+        check(f"azimuth {az:3d} falls in sector {name}", got == idx[name],
+              f"got {config.SECTOR_NAMES[got]}")
+
+    # Sector boundaries: 337.5 is the first degree of N, 22.5 the first of NE.
+    check("337.5 is the start of the north sector",
+          int(observability.sector_index(337.5)) == 0)
+    check("22.5 is the start of the north-east sector",
+          int(observability.sector_index(22.5)) == 1)
+
+
+def test_moon_exclusion_locus():
+    """The lunar ring must be a true constant-separation locus.
+
+    A fixed angular radius is not a fixed radius on this projection, so
+    drawing a plain circle would be wrong away from the zenith. Every sampled
+    point has to sit at exactly MOON_SEP_MIN from the moon.
+    """
+    for alt, az in [(70.0, 10.0), (35.0, 200.0), (5.0, 300.0)]:
+        bearings = [360.0 * k / 72 for k in range(72)]
+        alts, azs = observability.offset_position(
+            alt, az, config.MOON_SEP_MIN, bearings)
+        seps = observability.angular_separation(alt, az, np.array(alts),
+                                                np.array(azs))
+        worst = float(np.abs(seps - config.MOON_SEP_MIN).max())
+        check(f"locus around alt={alt:.0f} is exactly "
+              f"{config.MOON_SEP_MIN:.0f} deg wide", worst < 1e-8,
+              f"worst error {worst:.2e} deg")
+
+    # Radius is linear in zenith distance, so distance from the CENTRE is the
+    # one thing the projection preserves. A locus around the zenith therefore
+    # really is a circle, and the distortion grows toward the horizon -- which
+    # is exactly where the moon usually sits when it matters.
+    cx = cy = 200.0
+    radius = 180.0
+    bearings = [360.0 * k / 72 for k in range(72)]
+
+    def projected_spread(moon_alt):
+        alts, azs = observability.offset_position(
+            moon_alt, 0.0, config.MOON_SEP_MIN, bearings)
+        mx, my = skymap.project(0.0, moon_alt, cx, cy, radius)
+        d = []
+        for a_l, a_z in zip(list(alts), list(azs)):
+            x, y = skymap.project(a_z, a_l, cx, cy, radius)
+            d.append(((x - mx) ** 2 + (y - my) ** 2) ** 0.5)
+        return max(d) - min(d)
+
+    check("locus around the zenith projects to a true circle",
+          projected_spread(88.0) < 0.1, f"spread {projected_spread(88.0):.2f} px")
+    check("locus near the horizon is emphatically not a circle",
+          projected_spread(10.0) > 10.0,
+          f"spread only {projected_spread(10.0):.2f} px")
+    check("distortion grows as the moon drops",
+          projected_spread(10.0) > projected_spread(30.0)
+          > projected_spread(60.0) > projected_spread(88.0))
+
+
+def test_skymap_marks():
+    """A target is a dot only when the ephemeris covers this instant."""
+    now = 1_760_000_000.0
+    track = [(now - 3600, 100.0, 30.0), (now, 110.0, 40.0),
+             (now + 3600, 120.0, 50.0)]
+    rows = [{"desig": "TEST01", "observed": False, "mask_flags": [],
+             "vmag": 19.0, "score": 80}]
+
+    up = skymap.target_marks(rows, {"TEST01": track}, now)
+    check("target inside its ephemeris span is drawn as a dot",
+          len(up) == 1 and up[0]["up"] and abs(up[0]["alt"] - 40.0) < 1e-6,
+          up)
+
+    # Six hours before the first row: not up, so a rim tick, not a dot at the
+    # first row's position. Plotting the nearest row regardless is how a map
+    # ends up showing the night's targets in the afternoon.
+    early = skymap.target_marks(rows, {"TEST01": track}, now - 6 * 3600)
+    check("target outside its span becomes a rim tick",
+          len(early) == 1 and not early[0]["up"]
+          and early[0]["rise_ts"] == now - 3600, early)
+
+    after = skymap.target_marks(rows, {"TEST01": track}, now + 6 * 3600)
+    check("target whose night is over is dropped entirely", after == [], after)
+
+    obs = skymap.target_marks(
+        [dict(rows[0], observed=True)], {"TEST01": track}, now)
+    check("observed target stays on the map", len(obs) == 1 and obs[0]["observed"])
+
+    svg = skymap.render_svg(obs, None, size=400)
+    check("observed marker is drawn green", "#55b37e" in svg)
+
+    # The map's ring is judged where the object is NOW, not from the stored
+    # peak flag -- the peak deliberately prefers clean sky, so a peak-derived
+    # ring would stay dark even for a target sitting in the light dome.
+    north = [(now - 60, 5.0, 55.0), (now + 60, 5.0, 55.0)]
+    got = skymap.target_marks(
+        [dict(rows[0], mask_flags=[])], {"TEST01": north}, now)
+    check("target in the north is ringed on the map despite a clean peak flag",
+          got and got[0]["mask"], got)
+
+    south = [(now - 60, 180.0, 55.0), (now + 60, 180.0, 55.0)]
+    clear = skymap.target_marks(
+        [dict(rows[0], mask_flags=["azBlocked:N"])], {"TEST01": south}, now)
+    check("target in clear sky is not ringed despite a stale peak flag",
+          clear and not clear[0]["mask"], clear)
+
+
+def test_interpolate_clamps_to_the_right_end():
+    """Past the end of a track, clamp to the LAST sample, not the first.
+
+    Falling back to track[0] put a target that had just run off the end of its
+    ephemeris back where it was when the ephemeris began -- a day earlier and
+    most of the sky away. On the live board A11GP9t read azimuth 112 while it
+    was actually near 76.
+    """
+    t0 = 1_760_000_000.0
+    track = [(t0, 100.0, 20.0), (t0 + 1800, 110.0, 30.0), (t0 + 3600, 120.0, 40.0)]
+
+    az, alt = skymap._interpolate(track, t0 + 900)
+    check("interpolates inside the track", abs(az - 105.0) < 1e-6
+          and abs(alt - 25.0) < 1e-6, (az, alt))
+
+    az, alt = skymap._interpolate(track, t0 + 7200)
+    check("past the end clamps to the last sample",
+          (az, alt) == (120.0, 40.0), (az, alt))
+
+    az, alt = skymap._interpolate(track, t0 - 7200)
+    check("before the start clamps to the first sample",
+          (az, alt) == (100.0, 20.0), (az, alt))
+
+    # Azimuth still takes the short way round the wrap.
+    wrap = [(t0, 350.0, 30.0), (t0 + 1800, 10.0, 30.0)]
+    az, _ = skymap._interpolate(wrap, t0 + 900)
+    check("azimuth wraps the short way", abs(az - 0.0) < 1e-6 or abs(az - 360.0) < 1e-6,
+          az)
+
+
+def test_ephemeris_refetched_when_its_window_runs_out():
+    """The cache must notice an ephemeris that no longer covers tonight.
+
+    The signature tracks the orbit solution, not the span MPC computed. An
+    object attracting no new astrometry was therefore never re-requested, and
+    its cached ephemeris silently became last night's -- 15 of 38 observable
+    targets on the live board.
+    """
+    now = 1_760_000_000.0
+    target = {"desig": "TEST01", "nobs": 12, "arc_days": 0.5}
+    sig = ephemeris.signature(target)
+    full = {"offsets": [], "obs_codes": {}, "fetched_ts": now - 600,
+            "last_row_ts": now + 6 * 3600}
+
+    check("a covering ephemeris is left alone",
+          not update_neocp.needs_refetch((sig, full), target, now))
+    check("no cache entry means fetch",
+          update_neocp.needs_refetch(None, target, now))
+    check("a changed solution means fetch",
+          update_neocp.needs_refetch(("99|9.9", full), target, now))
+
+    # The case that was silently broken.
+    ended = dict(full, last_row_ts=now - 14 * 3600, fetched_ts=now - 20 * 3600)
+    check("an ephemeris whose window has ended is refetched",
+          update_neocp.needs_refetch((sig, ended), target, now))
+
+    # ...but not on every cycle, or an object that never rises again would be
+    # requested forever: a fresh fetch would also end in the past.
+    just_tried = dict(ended, fetched_ts=now - 60)
+    check("but not again within the backoff",
+          not update_neocp.needs_refetch((sig, just_tried), target, now))
+    later = dict(ended, fetched_ts=now - config.EPHEMERIS_REFETCH_BACKOFF_S - 60)
+    check("and is retried once the backoff expires",
+          update_neocp.needs_refetch((sig, later), target, now))
+
+    # Entries cached before these fields existed must backfill exactly once.
+    old = {"offsets": [], "obs_codes": {}}
+    check("entries predating the coverage fields are refetched once",
+          update_neocp.needs_refetch((sig, old), target, now))
+
+    # An object MPC returned nothing for must not spin.
+    empty = dict(full, last_row_ts=None)
+    check("an empty ephemeris does not spin the fetcher",
+          not update_neocp.needs_refetch((sig, empty), target, now))
+
+
+def _fake_eph(n=12, rising=True):
+    """A synthetic ephemeris arc for the altitude plot."""
+    base = 1_760_000_000.0
+    out = []
+    for i in range(n):
+        r = ephemeris.Row(SAMPLE_EPH)
+        r.ts = base + i * 1800
+        frac = i / (n - 1)
+        r.alt = 25.0 + 55.0 * (frac if rising else (1.0 - frac))
+        r.moon_alt = -20.0 - 30.0 * frac
+        r.sun_alt = -30.0
+        r.moon_dist = 95.0
+        out.append(r)
+    return out
+
+
+def test_altitude_plot():
+    """The staralt-style altitude plot, as brought over from #8."""
+    rows = _fake_eph()
+    svg = moonplot.render_svg(rows, rows[2].ts, rows[-3].ts,
+                              localt=lambda ts: "L%d" % (ts % 100),
+                              tzlabel="CEST")
+    check("plot renders", svg and svg.startswith("<svg"), type(svg))
+
+    # The board speaks observatory local time everywhere; UT belongs in the
+    # hover text, not on the axis.
+    check("axis is labelled with the local zone, not UT",
+          ">time (CEST)<" in svg, re.search(r">time \([^)]*\)<", svg))
+    check("axis ticks use the supplied local formatter",
+          ">L" in svg and "UT<" not in svg)
+    check("hover text still carries UT",
+          "UT &#8212;" in svg or " UT" in svg)
+
+    # MIN_ALT is dead -- oalt=20 means MPC never sends a row below 20, so a
+    # line at 15 would imply a limit that can never apply.
+    check("floor line draws MPC's real cutoff",
+          f"MPC cutoff {config.MPC_SERVER_MIN_ALT:g}" in svg)
+    check("and not the dead MIN_ALT threshold",
+          f"min {config.MIN_ALT:g}&#176;" not in svg)
+
+    check("the usable window is shaded", "observable window" in svg)
+    check("too few rows renders nothing rather than a broken axis",
+          moonplot.render_svg(rows[:1]) is None)
+
+    # Rising and setting targets crowd opposite corners, so the legend has to
+    # move. Pinning it left hid the first hours of a setting target entirely.
+    setting = moonplot.render_svg(_fake_eph(rising=False), tzlabel="CEST")
+    rising = moonplot.render_svg(_fake_eph(rising=True), tzlabel="CEST")
+
+    def legend_x(s):
+        return float(re.search(r'<rect x="([\d.]+)" y="[\d.]+" width="132"',
+                               s).group(1))
+
+    check("the legend moves to the clearer corner for a setting target",
+          legend_x(setting) > legend_x(rising),
+          (legend_x(setting), legend_x(rising)))
+
+
+def test_moon_phase_geometry():
+    """The drawn lune must enclose exactly the illuminated fraction.
+
+    Caught a real inversion: the sweep flag was backwards, so a 13 percent
+    crescent rendered as an 87 percent gibbous -- a plausible-looking moon
+    that was simply the wrong one.
+    """
+    r = 8.0
+    for illum in (0.0, 0.13, 0.25, 0.5, 0.75, 0.87, 1.0):
+        rx, sweep = skymap.lune(illum, r)
+        got = skymap.lit_fraction(rx, sweep, r)
+        check(f"phase {illum:.2f} draws {illum * 100:.0f}% of the disc",
+              abs(got - illum) < 1e-9, f"got {got:.4f}")
+
+    check("new moon encloses nothing",
+          abs(skymap.lit_fraction(*skymap.lune(0.0, r), r)) < 1e-9)
+    check("full moon encloses the whole disc",
+          abs(skymap.lit_fraction(*skymap.lune(1.0, r), r) - 1.0) < 1e-9)
+    check("a crescent subtracts, a gibbous adds",
+          skymap.lune(0.2, r)[1] == 0 and skymap.lune(0.8, r)[1] == 1)
+
+
+def test_ephemeris_track_matches_row():
+    """track() must agree with Row, including the south-to-north azimuth flip.
+
+    They are two parsers of the same line. A second, drifting copy of the
+    azimuth convention would rotate the entire map by 180 degrees without
+    anything raising.
+    """
+    row = ephemeris.Row(SAMPLE_EPH)
+    got = ephemeris.track([SAMPLE_EPH])
+    check("track returns one entry for one row", len(got) == 1, got)
+    ts, az, alt = got[0]
+    check("track timestamp matches Row", ts == row.ts, (ts, row.ts))
+    check("track azimuth matches Row (compass, not MPC south)",
+          abs(az - row.az) < 1e-9, (az, row.az))
+    check("track altitude matches Row", abs(alt - row.alt) < 1e-9, (alt, row.alt))
+    check("track azimuth really is the flipped one",
+          abs(az - (row.az_mpc + 180.0) % 360.0) < 1e-9, (az, row.az_mpc))
 
 
 def main():
@@ -585,7 +947,13 @@ def main():
                test_observatory_identification, test_uncertainty_plot,
                test_auth_protects_state_changes,
                test_schema_migration_from_older_db,
-               test_ranking_bounds, test_row_rejection_reasons):
+               test_ranking_bounds, test_row_rejection_reasons,
+               test_skymap_orientation, test_skymap_mask_wedges,
+               test_moon_exclusion_locus, test_skymap_marks,
+               test_altitude_plot,
+               test_moon_phase_geometry, test_ephemeris_track_matches_row,
+               test_interpolate_clamps_to_the_right_end,
+               test_ephemeris_refetched_when_its_window_runs_out):
         print(f"\n{fn.__name__}:")
         fn()
 

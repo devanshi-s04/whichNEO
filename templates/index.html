@@ -30,6 +30,46 @@
   </div>
 </div>
 
+{% if sky %}
+<section class="sky">
+  <div class="skyplot" id="skyplot">{{ sky.svg|safe }}</div>
+  <div class="skyside">
+    <h2>Sky now</h2>
+    <p class="cap">Zenith at the centre, horizon at the rim. North is up and
+      <strong>east is to the right</strong>, so the disc reads like a map of
+      the ground rather than a star chart.</p>
+    <table class="mini legend">
+      <tr><td><span class="sw up"></span></td><td>Up now</td>
+          <td class="n">{{ sky.up }}</td></tr>
+      <tr><td><span class="sw tick"></span></td><td>Still to rise</td>
+          <td class="n">{{ sky.pending }}</td></tr>
+      <tr><td><span class="sw done"></span></td><td>Observed</td>
+          <td class="n">&mdash;</td></tr>
+      <tr><td><span class="sw poll"></span></td><td>In poor sky now</td>
+          <td class="n">{{ sky.flagged }}</td></tr>
+      {% if sky.moon and sky.moon.alt > 0 %}
+      <tr><td><span class="sw moon"></span></td><td>Moon,
+          {{ '%.0f'|format(sky.moon.illum * 100) }}% lit</td>
+          <td class="n">{{ '%.0f'|format(sky.moon.alt) }}&deg;</td></tr>
+      {% endif %}
+    </table>
+    <p class="cap">
+      {% if sky.moon and sky.moon.alt > 0 %}
+        The dashed line is {{ config.MOON_SEP_MIN|int }}&deg; from the moon.
+        It is not a circle: a fixed angular separation projects to a
+        distorted shape, so it is drawn from the real locus.
+      {% else %}
+        The moon is below the horizon, so no exclusion zone applies.
+      {% endif %}
+      <br><br>
+      Red sky is <em>discouraged</em>, never excluded &mdash; the north is
+      avoided for Trieste&rsquo;s light dome, not because anything blocks it,
+      so targets there are still listed and still plotted.
+    </p>
+  </div>
+</section>
+{% endif %}
+
 {% if strip %}
 <section class="strip">
   <h2>Tonight</h2>
@@ -106,7 +146,9 @@
       <th class="l" title="Observatory code of the discovery observation">Disc. obs</th>
       <th class="l">MPC</th>
       <th>Score</th><th>V</th><th>Exp</th><th>&Prime;/min</th>
-      <th>Alt</th><th>Az</th><th>Moon</th><th>Unseen</th><th>q / e</th>
+      <th title="Altitude at the next usable moment, which is now while the target is up">Alt</th>
+      <th title="Azimuth at the next usable moment. Compass bearing from north; the sky map above shows the same position">Az</th>
+      <th>Moon</th><th>Unseen</th><th>q / e</th>
       <th>Value</th><th class="l">Status</th><th></th>
     </tr></thead>
     <tbody id="rows">{% include "_rows.html" %}</tbody>
@@ -117,14 +159,24 @@
   <summary>Dome mask, exposure rule and what still needs confirming</summary>
   <div class="folded">
     <table class="mini">
-      <tr><th>Sector</th><th>Azimuth</th><th>Min alt</th></tr>
-      {% for start, end, minalt in config.HORIZON_MASK %}
-      <tr><td style="color:var(--ink)">{{ ['N','NE','E','SE','S','SW','W','NW'][loop.index0] }}</td>
+      <tr><th>Sector</th><th>Azimuth</th><th>Prefer above</th><th>Effect</th></tr>
+      {% for start, end, minalt, hardness in config.HORIZON_MASK %}
+      <tr><td style="color:var(--ink)">{{ config.SECTOR_NAMES[loop.index0] }}</td>
           <td>{{ start }}&ndash;{{ end }}&deg;</td>
-          <td style="{{ 'color:var(--no)' if minalt is none }}">{{ 'blocked' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td></tr>
+          <td style="{{ 'color:var(--warn)' if minalt is none }}">{{ 'any altitude' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td>
+          <td style="{{ 'color:var(--no)' if hardness == 'hard' else 'color:var(--warn)' }}">{{ 'rejected' if hardness == 'hard' else 'warned' }}</td></tr>
       {% endfor %}
     </table>
     <p class="note">
+      <strong>The mask warns; it does not remove.</strong> Every sector is
+      currently <em>soft</em>, so a target in poor sky stays in the queue
+      carrying a badge. The north is avoided because Trieste sits 41 km away
+      at bearing 3&deg; and lights that sky, not because anything obstructs
+      it &mdash; and an impactor found in the north has to appear on this
+      board. Mark a sector <em>hard</em> in <code>config.HORIZON_MASK</code>
+      only once it is confirmed as a physical obstruction. The observatory's
+      own planner has no azimuth mask at all, only a flat altitude floor.
+      <br><br>
       Azimuths are compass bearings from north. MPC reports azimuth from
       <em>south</em>; it is converted on parse and verified against an
       independent astropy calculation every cycle. That convention was
@@ -136,9 +188,10 @@
       <code>{{ config.EXPOSURE_BASE_MIN|int }} + (V &minus; {{ config.EXPOSURE_REF_MAG|int }}) &times; {{ config.EXPOSURE_MIN_PER_MAG|int }}</code>
       minutes, floored at {{ config.EXPOSURE_FLOOR_MIN|int }}.
       <br><br>
-      <strong>Still open:</strong> SW was never specified and is interpolated to
-      30&deg;; NW was given as both 50&deg; and 40&deg;; W as both
-      &ldquo;30&ndash;40&rdquo; and 40&deg;; and an upper elevation limit was
+      <strong>Still open:</strong> which sectors, if any, are real
+      obstructions rather than preferences. Also SW, never specified and
+      interpolated to 30&deg;; NW, given as both 50&deg; and 40&deg;; W, as
+      both &ldquo;30&ndash;40&rdquo; and 40&deg;; and an upper elevation limit
       mentioned but never valued.
     </p>
   </div>
@@ -195,13 +248,35 @@ document.addEventListener('click', ev => {
   }
 });
 
+// Hovering a queue row lights up its marker on the sky map, and the reverse.
+// Both directions matter: one answers "where is number 4", the other "which
+// row is that dot".
+function linkHover(desig, on) {
+  document.querySelectorAll('.mk[data-desig="' + CSS.escape(desig) + '"]')
+    .forEach(el => el.classList.toggle('lit', on));
+  document.querySelectorAll('tr[data-desig="' + CSS.escape(desig) + '"]')
+    .forEach(el => el.classList.toggle('lit', on));
+}
+
+document.addEventListener('mouseover', ev => {
+  const el = ev.target.closest('[data-desig]');
+  if (el) linkHover(el.dataset.desig, true);
+});
+document.addEventListener('mouseout', ev => {
+  const el = ev.target.closest('[data-desig]');
+  if (el) linkHover(el.dataset.desig, false);
+});
+
 async function refresh() {
   try {
-    const [rows, st] = await Promise.all([
+    const [rows, sky, st] = await Promise.all([
       fetch('/rows?' + params.toString()).then(r => r.text()),
+      fetch('/skymap.svg?' + params.toString()).then(r => r.text()),
       fetch('/status').then(r => r.json())
     ]);
     document.getElementById('rows').innerHTML = rows;
+    const plot = document.getElementById('skyplot');
+    if (plot) plot.innerHTML = sky;
     applyOpenPlans();
     document.getElementById('last-update').innerHTML =
       st.last_update_local + '<small> ' + TZ + '</small>';

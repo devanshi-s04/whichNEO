@@ -39,7 +39,14 @@ def night_label(now=None):
 
 
 def row_rejections(row, night_end_ts):
-    """Why this ephemeris row is not observable. Empty means it is."""
+    """Why this ephemeris row cannot be observed. Empty means it can.
+
+    These are hard limits only -- physics and the clock. The horizon mask is
+    deliberately NOT here: see row_mask_flags below and the HARDNESS note in
+    config.HORIZON_MASK. A sector that is merely light-polluted must never
+    delete a target, because an object discovered there would then never
+    appear on the board at all.
+    """
     out = []
     if row.sun_alt > config.SUN_ALT_MAX:
         out.append("nearSun")
@@ -52,25 +59,58 @@ def row_rejections(row, night_end_ts):
     if row.motion < config.MIN_MOTION:
         out.append("tooSlow")
 
-    floor = float(observability.min_altitude_for_azimuth(row.az))
-    if floor == float("inf"):
-        out.append("azBlocked")
-    elif row.alt < floor:
-        out.append("belowMask")
+    reason, hard = observability.mask_violation(row.az, row.alt)
+    if reason and hard:
+        out.append(reason)
     if config.MAX_ALTITUDE is not None and row.alt > config.MAX_ALTITUDE:
         out.append("tooHigh")
     return out
 
 
+def row_mask_flags(row):
+    """Soft horizon-mask warnings for one row. Empty means clear sky.
+
+    A flagged row stays perfectly usable. The flag exists so the board can
+    say 'this one is down the light dome' rather than quietly losing it.
+    """
+    reason, hard = observability.mask_violation(row.az, row.alt)
+    if reason and not hard:
+        idx = int(observability.sector_index(row.az))
+        return [f"{reason}:{config.SECTOR_NAMES[idx]}"]
+    return []
+
+
 def usable_rows(eph, night_end_ts):
+    """Rows we can actually observe, plus a count of why the rest were cut.
+
+    Soft mask warnings are counted in the same report under a `soft:` prefix,
+    so the detail page can show how much of a night sits in poor sky without
+    those rows having been removed.
+    """
     keep, report = [], {}
     for r in eph.rows:
         reasons = row_rejections(r, night_end_ts)
         if reasons:
             report[reasons[0]] = report.get(reasons[0], 0) + 1
-        else:
-            keep.append(r)
+            continue
+        keep.append(r)
+        for f in row_mask_flags(r):
+            key = "soft:" + f
+            report[key] = report.get(key, 0) + 1
     return keep, report
+
+
+def _best_row(rows):
+    """Highest row, preferring sky that carries no soft warning.
+
+    Without the preference an object could advertise a fine 60-degree peak
+    that happens to sit straight down the light dome, while a slightly lower
+    but clean moment went unmentioned. Only if every row is flagged does the
+    peak come from a flagged one -- and then the target is badged.
+    """
+    clean = [r for r in rows if not row_mask_flags(r)]
+    pool = clean or rows
+    return max(pool, key=lambda r: r.alt), not clean
 
 
 def analyze(target, eph, orbit, now=None):
@@ -122,9 +162,10 @@ def analyze(target, eph, orbit, now=None):
     if not rows:
         discard.append("NO_WINDOW")
         target.update(max_alt_row=None, nearest_row=None, interp_row=None,
-                      max_alt_ts=None, max_alt=None, exposure_min=None,
-                      window_minutes=0.0, window_start_ts=None,
-                      window_end_ts=None, mpc_flag=None)
+                      max_alt_ts=None, max_alt=None, max_alt_az=None,
+                      exposure_min=None, window_minutes=0.0,
+                      window_start_ts=None, window_end_ts=None, mpc_flag=None,
+                      mask_flags=[])
     else:
         # MPC marks fast-moving ephemeris rows with ! or !!. It is a per-row
         # property that can change through a night, so the object-level badge
@@ -133,11 +174,21 @@ def analyze(target, eph, orbit, now=None):
                               else "!" if any(r.flag == "!" for r in rows)
                               else None)
 
-        best = max(rows, key=lambda r: r.alt)
+        best, all_flagged = _best_row(rows)
         target["max_alt_row"] = best
         target["max_alt_ts"] = best.ts
         target["max_alt"] = best.alt
+        # Azimuth at the peak, so the board can say which way to point and the
+        # mask badge can name the sector the best moment actually falls in.
+        target["max_alt_az"] = best.az
         target["exposure_min"] = best.exposure_minutes()
+
+        # Soft mask state for the object as a whole: what the peak moment sits
+        # in, and whether every usable moment tonight is compromised.
+        flags = list(row_mask_flags(best))
+        if all_flagged and flags:
+            flags.append("allNight")
+        target["mask_flags"] = flags
         target["window_minutes"] = _contiguous_window(rows, now)
         # Span of the observable rows, for the night timeline.
         target["window_start_ts"] = min(r.ts for r in rows)

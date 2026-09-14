@@ -1,5 +1,6 @@
 {% for r in rows %}
-<tr class="{{ '' if r.observable else 'gone' }}{{ ' done' if r.observed else '' }}">
+<tr class="{{ '' if r.observable else 'gone' }}{{ ' done' if r.observed else '' }}{{ ' row-hidden' if r.hidden else '' }}"
+    {% if r.observable %}data-desig="{{ r.desig }}"{% endif %}>
   <td class="l idx">{{ loop.index }}</td>
 
   <td class="peakt" title="{{ r.max_alt_ts|utct }} UT">
@@ -30,6 +31,9 @@
       <span class="pill warnflag" title="MPC: possible bad tracklet or failed orbit fit — the ephemeris may not be correct">B</span>
     {% elif r.note_flag %}
       <span class="pill warnflag" title="MPC Note column flag">{{ r.note_flag }}</span>
+    {% endif %}
+    {% if r.mask_flags %}
+      <span class="pill sky" title="Best moment is in sky the observatory prefers to avoid{% if 'allNight' in r.mask_flags %} — and so is every usable moment tonight{% endif %}. Kept in the queue on purpose: the limit is light pollution, not an obstruction.">{{ 'sky!' if 'allNight' in r.mask_flags else 'sky' }}</span>
     {% endif %}
   </td>
 

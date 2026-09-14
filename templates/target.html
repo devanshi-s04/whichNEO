@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ row.desig }} &mdash; WhichNEO</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-<script src="{{ url_for('static', filename='svg_zoom.js') }}" defer></script>
 </head>
 <body>
 <div class="wrap">
@@ -114,11 +113,41 @@
     <table class="kv">
       <tr><th>Best altitude</th><td>
         {% if row.max_alt_utc %}{{ '%.1f'|format(row.max_alt) }}&deg; at {{ row.max_alt_utc[11:] }} UT
+        {%- if row.max_alt_az is not none %} <span class="dim">&middot; azimuth {{ '%.0f'|format(row.max_alt_az) }}&deg;</span>{% endif %}
         {% else %}<span class="dim">no window</span>{% endif %}</td></tr>
+      {% if row.mask_flags %}
+      <tr><th>Sky quality</th><td>
+        <span class="pill sky">{{ 'sky!' if 'allNight' in row.mask_flags else 'sky' }}</span>
+        <span class="dim">
+        {%- if 'allNight' in row.mask_flags %}
+          every usable moment tonight falls in sky the observatory prefers to
+          avoid
+        {%- else %}
+          its best moment falls in sky the observatory prefers to avoid
+        {%- endif %}.
+        Kept in the queue deliberately &mdash; that limit is light pollution,
+        not an obstruction.</span></td></tr>
+      {% endif %}
       <tr><th>Exposure</th><td>{{ '%.1f'|format(row.exposure_min) ~ ' min' if row.exposure_min else '—' }}</td></tr>
       <tr><th>Window</th><td>{{ '%.0f'|format(row.window_minutes) }} min</td></tr>
       <tr><th>Alt / Az now</th><td>
+        {% if now_pos and now_pos.up %}
+          {{ '%.1f'|format(now_pos.alt) }}&deg; / {{ '%.1f'|format(now_pos.az) }}&deg;
+        {% elif now_pos and now_pos.next_ts %}
+          <span class="dim">below {{ config.MPC_SERVER_MIN_ALT|int }}&deg; &mdash; not up</span>
+        {% elif now_pos %}
+          <span class="dim">not up again tonight</span>
+        {% else %}<span class="dim">no ephemeris cached</span>{% endif %}</td></tr>
+      {% if now_pos and not now_pos.up and now_pos.next_ts %}
+      <tr><th>Next usable</th><td>
+        {{ '%.1f'|format(now_pos.next_alt) }}&deg; / {{ '%.1f'|format(now_pos.next_az) }}&deg;
+        <span class="dim">at {{ now_pos.next_ts|localt }} {{ tzname }}
+          ({{ now_pos.next_ts|utct }} UT)</span></td></tr>
+      {% endif %}
+      <tr><th>Pointing row</th><td>
         {% if row.cur_alt is not none %}{{ '%.1f'|format(row.cur_alt) }}&deg; / {{ '%.1f'|format(row.cur_az) }}&deg;
+          <span class="dim">&mdash; the nearest usable ephemeris row, interpolated
+          {{ config.INTERPOLATE_AHEAD_S // 60 }} min ahead for slewing</span>
         {% else %}—{% endif %}</td></tr>
       <tr><th>Sky motion</th><td>{{ '%.2f'|format(row.cur_motion) ~ '&Prime;/min'|safe if row.cur_motion is not none else '—' }}</td></tr>
       <tr><th>Moon separation</th><td>{{ '%.0f'|format(row.cur_moon_dist) ~ '&deg;'|safe if row.cur_moon_dist is not none else '—' }}</td></tr>
@@ -136,31 +165,31 @@
   </section>
 </div>
 
+<h2 class="sect">Altitude through the night</h2>
+{% if moon_svg %}
+<div class="moonplot">{{ moon_svg|safe }}</div>
+<p class="note">
+  In the staralt style: the object's altitude (solid) and the Moon's altitude
+  (dashed), across every ephemeris row MPC sent for the night. The shaded band
+  is the window <code>pipeline.py</code> judged actually usable; the red dashed
+  line is the {{ config.MPC_SERVER_MIN_ALT|int }}&deg; floor below which MPC
+  never sends a row at all, so nothing can appear beneath it.
+  Clock times are {{ tzname }}, local to the observatory &mdash; hover any
+  point on the object's curve for UT and its exact separation from the Moon.
+</p>
+{% else %}
+<p class="note">
+  No ephemeris cached for this target
+  {%- if row.discard_reasons %} &mdash; it was rejected before one was fetched
+  ({{ row.discard_reasons|join(', ')|lower|replace('_',' ') }}){% endif %},
+  so there is no altitude track to plot.
+</p>
+{% endif %}
+
 <h2 class="sect">Sky-plane uncertainty</h2>
 {% if unc_svg %}
 <div class="unc">
   <div class="uncplot">{{ unc_svg|safe }}</div>
-  {% if moon_svg %}
-  <div class="uncplot moonplot">
-    {{ moon_svg|safe }}
-    <p class="note" style="margin:8px 2px 0">
-      In the staralt style: the object's altitude (solid) and the Moon's
-      altitude (dashed), across every ephemeris row MPC sent for the night.
-      The shaded band is the window pipeline.py judged actually usable; the
-      red dashed line is L01's {{ config.MIN_ALT|int }}&deg; elevation floor.
-      Hover a point on the object's curve for its exact Moon separation.
-    </p>
-  </div>
-  {% else %}
-  <div class="uncplot moonplot dim" style="display:flex;align-items:center;justify-content:center;min-height:120px;max-width:420px">
-    <p class="note" style="margin:0">
-      No ephemeris cached for this target
-      {%- if row.discard_reasons %} &mdash; rejected before one was fetched
-      ({{ row.discard_reasons|join(', ')|lower|replace('_',' ') }}){% endif %},
-      so there's no altitude track to plot.
-    </p>
-  </div>
-  {% endif %}
   <table class="kv uncfacts">
     <tr><th>Variant orbits</th><td>{{ unc_points }}</td></tr>
     <tr><th>Distinct positions</th><td>
@@ -171,11 +200,7 @@
       {%- endif %}</td></tr>
     <tr><th>Cloud extent</th><td>
       &plusmn;{{ '%.0f'|format(unc_extent[0]) }}&Prime; RA &middot;
-      &plusmn;{{ '%.0f'|format(unc_extent[1]) }}&Prime; Dec
-      {%- if unc_extent[0] > unc_axis_half or unc_extent[1] > unc_axis_half %}
-        <br><span class="warn">wider than the plot's fixed &plusmn;{{ unc_axis_half|int }}&Prime;
-        frame &mdash; some variants are clipped off-canvas</span>
-      {%- endif %}</td></tr>
+      &plusmn;{{ '%.0f'|format(unc_extent[1]) }}&Prime; Dec</td></tr>
     <tr><th>Scatteredness</th><td>
       {% if row.scatteredness %}{{ row.scatteredness[0] }}&Prime; &times; {{ row.scatteredness[1] }}&Prime;
       {% else %}&mdash;{% endif %}</td></tr>
@@ -191,10 +216,8 @@
   Drawn from MPC's own variant-orbit offsets, at the same epoch as
   <a href="{{ row.map_url }}" rel="noopener">their plot</a>. Each orbit is one
   solution consistent with the observations so far; the ring marks the nominal
-  position. Axes are fixed at &plusmn;{{ unc_axis_half|int }}&Prime; on every
-  target so the panels are directly comparable at a glance; the field box
-  appears only when it is comparable in size to that frame.
-  <span class="dim">Scroll to zoom, drag to pan, double-click to reset.</span>
+  position, and the field box appears only when it is comparable in size to the
+  cloud.
   <br><br>
   <strong>Dot size shows how many variants share a position.</strong> MPC
   publishes these offsets rounded to whole arcseconds, so a tightly constrained
