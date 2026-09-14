@@ -206,7 +206,7 @@ table.grid tbody td {
 table.grid tbody td.l { text-align: left; }
 table.grid tbody tr:hover td { background: rgba(255,255,255,.022); }
 tr.gone td { color: var(--faint); }
-tr.done td { opacity: .55; background: rgba(85,179,126,.10); }
+tr.done td { opacity: .72; background: rgba(85,179,126,.10); }
 tr.done td.nm a { color: var(--go); }
 tr.row-hidden td { opacity: .3; background: rgba(0,0,0,.4); }
 
