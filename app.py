@@ -14,6 +14,7 @@ import auth
 import config
 import db
 import ephemeris
+import moonplot
 import observability
 import observatories
 import ranking
@@ -364,9 +365,19 @@ def target_detail(desig):
                 if r["desig"] == desig]
         if not rows:
             return f"Unknown target {desig}", 404
-        # Drawn from points already cached, so the page makes no network call.
+        # Drawn from points/rows already cached, so the page makes no network call.
         pts = db.load_offsets(conn, desig)
         cov = uncertainty.coverage(pts) if pts else None
+
+        # Same cached lines the sky map reads; full Row objects this time,
+        # because the altitude plot needs moon_alt and sun_alt per row, not
+        # just the position triple track() returns.
+        eph_lines = db.load_tracks(conn, [desig]).get(desig)
+        eph_rows = ephemeris.from_lines(desig, eph_lines).rows if eph_lines else []
+        moon_svg = moonplot.render_svg(
+            eph_rows, rows[0]["window_start_ts"], rows[0]["window_end_ts"],
+            localt=localt, tzlabel=_tzabbr()) if eph_rows else None
+
         return render_template(
             "target.html", row=rows[0],
             unc_svg=uncertainty.render_svg(pts) if pts else None,
@@ -374,6 +385,7 @@ def target_detail(desig):
             unc_distinct=uncertainty.distinct(pts) if pts else 0,
             unc_coverage=cov,
             unc_extent=uncertainty.extent(pts) if pts else None,
+            moon_svg=moon_svg,
             fov=config.FOV_ARCSEC,
             now_pos=true_now(conn, desig),
             discovery_site=observatories.lookup(rows[0].get("discovery_code")),

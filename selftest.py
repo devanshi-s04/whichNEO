@@ -31,6 +31,7 @@ import observability
 import output
 import pipeline
 import ranking
+import moonplot
 import skymap
 import update_neocp
 
@@ -837,6 +838,62 @@ def test_ephemeris_refetched_when_its_window_runs_out():
           not update_neocp.needs_refetch((sig, empty), target, now))
 
 
+def _fake_eph(n=12, rising=True):
+    """A synthetic ephemeris arc for the altitude plot."""
+    base = 1_760_000_000.0
+    out = []
+    for i in range(n):
+        r = ephemeris.Row(SAMPLE_EPH)
+        r.ts = base + i * 1800
+        frac = i / (n - 1)
+        r.alt = 25.0 + 55.0 * (frac if rising else (1.0 - frac))
+        r.moon_alt = -20.0 - 30.0 * frac
+        r.sun_alt = -30.0
+        r.moon_dist = 95.0
+        out.append(r)
+    return out
+
+
+def test_altitude_plot():
+    """The staralt-style altitude plot, as brought over from #8."""
+    rows = _fake_eph()
+    svg = moonplot.render_svg(rows, rows[2].ts, rows[-3].ts,
+                              localt=lambda ts: "L%d" % (ts % 100),
+                              tzlabel="CEST")
+    check("plot renders", svg and svg.startswith("<svg"), type(svg))
+
+    # The board speaks observatory local time everywhere; UT belongs in the
+    # hover text, not on the axis.
+    check("axis is labelled with the local zone, not UT",
+          ">time (CEST)<" in svg, re.search(r">time \([^)]*\)<", svg))
+    check("axis ticks use the supplied local formatter",
+          ">L" in svg and "UT<" not in svg)
+    check("hover text still carries UT",
+          "UT &#8212;" in svg or " UT" in svg)
+
+    # MIN_ALT is dead -- oalt=20 means MPC never sends a row below 20, so a
+    # line at 15 would imply a limit that can never apply.
+    check("floor line draws MPC's real cutoff",
+          f"MPC cutoff {config.MPC_SERVER_MIN_ALT:g}" in svg)
+    check("and not the dead MIN_ALT threshold",
+          f"min {config.MIN_ALT:g}&#176;" not in svg)
+
+    check("the usable window is shaded", "observable window" in svg)
+    check("too few rows renders nothing rather than a broken axis",
+          moonplot.render_svg(rows[:1]) is None)
+
+    # Rising and setting targets crowd opposite corners, so the legend has to
+    # move. Pinning it left hid the first hours of a setting target entirely.
+    setting = moonplot.render_svg(_fake_eph(rising=False), tzlabel="CEST")
+    rising = moonplot.render_svg(_fake_eph(rising=True), tzlabel="CEST")
+
+    def legend_x(s):
+        return float(re.search(r'<rect x="([\d.]+)" y="[\d.]+" width="132"',
+                               s).group(1))
+
+    check("the legend moves to the clearer corner for a setting target",
+          legend_x(setting) > legend_x(rising),
+          (legend_x(setting), legend_x(rising)))
 def test_done_targets_stay_in_the_list():
     """Marking a target done must not remove it from the board.
 
@@ -958,6 +1015,7 @@ def main():
                test_ranking_bounds, test_row_rejection_reasons,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
+               test_altitude_plot,
                test_moon_phase_geometry, test_ephemeris_track_matches_row,
                test_done_targets_stay_in_the_list,
                test_done_target_is_green_on_the_sky_map,

@@ -165,6 +165,27 @@
   </section>
 </div>
 
+<h2 class="sect">Altitude through the night</h2>
+{% if moon_svg %}
+<div class="moonplot">{{ moon_svg|safe }}</div>
+<p class="note">
+  In the staralt style: the object's altitude (solid) and the Moon's altitude
+  (dashed), across every ephemeris row MPC sent for the night. The shaded band
+  is the window <code>pipeline.py</code> judged actually usable; the red dashed
+  line is the {{ config.MPC_SERVER_MIN_ALT|int }}&deg; floor below which MPC
+  never sends a row at all, so nothing can appear beneath it.
+  Clock times are {{ tzname }}, local to the observatory &mdash; hover any
+  point on the object's curve for UT and its exact separation from the Moon.
+</p>
+{% else %}
+<p class="note">
+  No ephemeris cached for this target
+  {%- if row.discard_reasons %} &mdash; it was rejected before one was fetched
+  ({{ row.discard_reasons|join(', ')|lower|replace('_',' ') }}){% endif %},
+  so there is no altitude track to plot.
+</p>
+{% endif %}
+
 <h2 class="sect">Sky-plane uncertainty</h2>
 {% if unc_svg %}
 <div class="unc">
