@@ -47,6 +47,12 @@
           <td class="n">&mdash;</td></tr>
       <tr><td><span class="sw poll"></span></td><td>In poor sky now</td>
           <td class="n">{{ sky.flagged }}</td></tr>
+      {% for start, end, minalt, reason in config.KEEPOUT_WEDGES %}
+      <tr><td><span class="sw keepout"></span></td>
+          <td>Keep out &mdash; below {{ minalt|int }}&deg;,
+              {{ start|int }}&deg;&ndash;{{ end|int }}&deg;</td>
+          <td class="n">&mdash;</td></tr>
+      {% endfor %}
       {% if sky.moon and sky.moon.alt > 0 %}
       <tr><td><span class="sw moon"></span></td><td>Moon,
           {{ '%.0f'|format(sky.moon.illum * 100) }}% lit</td>
@@ -62,9 +68,14 @@
         The moon is below the horizon, so no exclusion zone applies.
       {% endif %}
       <br><br>
-      Red sky is <em>discouraged</em>, never excluded &mdash; the north is
+      Flat red is <em>discouraged</em>, never excluded &mdash; the north is
       avoided for Trieste&rsquo;s light dome, not because anything blocks it,
       so targets there are still listed and still plotted.
+      <br><br>
+      <strong>Hatched red is different.</strong> That sky risks damaging the
+      mount, so it is a hard limit: targets there are removed from the queue
+      and the plan file, and no marker is drawn, for as long as they are
+      inside it. Nothing can override it.
     </p>
   </div>
 </section>

@@ -588,7 +588,10 @@ def test_row_rejection_reasons():
           pipeline.row_mask_flags(r5))
 
     r6 = ephemeris.Row(SAMPLE_EPH)
-    r6.az, r6.alt = 270.0, 25.0            # west, under its 40 deg preference
+    # 260, not 270: due west is inside the keep-out wedge, where the hard rule
+    # rightly wins and there is nothing left for the soft mask to say. 260 is
+    # still the W sector, just clear of the wedge's edge.
+    r6.az, r6.alt = 260.0, 25.0            # west, under its 40 deg preference
     check("low western row kept but flagged",
           pipeline.row_rejections(r6, far_future) == []
           and pipeline.row_mask_flags(r6) == ["belowMask:W"],
@@ -749,10 +752,14 @@ def test_skymap_marks():
     # The map's ring is judged where the object is NOW, not from the stored
     # peak flag -- the peak deliberately prefers clean sky, so a peak-derived
     # ring would stay dark even for a target sitting in the light dome.
-    north = [(now - 60, 5.0, 55.0), (now + 60, 5.0, 55.0)]
+    # South-west, not north: the whole northern sector below 70 deg is inside
+    # the keep-out wedge now, where targets are removed rather than ringed.
+    # The SW sector is soft-masked below 30 deg and clear of the wedge, so it
+    # still exercises the ring.
+    poor = [(now - 60, 225.0, 20.0), (now + 60, 225.0, 20.0)]
     got = skymap.target_marks(
-        [dict(rows[0], mask_flags=[])], {"TEST01": north}, now)
-    check("target in the north is ringed on the map despite a clean peak flag",
+        [dict(rows[0], mask_flags=[])], {"TEST01": poor}, now)
+    check("target in poor sky is ringed on the map despite a clean peak flag",
           got and got[0]["mask"], got)
 
     south = [(now - 60, 180.0, 55.0), (now + 60, 180.0, 55.0)]
@@ -852,6 +859,128 @@ def _fake_eph(n=12, rising=True):
         r.moon_dist = 95.0
         out.append(r)
     return out
+
+
+def test_keepout_wedge():
+    """Sky the mount must not be pointed at. Hard, and never overridable.
+
+    The arc runs clockwise, west -> north -> north-east. Read the other way
+    round it covers the southern sky instead, which on a measured night cut
+    87% of usable rows rather than 9% -- so the direction is pinned here.
+    """
+    far_future = 2 ** 40
+
+    check("arc runs clockwise from west, through north, to north-east",
+          all(bool(observability.in_arc(a, 270.0, 45.0))
+              for a in (270.0, 300.0, 350.0, 0.0, 20.0, 44.9)),
+          [a for a in (270.0, 300.0, 350.0, 0.0, 20.0, 44.9)
+           if not observability.in_arc(a, 270.0, 45.0)])
+    check("and NOT the long way round through the south",
+          not any(bool(observability.in_arc(a, 270.0, 45.0))
+                  for a in (90.0, 135.0, 180.0, 225.0, 269.0)),
+          [a for a in (90.0, 135.0, 180.0, 225.0, 269.0)
+           if observability.in_arc(a, 270.0, 45.0)])
+
+    check("just outside the western edge is clear",
+          observability.keepout_violation(269.0, 30.0) is None)
+    check("just inside the western edge is not",
+          observability.keepout_violation(271.0, 30.0) is not None)
+    check("just inside the north-eastern edge is not",
+          observability.keepout_violation(44.0, 30.0) is not None)
+    check("just outside the north-eastern edge is clear",
+          observability.keepout_violation(46.0, 30.0) is None)
+    check("high enough inside the wedge is allowed",
+          observability.keepout_violation(315.0, 75.0) is None)
+    check("but not a shade under the limit",
+          observability.keepout_violation(315.0, 69.9) is not None)
+
+    # It rejects rows outright, and no view or flag can bring them back.
+    r = ephemeris.Row(SAMPLE_EPH)
+    r.az, r.alt = 300.0, 50.0
+    check("a row in the wedge is rejected, not merely flagged",
+          "keepOut" in pipeline.row_rejections(r, far_future),
+          pipeline.row_rejections(r, far_future))
+    check("and it carries no soft mask flag instead",
+          "keepOut" in pipeline.row_rejections(r, far_future))
+
+    r.alt = 75.0
+    check("the same azimuth above the limit is usable",
+          pipeline.row_rejections(r, far_future) == [],
+          pipeline.row_rejections(r, far_future))
+
+    # The southern sky, where the observatory actually works, is untouched.
+    south = ephemeris.Row(SAMPLE_EPH)
+    south.az, south.alt = 180.0, 30.0
+    check("southern sky is unaffected",
+          pipeline.row_rejections(south, far_future) == [],
+          pipeline.row_rejections(south, far_future))
+
+    # Clear early, blocked later: keep the early rows, lose the late ones.
+    eph_rows = []
+    for i, (az, alt) in enumerate([(200.0, 40.0), (240.0, 45.0),
+                                   (280.0, 50.0), (300.0, 40.0)]):
+        row = ephemeris.Row(SAMPLE_EPH)
+        row.ts = 1_760_000_000.0 + i * 1800
+        row.az, row.alt = az, alt
+        eph_rows.append(row)
+    usable, report = pipeline.usable_rows(
+        ephemeris.ObjectEphemeris("T", eph_rows), far_future)
+    check("a target clear early keeps its early rows", len(usable) == 2, len(usable))
+    check("and loses the ones inside the wedge",
+          report.get("keepOut") == 2, report)
+
+    # The wedge fires even though the advisory mask stays soft.
+    north = ephemeris.Row(SAMPLE_EPH)
+    north.az, north.alt = 0.0, 40.0
+    check("north below the limit is now rejected by the wedge",
+          "keepOut" in pipeline.row_rejections(north, far_future),
+          pipeline.row_rejections(north, far_future))
+    north.alt = 80.0
+    check("north high above it is allowed, mask still only advisory",
+          pipeline.row_rejections(north, far_future) == [],
+          pipeline.row_rejections(north, far_future))
+
+    # Drawn on the map, and nothing is plotted inside it.
+    svg = skymap.render_svg([], None, size=400)
+    check("the wedge is drawn hatched", 'fill="url(#keepout)"' in svg)
+    check("and labelled as a hard limit", "Keep out" in svg)
+
+    now = 1_760_000_000.0
+    inside = [(now - 60, 300.0, 40.0), (now + 60, 302.0, 40.0)]
+    marks = skymap.target_marks(
+        [{"desig": "T", "vmag": 19.0, "score": 80, "mask_flags": []}],
+        {"T": inside}, now)
+    check("a target inside the wedge is not drawn at all", marks == [], marks)
+
+
+def test_plan_file_never_publishes_a_stale_pointing_line():
+    """Exactly one uncommented line per target, and only when it means now.
+
+    interpolate_at() clamps to the nearest usable row whenever now falls
+    outside the usable span -- before the target rises, and again after its
+    window shuts. The coordinates then describe a different moment, and the
+    sky has turned since, so slewing to them points somewhere else. Measured
+    live, 4 of 24 targets were publishing such a line.
+    """
+    row = ephemeris.Row(SAMPLE_EPH)
+    base = dict(desig="T1", score=80, nobs=12, arc_days=0.5,
+                not_seen_days=0.1, exposure_min=20.0, max_alt_row=row,
+                nearest_row=row, interp_row=row)
+
+    live = output.plan_entry(dict(base, live_row_is_now=True))
+    body = [l for l in live.splitlines() if l.startswith("2026")]
+    check("a genuinely current target gets one pointable line",
+          len(body) == 1, body)
+
+    stale = output.plan_entry(dict(base, live_row_is_now=False))
+    body = [l for l in stale.splitlines() if l.startswith("2026")]
+    check("a clamped one gets none", len(body) == 0, body)
+    check("its coordinates are kept, commented, and marked",
+          "do not slew" in stale and "// 2026" in stale, stale.splitlines()[-1])
+
+    check("the block is otherwise unchanged in shape",
+          len(live.splitlines()) == len(stale.splitlines()),
+          (len(live.splitlines()), len(stale.splitlines())))
 
 
 def test_altitude_plot():
@@ -1015,6 +1144,8 @@ def main():
                test_ranking_bounds, test_row_rejection_reasons,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
+               test_keepout_wedge,
+               test_plan_file_never_publishes_a_stale_pointing_line,
                test_altitude_plot,
                test_moon_phase_geometry, test_ephemeris_track_matches_row,
                test_done_targets_stay_in_the_list,
