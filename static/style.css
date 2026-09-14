@@ -242,6 +242,10 @@ table.grid thead th {
   padding: 9px 10px; border-bottom: 1px solid var(--line); white-space: nowrap;
 }
 table.grid thead th.l { text-align: left; }
+table.grid thead th.sorted { color: var(--ink); }
+table.grid thead .sortlink { color: inherit; text-decoration: none; }
+table.grid thead .sortlink:hover { color: var(--ink); text-decoration: underline; }
+table.grid thead .arrow { margin-left: 3px; font-size: 8px; }
 table.grid tbody td {
   padding: 7px 10px; text-align: right; white-space: nowrap;
   border-bottom: 1px solid var(--hair);

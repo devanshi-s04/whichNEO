@@ -139,16 +139,30 @@
   </span>
 </div>
 
+{% macro sort_th(field, label, cls='', title='') %}
+{%- set is_active = mode == field -%}
+{%- set next_dir = 'desc' if (is_active and asc) else 'asc' -%}
+<th class="{{ cls }}{{ ' sorted' if is_active else '' }}"{% if title %} title="{{ title }}"{% endif %}>
+  <a href="{{ url_for('index', sort=field, dir=next_dir) }}" class="sortlink">{{ label
+  }}{% if is_active %}<span class="arrow">{{ ('&#9650;' if asc else '&#9660;')|safe }}</span>{% endif %}</a>
+</th>
+{%- endmacro %}
+
 <div class="panel tablewrap">
   <table class="grid">
     <thead><tr>
       <th class="l">#</th><th>Peak</th><th class="l">Target</th>
       <th class="l" title="Observatory code of the discovery observation">Disc. obs</th>
       <th class="l">MPC</th>
-      <th>Score</th><th>V</th><th>Exp</th><th>&Prime;/min</th>
-      <th title="Altitude at the next usable moment, which is now while the target is up">Alt</th>
-      <th title="Azimuth at the next usable moment. Compass bearing from north; the sky map above shows the same position">Az</th>
-      <th>Moon</th><th>Unseen</th><th>q / e</th>
+      {{ sort_th('digest2', 'Score') }}
+      {{ sort_th('vmag', 'V') }}
+      {{ sort_th('exposure_min', 'Exp') }}
+      {{ sort_th('motion', '&Prime;/min'|safe) }}
+      {{ sort_th('alt', 'Alt', title='Altitude at the next usable moment, which is now while the target is up') }}
+      {{ sort_th('az', 'Az', title='Azimuth at the next usable moment. Compass bearing from north; the sky map above shows the same position') }}
+      {{ sort_th('moon', 'Moon') }}
+      {{ sort_th('unseen', 'Unseen') }}
+      {{ sort_th('q', 'q / e') }}
       <th>Value</th><th class="l">Status</th><th></th>
     </tr></thead>
     <tbody id="rows">{% include "_rows.html" %}</tbody>

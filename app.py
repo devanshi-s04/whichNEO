@@ -75,10 +75,11 @@ def get_conn():
     return conn
 
 
-def load_sorted(conn, show_observed=False, show_hidden=False, mode=None):
+def load_sorted(conn, show_observed=False, show_hidden=False, mode=None,
+                 ascending=True):
     rows = db.load_targets(conn, include_hidden=show_hidden,
                            include_observed=show_observed)
-    return ranking.sort_targets(rows, mode)
+    return ranking.sort_targets(rows, mode, ascending)
 
 
 def status(conn):
@@ -234,7 +235,8 @@ def true_now(conn, desig, now=None):
 def _view_args():
     return dict(show_observed=request.args.get("observed") == "1",
                 show_hidden=request.args.get("hidden") == "1",
-                mode=request.args.get("sort") or config.DEFAULT_SORT)
+                mode=request.args.get("sort") or config.DEFAULT_SORT,
+                asc=request.args.get("dir") != "desc")
 
 
 @app.route("/")
@@ -242,7 +244,7 @@ def index():
     v = _view_args()
     conn = get_conn()
     try:
-        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
+        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["asc"])
         upcoming = pick_upcoming(rows)
         return render_template(
             "index.html", rows=rows, strip=night_strip(rows),
@@ -259,7 +261,7 @@ def skymap_svg():
     v = _view_args()
     conn = get_conn()
     try:
-        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
+        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["asc"])
         return (sky_view(conn, rows)["svg"], 200,
                 {"Content-Type": "image/svg+xml; charset=utf-8",
                  "Cache-Control": "no-store"})
@@ -275,7 +277,7 @@ def rows_partial():
     try:
         return render_template(
             "_rows.html",
-            rows=load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"]),
+            rows=load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["asc"]),
             max_score=ranking.max_possible_score(), **v)
     finally:
         conn.close()

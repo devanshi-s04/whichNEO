@@ -65,7 +65,40 @@ def sort_key_score(row):
             row["desig"])
 
 
-def sort_targets(rows, mode=None):
+# Every other numeric column shown in the table, sortable directly: URL sort
+# key -> the row field it reads. "score" is already taken by sort_key_score
+# (the composite Value column), so the raw digest2 column is keyed
+# "digest2" here to avoid colliding with it.
+SORTABLE_COLUMNS = {
+    "digest2": "score",
+    "vmag": "vmag",
+    "exposure_min": "exposure_min",
+    "motion": "cur_motion",
+    "alt": "cur_alt",
+    "az": "cur_az",
+    "moon": "cur_moon_dist",
+    "unseen": "not_seen_days",
+    "q": "q",
+}
+
+
+def sort_key_column(field, ascending=True):
+    """Sort by any single numeric field, observable targets first (as with
+    the two curated modes above), missing values sent to the end of their
+    group regardless of direction, ties broken by designation."""
+    def key(row):
+        v = row.get(field)
+        ordered = 0.0 if v is None else (v if ascending else -v)
+        return (0 if row.get("observable") else 1, v is None, ordered, row["desig"])
+    return key
+
+
+def sort_targets(rows, mode=None, ascending=True):
     mode = mode or config.DEFAULT_SORT
-    key = sort_key_score if mode == "score" else sort_key_chronological
+    if mode == "score":
+        key = sort_key_score
+    elif mode in SORTABLE_COLUMNS:
+        key = sort_key_column(SORTABLE_COLUMNS[mode], ascending)
+    else:
+        key = sort_key_chronological
     return sorted(rows, key=key)
