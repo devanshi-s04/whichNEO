@@ -1,5 +1,5 @@
 {% for r in rows %}
-<tr class="{{ '' if r.observable else 'gone' }}{{ ' done' if r.observed else '' }}">
+<tr class="{{ '' if r.observable else 'gone' }}{{ ' done' if r.observed else '' }}{{ ' row-hidden' if r.hidden else '' }}">
   <td class="l idx">{{ loop.index }}</td>
 
   <td class="peakt" title="{{ r.max_alt_ts|utct }} UT">
