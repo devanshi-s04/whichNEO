@@ -163,7 +163,15 @@ body {
   margin-left: -6px; border-radius: 50%;
   background: var(--amber); border: 2px solid var(--panel);
 }
+/* A lane already observed, tinted the same green as its table row and its
+   marker on the sky map -- one colour meaning "done" everywhere on the page.
+   Written after the plain .bar rule and before the hover, so hovering still
+   lights a done lane up like any other. */
+.lane .bar.done {
+  background: rgba(85,179,126,.18); border-color: rgba(85,179,126,.5);
+}
 .lane:hover .bar { background: rgba(240,166,60,.3); }
+.lane:hover .bar.done { background: rgba(85,179,126,.34); }
 .nowline {
   position: absolute; top: -20px; bottom: 0; width: 1px;
   background: var(--cyan); z-index: 3;
