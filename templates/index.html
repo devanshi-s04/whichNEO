@@ -88,7 +88,8 @@
     <div class="lane">
       <div class="who">{{ l.desig }}</div>
       <div class="track">
-        <div class="bar" style="left:{{ l.left }}%;width:{{ l.width }}%"></div>
+        <div class="bar{{ ' done' if l.observed }}" style="left:{{ l.left }}%;width:{{ l.width }}%"
+             {%- if l.observed %} title="already observed"{% endif %}></div>
         {% if l.peak is not none %}
           <div class="peak" style="left:{{ l.peak }}%" title="best altitude {{ '%.0f'|format(l.alt) }}&deg;"></div>
         {% endif %}
@@ -129,7 +130,6 @@
     <a href="{{ url_for('index', sort='chronological') }}" class="{{ 'on' if mode != 'score' }}">Sequence</a>
     <a href="{{ url_for('index', sort='score') }}" class="{{ 'on' if mode == 'score' }}">By value</a>
   </div>
-  <a class="chip {{ 'on' if show_observed }}" href="{{ url_for('index', sort=mode, observed=1) }}">observed</a>
   <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=1) }}">hidden</a>
   <a class="chip" href="{{ url_for('plan_text') }}">plan file</a>
   <span class="rules">

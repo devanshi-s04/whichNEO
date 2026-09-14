@@ -116,7 +116,9 @@ def pick_upcoming(rows, n=3):
     the card can say so.
     """
     now = time.time()
-    observable = [r for r in rows if r["observable"]]
+    # Done targets stay in the table but never headline a card: these answer
+    # "what do I point at next", and something already observed is not it.
+    observable = [r for r in rows if r["observable"] and not r.get("observed")]
     ahead, behind = [], []
     for r in observable:
         ts = r.get("max_alt_ts")
@@ -164,6 +166,10 @@ def night_strip(rows, max_lanes=16):
             "width": round(max(right - left, 0.6), 2),
             "peak": round(pct(r["max_alt_ts"]), 2) if r.get("max_alt_ts") else None,
             "alt": r.get("max_alt"),
+            # Done lanes are tinted rather than dropped: the strip shows the
+            # shape of the whole night, and how much of it is already behind
+            # you is part of that shape.
+            "observed": bool(r.get("observed")),
         })
 
     now = time.time()
@@ -232,7 +238,12 @@ def true_now(conn, desig, now=None):
 
 
 def _view_args():
-    return dict(show_observed=request.args.get("observed") == "1",
+    # Targets marked done stay in the list, coloured green, in their original
+    # place in the sequence. They used to be filtered out the moment you
+    # clicked done, which hid three things at once: the green row, the green
+    # marker on the sky map, and the undo button -- so correcting a misclick
+    # meant first finding the row again in a separate view.
+    return dict(show_observed=True,
                 show_hidden=request.args.get("hidden") == "1",
                 mode=request.args.get("sort") or config.DEFAULT_SORT)
 
