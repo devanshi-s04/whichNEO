@@ -35,7 +35,13 @@
 
   <td>{{ r.score }}</td>
   <td>{{ '%.1f'|format(r.vmag) }}</td>
-  <td class="expo">{{ '%.0f'|format(r.exposure_min) if r.exposure_min else '&mdash;'|safe }}</td>
+  <td class="expo{{ ' capped' if r.exposure_capped }}"
+      title="{{ '%.0f'|format(r.exposure_min) if r.exposure_min else '—' }} min total{% if r.exposure_capped %} — sequence capped at {{ config.MAX_FRAMES }} frames, so it gets less than that{% endif %}">
+    {%- if r.exposure_frames -%}
+      {{ r.exposure_frames }}&times;{{ '%g'|format(r.exposure_sec) }}s
+      {%- if r.exposure_capped %}<span class="capmark">!</span>{% endif -%}
+    {%- else -%}&mdash;{%- endif -%}
+  </td>
   <td>{{ '%.1f'|format(r.cur_motion) if r.cur_motion is not none else '&mdash;'|safe }}</td>
 
   <td>{{ '%.0f'|format(r.cur_alt) ~ '&deg;'|safe if r.cur_alt is not none else '&mdash;'|safe }}</td>

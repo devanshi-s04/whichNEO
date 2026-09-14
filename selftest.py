@@ -168,6 +168,53 @@ def test_exposure_rule():
           r.exposure_minutes() == config.EXPOSURE_FLOOR_MIN, r.exposure_minutes())
 
 
+def test_exposure_plan():
+    """Frame length from motion, frame count from the legacy total.
+
+    The count must come out near the ~48 frames observers describe for a
+    typical target, without that number being hardcoded anywhere.
+    """
+    def plan(motion, vmag):
+        r = ephemeris.Row(SAMPLE_EPH)
+        r.motion, r.vmag = motion, vmag
+        return r.exposure_plan()
+
+    b = config.TRAIL_BUDGET_ARCSEC
+    t, n, capped = plan(6.0, 20.0)
+    check("frame length is the trailing limit",
+          abs(t - 60 * b / 6.0) < 0.05, t)
+    check("faster motion gives shorter frames", plan(60.0, 20.0)[0] < t)
+    check("slower motion gives longer frames", plan(1.0, 20.0)[0] > t)
+
+    # A typical target: median motion and a faint magnitude.
+    t_typ, n_typ, cap_typ = plan(3.4, 21.2)
+    check("a typical target lands near the ~48 frames observers quote",
+          35 <= n_typ <= 60, f"{n_typ} frames of {t_typ}s")
+    check("typical target is not capped", not cap_typ)
+
+    # Fast mover: short frames, so the count would explode without a cap.
+    t_fast, n_fast, cap_fast = plan(116.8, 18.1)
+    check("a fast mover is capped rather than demanding hundreds of frames",
+          cap_fast and n_fast == config.MAX_FRAMES, f"{n_fast}, capped={cap_fast}")
+
+    # Slow mover: long frames, so few of them.
+    t_slow, n_slow, cap_slow = plan(1.0, 21.3)
+    check("a slow mover needs few frames", n_slow < 25, n_slow)
+    check("slow mover is not capped", not cap_slow)
+
+    check("frame length respects the floor",
+          plan(100000.0, 20.0)[0] == config.MIN_EXPOSURE_S, plan(100000.0, 20.0)[0])
+    check("frame length respects the ceiling",
+          plan(0.001, 20.0)[0] == config.MAX_EXPOSURE_S, plan(0.001, 20.0)[0])
+    check("a motionless target does not divide by zero",
+          plan(0.0, 20.0)[0] == config.MAX_EXPOSURE_S)
+    check("frame count is never zero", plan(6.0, 12.0)[1] >= 1, plan(6.0, 12.0))
+
+    check("the legacy total is left untouched",
+          abs(ephemeris.Row(SAMPLE_EPH).exposure_minutes() -
+              max(10 + (16.4 - 18) * 5, config.EXPOSURE_FLOOR_MIN)) < 1e-9)
+
+
 def test_night_bounds():
     """A night runs 11:00 UT to 11:00 UT, so evening and the small hours of
     the next morning belong to the same night."""
@@ -579,7 +626,8 @@ def main():
     for fn in (test_site, test_horizon_mask, test_analytic_matches_astropy,
                test_neocp_list_parse, test_neocp_info_column_collision,
                test_ephemeris_row, test_ephemeris_azimuth_convention,
-               test_exposure_rule, test_night_bounds, test_chronological_sort,
+               test_exposure_rule, test_exposure_plan, test_night_bounds,
+               test_chronological_sort,
                test_upcoming_cards_look_forward, test_cache_signature_ignores_the_clock,
                test_plan_file_survives_dawn, test_mpc_markers,
                test_observatory_identification, test_uncertainty_plot,

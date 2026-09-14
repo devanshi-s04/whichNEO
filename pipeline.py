@@ -124,7 +124,8 @@ def analyze(target, eph, orbit, now=None):
         target.update(max_alt_row=None, nearest_row=None, interp_row=None,
                       max_alt_ts=None, max_alt=None, exposure_min=None,
                       window_minutes=0.0, window_start_ts=None,
-                      window_end_ts=None, mpc_flag=None)
+                      window_end_ts=None, mpc_flag=None, exposure_sec=None,
+                      exposure_frames=None, exposure_capped=False)
     else:
         # MPC marks fast-moving ephemeris rows with ! or !!. It is a per-row
         # property that can change through a night, so the object-level badge
@@ -138,6 +139,12 @@ def analyze(target, eph, orbit, now=None):
         target["max_alt_ts"] = best.ts
         target["max_alt"] = best.alt
         target["exposure_min"] = best.exposure_minutes()
+        # Frame plan is set at the moment we intend to point, since sky motion
+        # changes through the night and it is motion that caps frame length.
+        exp_s, frames, capped = best.exposure_plan()
+        target["exposure_sec"] = exp_s
+        target["exposure_frames"] = frames
+        target["exposure_capped"] = capped
         target["window_minutes"] = _contiguous_window(rows, now)
         # Span of the observable rows, for the night timeline.
         target["window_start_ts"] = min(r.ts for r in rows)

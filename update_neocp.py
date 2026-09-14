@@ -141,7 +141,8 @@ def run_update(conn, source=None):
                      offsets_url=None, scatteredness=None,
                      observed_from_site=None, max_alt_row=None,
                      nearest_row=None, interp_row=None, mpc_flag=None,
-                     discovery_code=None, obs_codes=None)
+                     discovery_code=None, obs_codes=None, exposure_sec=None,
+                     exposure_frames=None, exposure_capped=False)
             continue
 
         entry = cache.get(t["desig"])

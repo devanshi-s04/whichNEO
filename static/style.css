@@ -332,3 +332,7 @@ h2.sect {
 td.disc { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 td.disc span[title] { cursor: help; border-bottom: 1px dotted var(--line2); }
 tr.gone td.disc { color: var(--faint); }
+
+/* ---------- exposure plan ---------- */
+td.expo.capped { color: var(--warn); }
+.capmark { color: var(--warn); font-weight: 700; margin-left: 2px; }

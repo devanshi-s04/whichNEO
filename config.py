@@ -124,6 +124,27 @@ EXPOSURE_MIN_PER_MAG = 5.0
 # Clamped here; ask Luka what the floor should really be.
 EXPOSURE_FLOOR_MIN = 1.0             # TBD
 
+# --- Exposure plan: frame length from motion, frame count from brightness ---
+# A moving target smears across the detector, spreading its flux and blurring
+# the centroid, so the single-frame length is limited by how far it may trail:
+#     t = 60 * TRAIL_BUDGET_ARCSEC / motion("/min)
+# The number of frames then comes from the legacy total above:
+#     n = total / t
+# which lands near 45 for a typical target on its own -- close to the "about
+# 48 frames" observers describe -- while adapting for the fast and slow tails.
+#
+# TBD: the trail budget should be tied to something physical, seeing FWHM or a
+# pixel or two. We hold no pixel scale for L01 (scope.json has no entry and
+# details.txt gives only "1.0-m f/2.9 reflector + CCD"), so 2 arcsec is a
+# stand-in until Luka gives the real figure.
+TRAIL_BUDGET_ARCSEC = 2.0            # TBD
+MIN_EXPOSURE_S = 1.0                 # TBD: below this, readout dominates
+MAX_EXPOSURE_S = 300.0               # TBD: slow movers would otherwise run long
+# Sequences longer than this are not executable; readout alone would eat the
+# night. A capped target gets less integration than the magnitude rule asks
+# for, so the board says when the cap binds.
+MAX_FRAMES = 60
+
 # --- Ranking -----------------------------------------------------------------
 # Default ordering is chronological by time of maximum altitude, matching the
 # legacy planner: the list is a working sequence for the night, not a

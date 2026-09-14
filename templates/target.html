@@ -114,7 +114,21 @@
       <tr><th>Best altitude</th><td>
         {% if row.max_alt_utc %}{{ '%.1f'|format(row.max_alt) }}&deg; at {{ row.max_alt_utc[11:] }} UT
         {% else %}<span class="dim">no window</span>{% endif %}</td></tr>
-      <tr><th>Exposure</th><td>{{ '%.1f'|format(row.exposure_min) ~ ' min' if row.exposure_min else '—' }}</td></tr>
+      <tr><th>Exposure plan</th><td>
+        {% if row.exposure_frames %}
+          <strong>{{ row.exposure_frames }} &times; {{ '%g'|format(row.exposure_sec) }} s</strong>
+          <span class="dim">= {{ '%.1f'|format(row.exposure_frames * row.exposure_sec / 60) }} min on sky</span>
+          {% if row.exposure_capped %}
+            <br><span class="warn">capped at {{ config.MAX_FRAMES }} frames &mdash;
+            the magnitude rule asks for {{ '%.0f'|format(row.exposure_min) }} min</span>
+          {% endif %}
+          <br><span class="dim">frame length set by {{ '%.1f'|format(row.cur_motion) }}&Prime;/min motion
+          against a {{ config.TRAIL_BUDGET_ARCSEC }}&Prime; trail budget</span>
+        {% else %}&mdash;{% endif %}
+      </td></tr>
+      <tr><th>Legacy total</th><td class="dim">
+        {{ '%.1f'|format(row.exposure_min) ~ ' min' if row.exposure_min else '—' }}
+        <span class="dim">&mdash; 10 + (V &minus; 18) &times; 5</span></td></tr>
       <tr><th>Window</th><td>{{ '%.0f'|format(row.window_minutes) }} min</td></tr>
       <tr><th>Alt / Az now</th><td>
         {% if row.cur_alt is not none %}{{ '%.1f'|format(row.cur_alt) }}&deg; / {{ '%.1f'|format(row.cur_az) }}&deg;

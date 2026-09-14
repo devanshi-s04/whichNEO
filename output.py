@@ -83,7 +83,13 @@ def plan_entry(t):
         f"notSeen={t['not_seen_days']}days",
     ]
     if t.get("exposure_min") is not None:
+        # obsExposure stays exactly as the legacy planner writes it, so the
+        # file still diffs against its output. The frame plan is additional.
         parts.append(f"obsExposure={t['exposure_min']}min")
+    if t.get("exposure_frames"):
+        parts.append(f"frames={t['exposure_frames']}x{t['exposure_sec']:g}sec")
+        if t.get("exposure_capped"):
+            parts.append("framesCapped")
     sc = t.get("scatteredness")
     if sc:
         parts.append(f"scatteredness=({sc[0]},{sc[1]})")

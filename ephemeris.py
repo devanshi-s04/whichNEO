@@ -94,6 +94,22 @@ class Row:
                 * config.EXPOSURE_MIN_PER_MAG)
         return round(max(mins, config.EXPOSURE_FLOOR_MIN), 2)
 
+    def exposure_plan(self):
+        """Frame length from sky motion, frame count from the legacy total.
+
+        Returns (seconds_per_frame, frames, capped). `capped` means the
+        sequence was trimmed to MAX_FRAMES and the target will therefore get
+        less integration than its magnitude asks for.
+        """
+        motion = max(self.motion, 1e-6)          # "/min; guard a still target
+        t = 60.0 * config.TRAIL_BUDGET_ARCSEC / motion
+        t = min(max(t, config.MIN_EXPOSURE_S), config.MAX_EXPOSURE_S)
+
+        total_s = self.exposure_minutes() * 60.0
+        frames = max(1, round(total_s / t))
+        capped = frames > config.MAX_FRAMES
+        return round(t, 1), min(frames, config.MAX_FRAMES), capped
+
     def as_dict(self):
         return {k: getattr(self, k) for k in self.__slots__}
 
