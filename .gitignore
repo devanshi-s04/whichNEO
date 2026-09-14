@@ -12,3 +12,10 @@ venv/
 
 # Generated nightly plan files
 plans/
+
+# discovery_stats.py's own database, log, and live-updated CSV -- rebuilt by
+# its cron job, same reasoning as data/ above.
+discovery_stats.db
+discovery_stats.log
+observatory_stats.csv
+app_server.log
