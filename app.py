@@ -32,8 +32,10 @@ except Exception:                                    # no tzdata on the host
 
 @app.context_processor
 def inject_config():
-    """Templates read limits and the horizon mask straight from config."""
-    return {"config": config, "tzname": _tzabbr()}
+    """Templates read limits and the horizon mask straight from config, and
+    the sortable-column registry straight from ranking so the sort bar and
+    the sort logic never drift apart."""
+    return {"config": config, "tzname": _tzabbr(), "ranking": ranking}
 
 
 def _tzabbr(ts=None):

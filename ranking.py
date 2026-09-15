@@ -65,21 +65,58 @@ def sort_key_score(row):
             row["desig"])
 
 
-def sort_key_magnitude_asc(row):
-    """Brightest (lowest V) first."""
-    return (0 if row.get("observable") else 1, row["vmag"], row["desig"])
+def sort_key_column(field, ascending=True):
+    """Sort by any single numeric field, observable targets first (as with
+    the two curated modes above). Missing values sink to the end of their
+    group regardless of direction -- a target with no current position, say,
+    shouldn't jump to the top just because "ascending" is active -- and ties
+    break by designation so the table never shuffles targets that are equal.
+    """
+    def key(row):
+        v = row.get(field)
+        ordered = 0.0 if v is None else (v if ascending else -v)
+        return (0 if row.get("observable") else 1, v is None, ordered, row["desig"])
+    return key
 
 
-def sort_key_magnitude_desc(row):
-    """Faintest (highest V) first."""
-    return (0 if row.get("observable") else 1, -row["vmag"], row["desig"])
+# Every column the board can sort by beyond the two curated modes above,
+# keyed by the URL sort-mode prefix ("mag", not "vmag", so the URLs already
+# shipped as sort=mag_asc/mag_desc keep working). Each entry names the row
+# field to read and the two captions the flip button shows for that field.
+SORTABLE_COLUMNS = {
+    "mag":          {"field": "vmag",           "label": "Magnitude",
+                      "low": "brightest first",    "high": "faintest first"},
+    "digest2":      {"field": "score",           "label": "Digest2",
+                      "low": "lowest first",       "high": "highest first"},
+    "exposure_min": {"field": "exposure_min",     "label": "Exposure",
+                      "low": "shortest first",     "high": "longest first"},
+    "motion":       {"field": "cur_motion",       "label": "Motion",
+                      "low": "slowest first",      "high": "fastest first"},
+    "alt":          {"field": "cur_alt",          "label": "Altitude",
+                      "low": "lowest first",       "high": "highest first"},
+    "az":           {"field": "cur_az",           "label": "Azimuth",
+                      "low": "lowest first",       "high": "highest first"},
+    "moon":         {"field": "cur_moon_dist",    "label": "Moon distance",
+                      "low": "closest first",      "high": "farthest first"},
+    "unseen":       {"field": "not_seen_days",    "label": "Not seen",
+                      "low": "most recent first",  "high": "longest first"},
+    "q":            {"field": "q",                "label": "Perihelion (q)",
+                      "low": "smallest first",     "high": "largest first"},
+}
+
+
+def _column_sort_keys():
+    keys = {}
+    for prefix, meta in SORTABLE_COLUMNS.items():
+        keys[f"{prefix}_asc"] = sort_key_column(meta["field"], True)
+        keys[f"{prefix}_desc"] = sort_key_column(meta["field"], False)
+    return keys
 
 
 _SORT_KEYS = {
     "chronological": sort_key_chronological,
     "score": sort_key_score,
-    "mag_asc": sort_key_magnitude_asc,
-    "mag_desc": sort_key_magnitude_desc,
+    **_column_sort_keys(),
 }
 
 

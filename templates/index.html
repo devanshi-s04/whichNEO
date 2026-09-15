@@ -125,26 +125,35 @@
 </section>
 {% endif %}
 
+{% macro sort_toggle(key, label, low_text, high_text) %}
+{% set asc_mode = key ~ '_asc' %}
+{% set desc_mode = key ~ '_desc' %}
+{% set active = mode in (asc_mode, desc_mode) %}
+<a href="{{ url_for('index', sort=(asc_mode if not active else 'chronological')) }}"
+   id="sortToggle-{{ key }}" data-col="{{ key }}" class="chip{{ ' on' if active }}">Sort by {{ label }}</a>
+<a href="{{ url_for('index', sort=(desc_mode if mode == asc_mode else asc_mode)) }}"
+   id="sortDir-{{ key }}" data-col="{{ key }}" class="dirbtn{{ ' flip' if mode == desc_mode }}"
+   title="Flip sort direction" {{ 'hidden' if not active }}>
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"
+    stroke-linecap="round" stroke-linejoin="round">
+    <path d="M17 2l4 4-4 4"/><path d="M21 6H8a4 4 0 0 0-4 4"/>
+    <path d="M7 22l-4-4 4-4"/><path d="M3 18h13a4 4 0 0 0 4-4"/>
+  </svg>
+</a>
+<span id="sortLabel-{{ key }}" class="dim" data-low="{{ low_text }}" data-high="{{ high_text }}"
+      {{ 'hidden' if not active }}>{{ low_text if mode == asc_mode else high_text }}</span>
+{% endmacro %}
+
 <div class="bar-row">
   <div class="seg">
     <a href="{{ url_for('index', sort='chronological') }}" data-sort="chronological"
        class="{{ 'on' if mode == 'chronological' }}">Sequence</a>
     <a href="{{ url_for('index', sort='score') }}" data-sort="score"
        class="{{ 'on' if mode == 'score' }}">By value</a>
-    {% set mag_active = mode in ('mag_asc', 'mag_desc') %}
-    <a href="{{ url_for('index', sort='chronological' if mag_active else 'mag_asc') }}"
-       id="magToggle" class="{{ 'on' if mag_active }}">Sort by Magnitude</a>
   </div>
-  <a href="{{ url_for('index', sort='mag_desc' if mode == 'mag_asc' else 'mag_asc') }}"
-     id="magDir" class="magdir-btn{{ ' flip' if mode == 'mag_desc' }}" title="Flip sort direction"
-     {{ 'hidden' if not mag_active }}>
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"
-      stroke-linecap="round" stroke-linejoin="round">
-      <path d="M17 2l4 4-4 4"/><path d="M21 6H8a4 4 0 0 0-4 4"/>
-      <path d="M7 22l-4-4 4-4"/><path d="M3 18h13a4 4 0 0 0 4-4"/>
-    </svg>
-  </a>
-  <span id="magLabel" class="dim" {{ 'hidden' if not mag_active }}>{{ 'brightest first' if mode == 'mag_asc' else 'faintest first' }}</span>
+  {% for key, meta in ranking.SORTABLE_COLUMNS.items() %}
+  {{ sort_toggle(key, meta.label, meta.low, meta.high) }}
+  {% endfor %}
   <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=1) }}">hidden</a>
   <a class="chip" href="{{ url_for('plan_text') }}">plan file</a>
   <span class="rules">
@@ -250,30 +259,36 @@ function applyOpenPlans() {
 // A full navigation here would re-render the whole page (night strip, upcoming
 // cards, everything) for a change that only affects table order, which is
 // both slow and resets scroll position, making the page visibly jump.
+const SORT_COLUMNS = {{ ranking.SORTABLE_COLUMNS.keys()|list|tojson }};
+
 function updateSortBar(mode) {
   document.querySelectorAll('.seg a[data-sort]').forEach(a => {
     a.classList.toggle('on', a.dataset.sort === mode);
   });
-  const magActive = mode === 'mag_asc' || mode === 'mag_desc';
-  const magToggle = document.getElementById('magToggle');
-  const magDir = document.getElementById('magDir');
-  const magLabel = document.getElementById('magLabel');
-  magToggle.classList.toggle('on', magActive);
-  magDir.hidden = !magActive;
-  magLabel.hidden = !magActive;
-  if (magActive) {
-    magDir.classList.toggle('flip', mode === 'mag_desc');
-    magLabel.textContent = mode === 'mag_asc' ? 'brightest first' : 'faintest first';
-  }
   const withSort = s => { const p = new URLSearchParams(params); p.set('sort', s); return '?' + p; };
   document.querySelector('.seg a[data-sort="chronological"]').href = withSort('chronological');
   document.querySelector('.seg a[data-sort="score"]').href = withSort('score');
-  magToggle.href = withSort(magActive ? 'chronological' : 'mag_asc');
-  magDir.href = withSort(mode === 'mag_asc' ? 'mag_desc' : 'mag_asc');
+
+  SORT_COLUMNS.forEach(key => {
+    const ascMode = key + '_asc', descMode = key + '_desc';
+    const active = mode === ascMode || mode === descMode;
+    const toggle = document.getElementById('sortToggle-' + key);
+    const dirBtn = document.getElementById('sortDir-' + key);
+    const label = document.getElementById('sortLabel-' + key);
+    toggle.classList.toggle('on', active);
+    toggle.href = withSort(active ? 'chronological' : ascMode);
+    dirBtn.hidden = !active;
+    label.hidden = !active;
+    if (active) {
+      dirBtn.classList.toggle('flip', mode === descMode);
+      dirBtn.href = withSort(mode === ascMode ? descMode : ascMode);
+      label.textContent = mode === ascMode ? label.dataset.low : label.dataset.high;
+    }
+  });
 }
 
 document.addEventListener('click', ev => {
-  const sortLink = ev.target.closest('.seg a[data-sort], #magToggle, #magDir');
+  const sortLink = ev.target.closest('.seg a[data-sort], .chip[data-col], .dirbtn[data-col]');
   if (sortLink) {
     ev.preventDefault();
     const newSort = new URL(sortLink.href, location.href).searchParams.get('sort');
