@@ -39,7 +39,12 @@
 
   <td>{{ r.score }}</td>
   <td>{{ '%.1f'|format(r.vmag) }}</td>
-  <td class="expo">{{ '%.0f'|format(r.exposure_min) if r.exposure_min else '&mdash;'|safe }}</td>
+  <td class="expo"
+      title="{{ r.frames }} frames of {{ r.frame_sec }} s, from {{ '%.2f'|format(r.frame_motion) if r.frame_motion else '?' }}&Prime;/min at best altitude &mdash; obsExposure (the legacy magnitude figure) says {{ '%.0f'|format(r.exposure_min) if r.exposure_min else '—' }} min, which is not the instruction">
+    {%- if r.frames and r.frame_sec -%}
+      {{ r.frames }}&times;{{ '%02d'|format(r.frame_sec) }}s
+    {%- else -%}&mdash;{%- endif -%}
+  </td>
   <td>{{ '%.1f'|format(r.cur_motion) if r.cur_motion is not none else '&mdash;'|safe }}</td>
 
   <td>{{ '%.0f'|format(r.cur_alt) ~ '&deg;'|safe if r.cur_alt is not none else '&mdash;'|safe }}</td>
@@ -54,7 +59,7 @@
     {%- else -%}&mdash;{%- endif -%}
   </td>
 
-  <td>{{ '%.2f'|format(r.score_total + (r.priority_bump or 0)) }}</td>
+  <td>{{ '%.2f'|format(r.score_total) }}</td>
 
   <td class="l">
     {% if r.observed %}<span class="pill ob">observed</span>
@@ -78,8 +83,6 @@
       {% endif %}
       {% if r.observed %}<button name="action" value="unobserved">undo</button>
       {% else %}<button name="action" value="observed">done</button>{% endif %}
-      <button name="action" value="up" title="Raise priority">&uarr;</button>
-      <button name="action" value="down" title="Lower priority">&darr;</button>
       {% if r.hidden %}<button name="action" value="restore">restore</button>
       {% else %}<button name="action" value="hide">hide</button>{% endif %}
     </form>

@@ -169,7 +169,8 @@ def analyze(target, eph, orbit, now=None):
     if not rows:
         discard.append("NO_WINDOW")
         target.update(max_alt_row=None, nearest_row=None, interp_row=None,
-                      live_row_is_now=False,
+                      live_row_is_now=False, frames=None, frame_sec=None,
+                      frame_motion=None,
                       max_alt_ts=None, max_alt=None, max_alt_az=None,
                       exposure_min=None, window_minutes=0.0,
                       window_start_ts=None, window_end_ts=None, mpc_flag=None,
@@ -190,6 +191,11 @@ def analyze(target, eph, orbit, now=None):
         # mask badge can name the sector the best moment actually falls in.
         target["max_alt_az"] = best.az
         target["exposure_min"] = best.exposure_minutes()
+        # Frames are set by the speed at the SAME row obsExposure uses -- the
+        # best-altitude moment -- so both figures on a plan line refer to one
+        # instant, and neither changes under the observer as the night runs.
+        target["frames"], target["frame_sec"] = best.frame_plan()
+        target["frame_motion"] = best.motion
 
         # Soft mask state for the object as a whole: what the peak moment sits
         # in, and whether every usable moment tonight is compromised.

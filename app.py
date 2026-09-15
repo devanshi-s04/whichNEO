@@ -33,8 +33,10 @@ except Exception:                                    # no tzdata on the host
 
 @app.context_processor
 def inject_config():
-    """Templates read limits and the horizon mask straight from config."""
-    return {"config": config, "tzname": _tzabbr()}
+    """Templates read limits and the horizon mask straight from config, and
+    the sortable-column registry straight from ranking so the sort bar and
+    the sort logic never drift apart."""
+    return {"config": config, "tzname": _tzabbr(), "ranking": ranking}
 
 
 def _tzabbr(ts=None):
@@ -345,13 +347,13 @@ def mark(desig):
             db.set_state(conn, desig, hidden=1)
         elif action == "restore":
             db.set_state(conn, desig, hidden=0)
-        elif action in ("up", "down"):
-            row = conn.execute(
-                "SELECT COALESCE(priority_bump,0) AS b FROM observer_state "
-                "WHERE desig=?", (desig,)).fetchone()
-            current = row["b"] if row else 0.0
-            db.set_state(conn, desig,
-                         priority_bump=current + (1.0 if action == "up" else -1.0))
+        # "up" and "down" are deliberately gone rather than left accepting a
+        # request nothing can send: the arrows that produced them are removed,
+        # and priority_bump is no longer read by the sort or the score. An
+        # endpoint that still writes a field nobody reads is how a value like
+        # C46JQC1's +5 ends up frozen into an ordering with no way to see it.
+        # The observer_state column stays -- that table also holds observed and
+        # hidden, and is not worth recreating to drop one unused field.
     finally:
         conn.close()
     return redirect(request.referrer or url_for("index"))

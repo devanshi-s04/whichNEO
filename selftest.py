@@ -814,7 +814,8 @@ def test_ephemeris_refetched_when_its_window_runs_out():
     target = {"desig": "TEST01", "nobs": 12, "arc_days": 0.5}
     sig = ephemeris.signature(target)
     full = {"offsets": [], "obs_codes": {}, "fetched_ts": now - 600,
-            "last_row_ts": now + 6 * 3600}
+            "last_row_ts": now + 6 * 3600,
+            "cache_schema": ephemeris.CACHE_SCHEMA}
 
     check("a covering ephemeris is left alone",
           not update_neocp.needs_refetch((sig, full), target, now))
@@ -862,6 +863,184 @@ def _fake_eph(n=12, rising=True):
         r.moon_dist = 95.0
         out.append(r)
     return out
+
+
+def test_priority_bump_is_fully_gone():
+    """The manual up/down adjustment is removed everywhere, not just the UI.
+
+    The arrows never worked in the default chronological view -- that sort key
+    ignores the bump -- so a click stored a number and moved nothing. Removing
+    only the buttons would have left ten stored values still skewing the
+    by-value ordering, unreachable and invisible.
+    """
+    rows = [
+        dict(desig="A", observable=True, score_total=2.0, priority_bump=0.0),
+        dict(desig="B", observable=True, score_total=1.0, priority_bump=99.0),
+    ]
+    order = [r["desig"] for r in ranking.sort_targets(rows, "score")]
+    check("a stored bump cannot reorder the by-value view",
+          order == ["A", "B"], order)
+
+    check("the sort key ignores the bump entirely",
+          ranking.sort_key_score(rows[1]) == ranking.sort_key_score(
+              dict(rows[1], priority_bump=0.0)))
+
+    src = open(os.path.join(os.path.dirname(__file__), "app.py")).read()
+    check("the /mark endpoint no longer writes a bump",
+          "priority_bump=" not in src, "app.py still sets priority_bump")
+    check("and no longer handles up/down",
+          '"up", "down"' not in src and "'up', 'down'" not in src)
+
+    tpl = open(os.path.join(os.path.dirname(__file__),
+                            "templates", "_rows.html")).read()
+    check("the arrows are gone from the table",
+          'value="up"' not in tpl and 'value="down"' not in tpl)
+    check("the value column shows the bare score",
+          "priority_bump" not in tpl, "template still reads priority_bump")
+
+    # The column itself stays: observer_state also holds observed and hidden.
+    check("observer_state keeps the column, so nothing else is disturbed",
+          "priority_bump" in db.SCHEMA)
+
+
+def test_offsets_parse_with_the_fast_motion_flag():
+    """MPC appends ! or !! after the ephemeris number on fast movers.
+
+    The pattern used to anchor `$` straight after the digits, so every line of
+    a fast mover's offsets page failed and the object was recorded as having
+    no uncertainty data. On a live board that was 40 of 103 objects, median
+    motion 17.6 "/min against 2.4 for those that parsed -- the uncertainty was
+    being stripped from exactly the objects whose uncertainty matters.
+
+    Lines below are copied verbatim from ZTF10G9's page.
+    """
+    page = "\n".join([
+        "      +0      +0      Ephemeris #    1 !!",
+        "   +6581   +4822      Ephemeris #    2 !!",
+        "   -2327   -1517      Ephemeris #    3 !!",
+        "  +11175   +7757      Ephemeris #    4 !!",
+    ])
+    got = [(int(a), int(b)) for a, b in ephemeris._OFFSET_RE.findall(page)]
+    check("all four flagged lines parse", len(got) == 4, got)
+    check("values are read correctly",
+          got[:2] == [(0, 0), (6581, 4822)], got[:2])
+
+    # The unflagged and single-! forms must keep working.
+    for line, want in (
+            ("   +6581   +4822      Ephemeris #    2", (6581, 4822)),
+            ("   +6581   +4822      Ephemeris #    2 !", (6581, 4822)),
+            ("   -2327   -1517      Ephemeris #    3 !! ", (-2327, -1517))):
+        m = ephemeris._OFFSET_RE.findall(line)
+        check("parses %r" % line[-12:].strip(),
+              m and (int(m[0][0]), int(m[0][1])) == want, m)
+
+    # Header and decoration must still be ignored.
+    check("a line without an ephemeris number is ignored",
+          ephemeris._OFFSET_RE.findall("   +1   +2   some other text") == [])
+
+    spread = ephemeris.spread(got)
+    check("spread over the real ZTF10G9 sample is enormous",
+          spread == (13502, 9274), spread)
+    check("and a cloud that size dwarfs the telescope's field",
+          spread[0] > config.FOV_ARCSEC * 4,
+          "%d\" vs %d\" field" % (spread[0], config.FOV_ARCSEC))
+
+
+def test_cache_schema_forces_one_refetch():
+    """Bumping the payload schema must invalidate every cached entry once.
+
+    Without it a parser fix never reaches objects already cached: their
+    signature does not change until new astrometry arrives, so they keep
+    serving the wrong result indefinitely.
+    """
+    now = 1_760_000_000.0
+    target = {"desig": "T1", "nobs": 12, "arc_days": 0.5}
+    sig = ephemeris.signature(target)
+    current = {"offsets": [], "obs_codes": {}, "fetched_ts": now - 600,
+               "last_row_ts": now + 3600,
+               "cache_schema": ephemeris.CACHE_SCHEMA}
+    check("an entry at the current schema is left alone",
+          not update_neocp.needs_refetch((sig, current), target, now))
+
+    old = dict(current, cache_schema=ephemeris.CACHE_SCHEMA - 1)
+    check("an entry at an older schema is refetched",
+          update_neocp.needs_refetch((sig, old), target, now))
+
+    missing = {k: v for k, v in current.items() if k != "cache_schema"}
+    check("an entry predating the field entirely is refetched",
+          update_neocp.needs_refetch((sig, missing), target, now))
+
+
+def test_frame_speed_table():
+    """The observatory's own speed table, as given by Luka.
+
+      0-5 "/min -> 30s, 5-25 -> 15s, 25-50 -> 10s,
+      50-100    ->  5s, 100-200 -> 2s, 200+  ->  1s
+
+    Upper bound inclusive. These are someone else's numbers for protecting
+    someone else's detector, so they are pinned literally rather than derived.
+    """
+    def secs(motion):
+        r = ephemeris.Row(SAMPLE_EPH)
+        r.motion = motion
+        return r.frame_seconds()
+
+    for motion, expected in [
+            (0.0, 30), (1.7, 30), (4.99, 30),
+            (5.0, 30),                      # boundary: upper bound INCLUSIVE
+            (5.01, 15), (14.6, 15), (25.0, 15),
+            (25.01, 10), (43.4, 10), (50.0, 10),
+            (50.01, 5), (64.5, 5), (100.0, 5),
+            (100.01, 2), (179.1, 2), (200.0, 2),
+            (200.01, 1), (231.0, 1), (5000.0, 1)]:
+        check(f"{motion:>8.2f} \"/min -> {expected:2d} s", secs(motion) == expected,
+              f"got {secs(motion)}")
+
+    check("every band boundary takes the SHORTER-speed band",
+          secs(5.0) == 30 and secs(25.0) == 15 and secs(200.0) == 2)
+
+    r = ephemeris.Row(SAMPLE_EPH)
+    r.motion = 8.5
+    check("frame count is fixed for every target",
+          r.frame_plan() == (config.EXPOSURE_FRAMES, 15), r.frame_plan())
+
+    # Real values from the night this was specified.
+    for desig, motion, expected in [("P22pZo5", 5.03, 15), ("A11GP9t", 64.45, 5),
+                                    ("ZTF10G9", 179.1, 2), ("P12pRQk", 1.0, 30)]:
+        check(f"{desig} at {motion} \"/min -> {expected} s",
+              secs(motion) == expected, f"got {secs(motion)}")
+
+
+def test_plan_line_carries_the_frame_instruction():
+    """Luka's format, literally: `* DESIG 36 x 02 sec score=...`"""
+    row = ephemeris.Row(SAMPLE_EPH)
+    t = dict(desig="ZTF10G9", score=100, nobs=4, arc_days=0.02,
+             not_seen_days=0.667, exposure_min=9.0, frames=36, frame_sec=2,
+             max_alt_row=row, nearest_row=row, interp_row=row,
+             live_row_is_now=True)
+    first = output.plan_entry(t).splitlines()[0]
+
+    check("frames and seconds sit between the designation and score",
+          first.startswith("* ZTF10G9 36 x 02 sec score=100,"), first)
+    check("seconds are zero-padded to two digits",
+          " x 02 sec " in first, first)
+    check("obsExposure is still present and untouched",
+          "obsExposure=9.0min" in first, first)
+
+    t1 = dict(t, frame_sec=30)
+    check("a two-digit value is not padded further",
+          output.plan_entry(t1).splitlines()[0].startswith("* ZTF10G9 36 x 30 sec"),
+          output.plan_entry(t1).splitlines()[0])
+
+    # Without a frame plan the old layout is kept rather than emitting a
+    # half-written instruction.
+    t2 = dict(t, frames=None, frame_sec=None)
+    check("no frame plan falls back to the original line",
+          output.plan_entry(t2).splitlines()[0].startswith("* ZTF10G9    "),
+          output.plan_entry(t2).splitlines()[0])
+
+    check("the frame fields are stored for the board",
+          all(c in db._COLS for c in ("frames", "frame_sec", "frame_motion")))
 
 
 def test_keepout_wedge():
@@ -1166,6 +1345,11 @@ def main():
                test_ranking_bounds, test_row_rejection_reasons,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
+               test_priority_bump_is_fully_gone,
+               test_offsets_parse_with_the_fast_motion_flag,
+               test_cache_schema_forces_one_refetch,
+               test_frame_speed_table,
+               test_plan_line_carries_the_frame_instruction,
                test_keepout_wedge,
                test_plan_file_never_publishes_a_stale_pointing_line,
                test_altitude_plot,

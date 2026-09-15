@@ -92,6 +92,11 @@ def needs_refetch(entry, target, now):
     if any(k not in payload for k in
            ("offsets", "obs_codes", "last_row_ts", "fetched_ts")):
         return True
+    # A parser fix changes what the same page yields, and the signature cannot
+    # see that -- it tracks the object's astrometry, not our bugs. The schema
+    # version does, so a bump refetches everything once.
+    if payload.get("cache_schema") != ephemeris.CACHE_SCHEMA:
+        return True
 
     last = payload.get("last_row_ts")
     if last is None or last >= now:
@@ -160,6 +165,7 @@ def run_update(conn, source=None):
             # out of night without waiting for new astrometry to arrive.
             "fetched_ts": now,
             "last_row_ts": max((r.ts for r in e.rows), default=None),
+            "cache_schema": ephemeris.CACHE_SCHEMA,
             "offsets_url": e.offsets_url,
             "map_url": e.map_url,
             "observations_url": e.observations_url,
@@ -188,6 +194,7 @@ def run_update(conn, source=None):
             t.update(discard_reasons=t["cheap_reject"], observable=False,
                      max_alt=None, max_alt_ts=None, max_alt_az=None,
                      mask_flags=[], exposure_min=None, live_row_is_now=False,
+                     frames=None, frame_sec=None, frame_motion=None,
                      window_minutes=0.0, eph_rows_total=0, eph_rows_usable=0,
                      eph_error=None, eph_report={}, map_url=None,
                      offsets_url=None, scatteredness=None,
