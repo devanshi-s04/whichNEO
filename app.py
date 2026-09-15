@@ -179,6 +179,7 @@ def night_strip(rows, max_lanes=16):
     return {
         "start": localt(start), "end": localt(end),
         "start_ut": utct(start), "end_ut": utct(end),
+        "start_ts": start, "end_ts": end,
         "hours": ticks,
         "lanes": lanes,
         "now_pct": round(pct(now), 2) if start <= now <= end else None,
@@ -269,14 +270,27 @@ def index():
 
 @app.route("/skymap.svg")
 def skymap_svg():
-    """Just the map, so the page can refresh it without a full reload."""
+    """Just the map, so the page can refresh it without a full reload.
+
+    An optional ?ts=<unix time> draws the map as it stood at that instant
+    instead of live -- the replay slider under "Sky now" uses this to step
+    back through a night after it is over, reading the same cached ephemeris
+    tracks the live map already does. No new data collection required: those
+    tracks already span the whole night, not just the instant being shown.
+    """
     v = _view_args()
+    try:
+        ts = float(request.args["ts"]) if "ts" in request.args else None
+    except ValueError:
+        ts = None
     conn = get_conn()
     try:
         rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
-        return (sky_view(conn, rows)["svg"], 200,
+        used = ts if ts is not None else time.time()
+        return (sky_view(conn, rows, now=ts)["svg"], 200,
                 {"Content-Type": "image/svg+xml; charset=utf-8",
-                 "Cache-Control": "no-store"})
+                 "Cache-Control": "no-store",
+                 "X-Sky-Time": f"{localt(used)} {_tzabbr(used)}"})
     finally:
         conn.close()
 

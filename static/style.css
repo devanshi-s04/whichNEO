@@ -93,6 +93,24 @@ body {
 .skyside .cap { font-size: 12px; color: var(--faint); margin: 0 0 13px; }
 .skyside .cap strong { color: var(--ink); font-weight: 600; }
 
+.replay { margin-top: 14px; padding-top: 13px; border-top: 1px solid var(--line); }
+.replay-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 6px;
+}
+.replay-label {
+  font-size: 10px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--faint); font-weight: 700;
+}
+.replay-time {
+  font-family: var(--mono); font-size: 11.5px; color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+.replay input[type="range"] {
+  width: 100%; margin: 2px 0 8px; accent-color: var(--amber);
+}
+.replay .ghost { font-size: 10.5px; padding: 2px 8px; }
+
 .legend { width: 100%; margin: 0 0 13px; }
 .legend td { padding: 3px 0; vertical-align: middle; }
 .legend td.n {
