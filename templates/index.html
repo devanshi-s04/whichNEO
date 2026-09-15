@@ -192,6 +192,9 @@
   </details>
   <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=1) }}">hidden</a>
   <a class="chip" href="{{ url_for('plan_text') }}" target="_blank" rel="noopener">plan file</a>
+  <button type="button" id="planSyncBtn" class="chip"
+          title="Keep a local .txt file on this computer in sync with the plan file, updated on every refresh">sync to file</button>
+  <span id="planSyncStatus" class="syncstatus"></span>
   <span class="rules">
     score&nbsp;&ge;&nbsp;{{ config.MIN_SCORE }} &middot; V&nbsp;&le;&nbsp;{{ config.MAX_MAG }} &middot;
     motion&nbsp;&ge;&nbsp;{{ config.MIN_MOTION }}&Prime;/min &middot; moon&nbsp;&ge;&nbsp;{{ config.MOON_SEP_MIN }}&deg; &middot;
@@ -297,6 +300,142 @@
 const POLL = {{ poll_interval }} * 1000;
 const TZ = {{ tzname|tojson }};
 const params = new URLSearchParams(window.location.search);
+
+// Keeps a .txt file on THIS computer (not the server -- see planHandle
+// below) in sync with the plan file, rewritten every refresh() tick. Plain
+// <a href> downloads can't do this: each one is a brand new file, never an
+// update to the same one. The File System Access API can write the same
+// file repeatedly, but only Chromium browsers implement it, and only after
+// the user has granted access to a specific file -- there is no way to
+// start writing to an arbitrary path unasked. The handle it hands back is
+// IndexedDB-storable, so that grant survives a reload; the browser still
+// requires a fresh user gesture to actually reuse it once permission has
+// gone back to "ask again" (e.g. after the tab was closed), which is what
+// the "resume sync" state below is for.
+let planHandle = null;
+let planLastWritten = null;
+const planSyncBtn = document.getElementById('planSyncBtn');
+const planSyncStatus = document.getElementById('planSyncStatus');
+
+function idbTxn(mode) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('whichneo-plan-sync', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('handles');
+    req.onsuccess = () => resolve(req.result.transaction('handles', mode).objectStore('handles'));
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  const store = await idbTxn('readonly');
+  return new Promise((resolve, reject) => {
+    const r = store.get(key);
+    r.onsuccess = () => resolve(r.result || null);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function idbSet(key, value) {
+  const store = await idbTxn('readwrite');
+  return new Promise((resolve, reject) => {
+    const r = store.put(value, key);
+    r.onsuccess = () => resolve();
+    r.onerror = () => reject(r.error);
+  });
+}
+
+function setPlanSyncLabel(text, on) {
+  if (!planSyncBtn) return;
+  planSyncBtn.textContent = text;
+  planSyncBtn.classList.toggle('on', !!on);
+}
+
+function timeNow() {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function setSyncStatus(text, isError) {
+  if (!planSyncStatus) return;
+  planSyncStatus.textContent = text;
+  planSyncStatus.classList.toggle('bad', !!isError);
+}
+
+async function writePlanTo(handle, text) {
+  const writable = await handle.createWritable();
+  await writable.write(text);
+  await writable.close();
+}
+
+// Shared by every path that has a live handle -- the initial connect, a
+// resumed session, restoring a still-granted permission on page load, and
+// every later refresh() tick. One place to keep the "synced HH:MM:SS" /
+// "sync failed" status honest no matter which of those triggered it.
+async function syncPlanNow() {
+  if (!planHandle) return;
+  try {
+    const text = await fetch('/plan').then(r => r.ok ? r.text() : null);
+    if (text === null) return;
+    if (text !== planLastWritten) {
+      await writePlanTo(planHandle, text);
+      planLastWritten = text;
+    }
+    setSyncStatus('synced ' + timeNow(), false);
+  } catch (e) {
+    // Permission revoked, or the file/its folder went away -- don't keep
+    // failing silently every poll; make it visibly need reconnecting.
+    planHandle = null;
+    setPlanSyncLabel('resume sync', false);
+    setSyncStatus('sync failed — click to resume', true);
+  }
+}
+
+async function connectPlanFile() {
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: 'whichneo-plan.txt',
+      types: [{ description: 'Text file', accept: { 'text/plain': ['.txt'] } }],
+    });
+    planHandle = handle;
+    await idbSet('planHandle', handle);
+    setPlanSyncLabel('synced to file', true);
+    await syncPlanNow();
+  } catch (e) {
+    if (e.name !== 'AbortError') console.error('plan sync setup failed', e);
+  }
+}
+
+async function resumePlanSync() {
+  try {
+    const handle = await idbGet('planHandle');
+    if (!handle) return connectPlanFile();
+    if (await handle.requestPermission({ mode: 'readwrite' }) === 'granted') {
+      planHandle = handle;
+      setPlanSyncLabel('synced to file', true);
+      await syncPlanNow();
+    }
+  } catch (e) { console.error('resuming plan sync failed', e); }
+}
+
+async function initPlanSync() {
+  if (!planSyncBtn) return;
+  if (!window.showSaveFilePicker) {
+    setPlanSyncLabel('sync to file (needs Chrome/Edge)', false);
+    planSyncBtn.disabled = true;
+    return;
+  }
+  planSyncBtn.addEventListener('click', () => {
+    if (planHandle) return;   // already connected
+    planSyncBtn.textContent.startsWith('resume') ? resumePlanSync() : connectPlanFile();
+  });
+  const handle = await idbGet('planHandle').catch(() => null);
+  if (!handle) return;
+  if (await handle.queryPermission({ mode: 'readwrite' }).catch(() => 'denied') === 'granted') {
+    planHandle = handle;
+    setPlanSyncLabel('synced to file', true);
+    await syncPlanNow();
+  } else {
+    setPlanSyncLabel('resume sync', false);
+  }
+}
+initPlanSync();
 
 // Which plan entries the observer has opened. Kept across refreshes so a
 // poll never closes something being read mid-slew.
@@ -484,6 +623,8 @@ async function refresh() {
     document.getElementById('last-update').innerHTML =
       st.last_update_local + '<small> ' + TZ + '</small>';
   } catch (e) { /* keep the last good render */ }
+
+  await syncPlanNow();
 }
 setInterval(refresh, POLL);
 applyOpenPlans();

@@ -260,6 +260,11 @@ body {
 }
 .chip:hover { color: var(--ink); border-color: var(--faint); }
 .chip.on { color: var(--amber); border-color: rgba(240,166,60,.4); }
+button.chip { font-family: inherit; cursor: pointer; appearance: none; }
+button.chip:disabled { cursor: default; opacity: .5; }
+button.chip:disabled:hover { color: var(--muted); border-color: var(--line); }
+.syncstatus { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.syncstatus.bad { color: var(--no); }
 .dirbtn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 24px; height: 24px; border-radius: 50%;
