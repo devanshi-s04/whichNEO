@@ -177,6 +177,7 @@
   </details>
   <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=1) }}">hidden</a>
   <a class="chip" href="{{ url_for('plan_text') }}">plan file</a>
+  <a class="chip" href="{{ url_for('history_view') }}">history</a>
   <span class="rules">
     score&nbsp;&ge;&nbsp;{{ config.MIN_SCORE }} &middot; V&nbsp;&le;&nbsp;{{ config.MAX_MAG }} &middot;
     motion&nbsp;&ge;&nbsp;{{ config.MIN_MOTION }}&Prime;/min &middot; moon&nbsp;&ge;&nbsp;{{ config.MOON_SEP_MIN }}&deg; &middot;

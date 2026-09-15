@@ -1,0 +1,9 @@
+{% if charts %}
+<div class="histwrap">
+  {% for c in charts %}
+  <div class="histchart">{{ c.svg|safe }}</div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="note">Not enough polled history yet to chart.</p>
+{% endif %}

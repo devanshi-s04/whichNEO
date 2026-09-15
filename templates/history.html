@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>History &mdash; WhichNEO</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+<div class="top">
+  <div class="brand">
+    <h1>NEOCP <b>history</b></h1>
+    <div class="where">Every value NEOCP has reported for every object, since polling began</div>
+  </div>
+  <div class="live">
+    <div class="stat"><div class="k">Tracking since</div>
+      <div class="v">{{ summary.tracking_since[:16] if summary.tracking_since else '&mdash;' }}</div></div>
+    <div class="stat"><div class="k">Objects seen</div>
+      <div class="v amber">{{ summary.total_objects }}</div></div>
+    <div class="stat"><div class="k">Snapshots logged</div>
+      <div class="v">{{ summary.total_snapshots }}</div></div>
+    <div class="stat"><div class="k">Download</div>
+      <div class="v">
+        <a class="chip" href="{{ url_for('history_download_db') }}">.db</a>
+        <a class="chip" href="{{ url_for('history_download_csv') }}">.csv</a>
+      </div></div>
+    <div class="stat"><div class="k">&nbsp;</div>
+      <div class="v"><a class="chip" href="{{ url_for('index') }}">&larr; sequence</a></div></div>
+  </div>
+</div>
+
+<div class="bar-row">
+  <span class="rules">
+    pending&nbsp;{{ summary.by_status.get('pending', 0) }} &middot;
+    confirmed&nbsp;{{ summary.by_status.get('confirmed', 0) }} &middot;
+    not confirmed&nbsp;{{ summary.by_status.get('not_confirmed', 0) }} &middot;
+    not a minor planet&nbsp;{{ summary.by_status.get('not_minor_planet', 0) }} &middot;
+    does not exist&nbsp;{{ summary.by_status.get('does_not_exist', 0) }} &middot;
+    suspected artificial&nbsp;{{ summary.by_status.get('suspected_artificial', 0) }}
+  </span>
+</div>
+
+<div class="panel filterbuilder">
+  <div class="filterrow">
+    <div class="filterinputwrap">
+      <input type="text" id="filter-input" class="filterinput-main" autocomplete="off"
+             placeholder="type a filter and press enter &mdash; e.g. status=confirmed or score&gt;=90">
+      <div class="suggestions" id="filter-suggestions" hidden></div>
+    </div>
+    <button type="button" id="f-clear" class="chip" hidden>clear all</button>
+  </div>
+  <div class="filterhint">
+    fields: {{ filter_fields|map(attribute='key')|join(', ') }} &middot;
+    operators: <code>=</code> <code>!=</code> <code>&gt;</code> <code>&gt;=</code>
+    <code>&lt;</code> <code>&lt;=</code> <code>~</code> (contains)
+  </div>
+  <div class="filterchips" id="filterchips"></div>
+  {% if filter_error %}<div class="filtererr">{{ filter_error }}</div>{% endif %}
+</div>
+
+<div class="panel tablewrap">
+  <table class="grid">
+    <thead><tr>
+      <th class="l" data-field="desig">Target</th>
+      <th class="l" data-field="first_seen">First seen</th>
+      <th class="l" data-field="last_seen">Last seen</th>
+      <th class="l" data-field="status">Status</th>
+      <th class="l" data-field="decided">Decided</th>
+      <th data-field="score">Score</th>
+      <th data-field="vmag">V</th>
+      <th data-field="nobs">NObs</th>
+      <th data-field="arc">Arc</th>
+      <th data-field="unseen">Unseen</th>
+    </tr></thead>
+    <tbody id="history-rows">{% include "_history_rows.html" %}</tbody>
+  </table>
+</div>
+
+<footer>
+  <p>Built by polling the same NEOCP list the board reads, on its own schedule
+  independent of this page &mdash; see <code>neocp_history.py</code>. Each
+  object's status comes from MPC's "previous NEOCP objects" archive once it
+  resolves; <em>pending</em> means still on the confirmation page or not yet
+  matched there.</p>
+</footer>
+
+</div>
+<script>
+// Charts stay delegated to the tbody itself (rather than bound per-button)
+// since updateResults() below replaces the tbody's contents wholesale on
+// every filter/sort change -- per-row listeners would be lost each time.
+document.getElementById('history-rows').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('.histexpand');
+  if (!btn) return;
+  const row = btn.closest('tr').nextElementSibling;
+  if (!row || !row.classList.contains('histrow')) return;
+  const opening = row.hidden;
+  if (opening && !row.dataset.loaded) {
+    const cell = row.querySelector('td');
+    cell.textContent = 'Loading…';
+    try {
+      const resp = await fetch('/history/charts/' + encodeURIComponent(row.dataset.desig));
+      cell.innerHTML = await resp.text();
+      row.dataset.loaded = '1';
+    } catch (e) {
+      cell.textContent = 'Failed to load charts.';
+    }
+  }
+  row.hidden = !opening;
+  btn.setAttribute('aria-expanded', String(opening));
+  btn.innerHTML = (opening ? '&#9662;' : '&#9656;') + ' charts';
+});
+
+// Filter bar + live sort/filter -- both just rebuild the same q/sort/dir
+// query string this page already understands server-side (see history.py's
+// split_filter_tokens), then fetch the table body instead of navigating.
+const FILTER_FIELDS = {{ filter_fields|tojson }};
+const OPS_BY_KIND = {
+  number: ['>=', '<=', '>', '<', '=', '!='],
+  enum:   ['=', '!='],
+  text:   ['=', '!=', '~'],
+};
+// Longest first, so e.g. ">=" is recognized before its own ">" prefix.
+const ALL_OPS = ['!=', '>=', '<=', '=', '>', '<', '~'];
+let filters = {{ initial_filters|tojson }};
+let sortField = {{ (mode or '')|tojson }};
+let sortAsc = {{ asc|tojson }};
+
+function fieldByKey(k) { return FILTER_FIELDS.find(f => f.key === k); }
+
+function renderChips() {
+  const wrap = document.getElementById('filterchips');
+  wrap.innerHTML = '';
+  filters.forEach((f, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip filterchip';
+    chip.textContent = `${f.field}${f.op}${f.value}`;
+    const x = document.createElement('button');
+    x.type = 'button'; x.className = 'chipx'; x.textContent = '×';
+    x.setAttribute('aria-label', 'Remove filter');
+    x.addEventListener('click', () => {
+      filters.splice(i, 1);
+      renderChips();
+      updateResults();
+    });
+    chip.appendChild(x);
+    wrap.appendChild(chip);
+  });
+  document.getElementById('f-clear').hidden = filters.length === 0;
+}
+
+document.getElementById('f-clear').addEventListener('click', () => {
+  filters = [];
+  renderChips();
+  updateResults();
+});
+
+function addFilter(field, op, value) {
+  filters.push({ field, op, value });
+  renderChips();
+  updateResults();
+}
+
+// --- Single-box autocomplete: splits whatever's typed so far into
+// field/op/value (permissively -- unlike the strict backend regex, this
+// tolerates a still-incomplete operator so it can keep suggesting as you
+// type), then offers whichever part is still missing: field names, then
+// operators, then real values pulled from FILTER_FIELDS (enums) or the
+// database itself (designations) -- see /history/suggest.
+const filterInput = document.getElementById('filter-input');
+const suggBox = document.getElementById('filter-suggestions');
+let suggestions = [];
+let activeSugg = -1;
+let suggestSeq = 0;
+
+function splitTyped(text) {
+  for (const op of ALL_OPS) {
+    const idx = text.indexOf(op);
+    if (idx > 0) {
+      return { field: text.slice(0, idx), op, value: text.slice(idx + op.length), hasOp: true };
+    }
+  }
+  return { field: text, op: '', value: '', hasOp: false };
+}
+
+function showSuggestions(list) {
+  suggestions = list;
+  activeSugg = -1;
+  suggBox.innerHTML = '';
+  suggBox.hidden = list.length === 0;
+  list.forEach((s, i) => {
+    const row = document.createElement('div');
+    row.className = 'suggestion';
+    row.textContent = s.display;
+    row.addEventListener('mousedown', (ev) => {
+      // mousedown (not click) so this fires before the input's blur hides
+      // the list.
+      ev.preventDefault();
+      pickSuggestion(s);
+    });
+    suggBox.appendChild(row);
+  });
+}
+
+function highlightSuggestion(i) {
+  [...suggBox.children].forEach((el, idx) => el.classList.toggle('active', idx === i));
+  activeSugg = i;
+}
+
+function pickSuggestion(s) {
+  if (s.complete) {
+    addFilter(s.field, s.op, s.value);
+    filterInput.value = '';
+    showSuggestions([]);
+  } else {
+    filterInput.value = s.insert;
+    filterInput.focus();
+    computeSuggestions();
+  }
+}
+
+async function computeSuggestions() {
+  const text = filterInput.value;
+  const mySeq = ++suggestSeq;
+  if (!text) { showSuggestions([]); return; }
+  const parsed = splitTyped(text);
+
+  if (!parsed.hasOp) {
+    const exact = fieldByKey(parsed.field);
+    if (exact) {
+      showSuggestions(OPS_BY_KIND[exact.kind].map(op => ({
+        display: `${exact.key}${op}  (${exact.label})`, insert: `${exact.key}${op}`, complete: false,
+      })));
+      return;
+    }
+    const q = parsed.field.toLowerCase();
+    showSuggestions(FILTER_FIELDS
+      .filter(f => f.key.toLowerCase().includes(q) || f.label.toLowerCase().includes(q))
+      .map(f => ({ display: `${f.key}  (${f.label})`, insert: f.key, complete: false })));
+    return;
+  }
+
+  const fieldDef = fieldByKey(parsed.field);
+  if (!fieldDef) { showSuggestions([]); return; }
+  const validOps = OPS_BY_KIND[fieldDef.kind];
+  if (parsed.value === '') {
+    const matchingOps = validOps.filter(o => o.startsWith(parsed.op));
+    const opLocked = validOps.includes(parsed.op)
+      && !validOps.some(o => o !== parsed.op && o.startsWith(parsed.op));
+    if (!opLocked) {
+      showSuggestions(matchingOps.map(op => ({
+        display: `${fieldDef.key}${op}`, insert: `${fieldDef.key}${op}`, complete: false,
+      })));
+      return;
+    }
+  }
+  if (!validOps.includes(parsed.op)) { showSuggestions([]); return; }
+
+  if (fieldDef.kind === 'enum') {
+    // startsWith, not includes: several status values share a suffix
+    // (confirmed / not_confirmed) so substring matching could never narrow
+    // to just one of them no matter how much more was typed.
+    const vq = parsed.value.toLowerCase();
+    showSuggestions(fieldDef.options
+      .filter(o => o.toLowerCase().startsWith(vq))
+      .map(o => ({
+        display: `${fieldDef.key}${parsed.op}${o}`,
+        field: fieldDef.key, op: parsed.op, value: o, complete: true,
+      })));
+    return;
+  }
+
+  if (fieldDef.key === 'desig' && parsed.value.length >= 1) {
+    const resp = await fetch('/history/suggest?field=desig&q=' + encodeURIComponent(parsed.value));
+    if (mySeq !== suggestSeq) return;   // a newer keystroke has since fired
+    const matches = await resp.json();
+    showSuggestions(matches.map(v => ({
+      display: `${fieldDef.key}${parsed.op}${v}`,
+      field: fieldDef.key, op: parsed.op, value: v, complete: true,
+    })));
+    return;
+  }
+
+  showSuggestions([]);
+}
+
+filterInput.addEventListener('input', computeSuggestions);
+filterInput.addEventListener('blur', () => setTimeout(() => showSuggestions([]), 100));
+filterInput.addEventListener('keydown', (ev) => {
+  if (ev.key === 'ArrowDown' && suggestions.length) {
+    ev.preventDefault();
+    highlightSuggestion((activeSugg + 1) % suggestions.length);
+  } else if (ev.key === 'ArrowUp' && suggestions.length) {
+    ev.preventDefault();
+    highlightSuggestion((activeSugg - 1 + suggestions.length) % suggestions.length);
+  } else if (ev.key === 'Enter') {
+    ev.preventDefault();
+    if (activeSugg >= 0) { pickSuggestion(suggestions[activeSugg]); return; }
+    // Exactly one suggestion left (e.g. typed enough of an enum value or
+    // desig to narrow it to one match) -- Enter takes it, same as arrowing
+    // down to it first would.
+    if (suggestions.length === 1) { pickSuggestion(suggestions[0]); return; }
+    const text = filterInput.value.trim();
+    if (!text) return;
+    const parsed = splitTyped(text);
+    const fieldDef = fieldByKey(parsed.field);
+    if (!fieldDef || !OPS_BY_KIND[fieldDef.kind].includes(parsed.op) || !parsed.value) return;
+    // An enum only ever matches one of its real values -- never commit
+    // whatever was typed verbatim (e.g. "status=conf" silently becoming a
+    // filter that matches nothing) unless it's already an exact value.
+    if (fieldDef.kind === 'enum' && !fieldDef.options.includes(parsed.value)) return;
+    addFilter(parsed.field, parsed.op, parsed.value);
+    filterInput.value = '';
+    showSuggestions([]);
+  } else if (ev.key === 'Escape') {
+    showSuggestions([]);
+  }
+});
+
+function renderSortHeaders() {
+  document.querySelectorAll('th[data-field]').forEach(th => {
+    th.classList.remove('sorted');
+    const old = th.querySelector('.arrow');
+    if (old) old.remove();
+  });
+  const active = document.querySelector(`th[data-field="${sortField}"]`);
+  if (active) {
+    active.classList.add('sorted');
+    const span = document.createElement('span');
+    span.className = 'arrow';
+    span.innerHTML = sortAsc ? '&#9650;' : '&#9660;';
+    active.appendChild(span);
+  }
+}
+
+document.querySelectorAll('th[data-field]').forEach(th => {
+  th.classList.add('sortable');
+  th.addEventListener('click', () => {
+    if (sortField === th.dataset.field) {
+      sortAsc = !sortAsc;
+    } else {
+      sortField = th.dataset.field;
+      sortAsc = true;
+    }
+    renderSortHeaders();
+    updateResults();
+  });
+});
+
+async function updateResults() {
+  const params = new URLSearchParams();
+  if (sortField) params.set('sort', sortField);
+  if (!sortAsc) params.set('dir', 'desc');
+  const q = filters.map(f => `${f.field}${f.op}${f.value}`).join(' ');
+  if (q) params.set('q', q);
+  const resp = await fetch('/history/rows?' + params.toString());
+  document.getElementById('history-rows').innerHTML = await resp.text();
+  const qs = params.toString();
+  window.history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : ''));
+}
+
+renderChips();
+renderSortHeaders();
+</script>
+</body>
+</html>
