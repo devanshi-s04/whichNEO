@@ -182,7 +182,7 @@ def run_update(conn, source=None):
         if t["cheap_reject"]:
             t.update(discard_reasons=t["cheap_reject"], observable=False,
                      max_alt=None, max_alt_ts=None, max_alt_az=None,
-                     mask_flags=[], exposure_min=None,
+                     mask_flags=[], exposure_min=None, live_row_is_now=False,
                      window_minutes=0.0, eph_rows_total=0, eph_rows_usable=0,
                      eph_error=None, eph_report={}, map_url=None,
                      offsets_url=None, scatteredness=None,
