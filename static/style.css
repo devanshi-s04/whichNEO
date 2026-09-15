@@ -58,6 +58,15 @@ body {
   margin-top: 3px; font-family: var(--mono); font-size: 11px;
   color: var(--faint); letter-spacing: .01em;
 }
+.plan-btn {
+  display: inline-flex; align-items: center; flex: 0 0 auto;
+  padding: 9px 18px; border-radius: 7px; margin-bottom: 2px;
+  background: var(--no); color: #fff; font-family: var(--ui);
+  font-weight: 500; font-size: 12px;
+  letter-spacing: .01em; text-decoration: none; border: 1px solid rgba(0,0,0,.2);
+  box-shadow: 0 1px 0 rgba(0,0,0,.15);
+}
+.plan-btn:hover { background: #b8544a; }
 .live { display: flex; gap: 26px; align-items: flex-end; flex-wrap: wrap; }
 .stat .k {
   font-size: 9.5px; letter-spacing: .13em; text-transform: uppercase;

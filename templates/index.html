@@ -14,6 +14,7 @@
     <h1>Which<b>NEO</b></h1>
     <div class="where">L01 &middot; TI&#268;AN STATION, VI&#352;NJAN &middot; 45.2909&deg;N 13.74930&deg;E 381 m &middot; 1.0-m f/2.9</div>
   </div>
+  <a class="plan-btn" href="{{ url_for('plan_text') }}" target="_blank" rel="noopener">Plan file</a>
   <div class="live">
     <div class="stat"><div class="k">Night</div>
       <div class="v">{{ status.night }}</div></div>
@@ -158,7 +159,6 @@
        class="{{ 'on' if mode == 'score' }}">By value</a>
   </div>
   <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=(0 if show_hidden else 1)) }}">hidden</a>
-  <a class="chip" href="{{ url_for('plan_text') }}" target="_blank" rel="noopener">plan file</a>
   <details class="filters-dd" id="rangeDd">
     <summary id="rangeSummary">Range filters{% if range_filters %} ({{ range_filters|length }}){% endif %}</summary>
     <div class="filters-panel">
