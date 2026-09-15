@@ -114,6 +114,20 @@ def run_update(conn, source=None):
         timings[stage] = round((time.perf_counter() - t0) * 1000, 1)
         t0 = time.perf_counter()
 
+    # Archive the outgoing night the moment the label rolls over, before
+    # anything below overwrites it. targets/observer_state/ephemeris_cache
+    # still hold last cycle's (i.e. the night that just ended) state at this
+    # point -- this cycle's replace_targets/prune_cache haven't run yet, and
+    # after they do there is no other record of where a resolved-and-removed
+    # object actually was.
+    outgoing_night = db.get_meta(conn, "night")
+    incoming_night = pipeline.night_label(time.time())
+    if outgoing_night and outgoing_night != incoming_night:
+        try:
+            db.archive_night(conn, outgoing_night)
+        except Exception:
+            logging.exception("failed to archive night %s", outgoing_night)
+
     raw = open(source).read() if source else neocp.fetch_neocp()
     targets = neocp.parse_neocp(raw)
     if not targets:
