@@ -59,7 +59,7 @@
     {%- else -%}&mdash;{%- endif -%}
   </td>
 
-  <td>{{ '%.2f'|format(r.score_total + (r.priority_bump or 0)) }}</td>
+  <td>{{ '%.2f'|format(r.score_total) }}</td>
 
   <td class="l">
     {% if r.observed %}<span class="pill ob">observed</span>

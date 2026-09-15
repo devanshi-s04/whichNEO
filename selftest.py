@@ -865,6 +865,44 @@ def _fake_eph(n=12, rising=True):
     return out
 
 
+def test_priority_bump_is_fully_gone():
+    """The manual up/down adjustment is removed everywhere, not just the UI.
+
+    The arrows never worked in the default chronological view -- that sort key
+    ignores the bump -- so a click stored a number and moved nothing. Removing
+    only the buttons would have left ten stored values still skewing the
+    by-value ordering, unreachable and invisible.
+    """
+    rows = [
+        dict(desig="A", observable=True, score_total=2.0, priority_bump=0.0),
+        dict(desig="B", observable=True, score_total=1.0, priority_bump=99.0),
+    ]
+    order = [r["desig"] for r in ranking.sort_targets(rows, "score")]
+    check("a stored bump cannot reorder the by-value view",
+          order == ["A", "B"], order)
+
+    check("the sort key ignores the bump entirely",
+          ranking.sort_key_score(rows[1]) == ranking.sort_key_score(
+              dict(rows[1], priority_bump=0.0)))
+
+    src = open(os.path.join(os.path.dirname(__file__), "app.py")).read()
+    check("the /mark endpoint no longer writes a bump",
+          "priority_bump=" not in src, "app.py still sets priority_bump")
+    check("and no longer handles up/down",
+          '"up", "down"' not in src and "'up', 'down'" not in src)
+
+    tpl = open(os.path.join(os.path.dirname(__file__),
+                            "templates", "_rows.html")).read()
+    check("the arrows are gone from the table",
+          'value="up"' not in tpl and 'value="down"' not in tpl)
+    check("the value column shows the bare score",
+          "priority_bump" not in tpl, "template still reads priority_bump")
+
+    # The column itself stays: observer_state also holds observed and hidden.
+    check("observer_state keeps the column, so nothing else is disturbed",
+          "priority_bump" in db.SCHEMA)
+
+
 def test_offsets_parse_with_the_fast_motion_flag():
     """MPC appends ! or !! after the ephemeris number on fast movers.
 
@@ -1307,6 +1345,7 @@ def main():
                test_ranking_bounds, test_row_rejection_reasons,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
+               test_priority_bump_is_fully_gone,
                test_offsets_parse_with_the_fast_motion_flag,
                test_cache_schema_forces_one_refetch,
                test_frame_speed_table,

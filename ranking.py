@@ -59,9 +59,14 @@ def sort_key_chronological(row):
 
 
 def sort_key_score(row):
-    bump = row.get("priority_bump") or 0.0
+    # No manual adjustment term. The up/down arrows that fed priority_bump
+    # never worked in the default chronological view -- that key ignores the
+    # bump entirely -- so a click stored a number and moved nothing. Rather
+    # than leave a control that works in one view and silently fails in the
+    # other, the whole mechanism is gone: an invisible per-target offset on a
+    # score is hard to notice and harder to undo.
     return (0 if row.get("observable") else 1,
-            -((row.get("score_total") or 0.0) + bump),
+            -(row.get("score_total") or 0.0),
             row["desig"])
 
 
