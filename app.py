@@ -77,9 +77,11 @@ def get_conn():
     return conn
 
 
-def load_sorted(conn, show_observed=False, show_hidden=False, mode=None):
+def load_sorted(conn, show_observed=False, show_hidden=False, mode=None,
+                 range_filters=None):
     rows = db.load_targets(conn, include_hidden=show_hidden,
                            include_observed=show_observed)
+    rows = ranking.apply_range_filters(rows, range_filters)
     return ranking.sort_targets(rows, mode)
 
 
@@ -159,7 +161,7 @@ def night_strip(rows, max_lanes=16):
         t += 3600
 
     lanes = []
-    for r in obs[:max_lanes]:
+    for i, r in enumerate(obs):
         left = pct(r["window_start_ts"])
         right = pct(r["window_end_ts"])
         lanes.append({
@@ -172,6 +174,9 @@ def night_strip(rows, max_lanes=16):
             # shape of the whole night, and how much of it is already behind
             # you is part of that shape.
             "observed": bool(r.get("observed")),
+            # Rendered but collapsed past max_lanes, rather than left out
+            # entirely -- so "show all" is a client-side unhide, no reload.
+            "extra": i >= max_lanes,
         })
 
     now = time.time()
@@ -247,7 +252,8 @@ def _view_args():
     # meant first finding the row again in a separate view.
     return dict(show_observed=True,
                 show_hidden=request.args.get("hidden") == "1",
-                mode=request.args.get("sort") or config.DEFAULT_SORT)
+                mode=request.args.get("sort") or config.DEFAULT_SORT,
+                range_filters=ranking.parse_range_filters(request.args.get("range")))
 
 
 @app.route("/")
@@ -255,7 +261,7 @@ def index():
     v = _view_args()
     conn = get_conn()
     try:
-        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
+        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["range_filters"])
         upcoming = pick_upcoming(rows)
         return render_template(
             "index.html", rows=rows, strip=night_strip(rows),
@@ -272,7 +278,7 @@ def skymap_svg():
     v = _view_args()
     conn = get_conn()
     try:
-        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
+        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["range_filters"])
         return (sky_view(conn, rows)["svg"], 200,
                 {"Content-Type": "image/svg+xml; charset=utf-8",
                  "Cache-Control": "no-store"})
@@ -288,7 +294,7 @@ def rows_partial():
     try:
         return render_template(
             "_rows.html",
-            rows=load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"]),
+            rows=load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["range_filters"]),
             max_score=ranking.max_possible_score(), **v)
     finally:
         conn.close()

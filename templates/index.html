@@ -85,7 +85,7 @@
       <div class="nowline" style="left:calc(104px + (100% - 104px) * {{ strip.now_pct }} / 100)"></div>
     {% endif %}
     {% for l in strip.lanes %}
-    <div class="lane">
+    <div class="lane{{ ' lane-extra' if l.extra }}" {{ 'hidden' if l.extra }}>
       <div class="who">{{ l.desig }}</div>
       <div class="track">
         <div class="bar{{ ' done' if l.observed }}" style="left:{{ l.left }}%;width:{{ l.width }}%"
@@ -97,7 +97,11 @@
     </div>
     {% endfor %}
   </div>
-  {% if strip.hidden %}<p class="cap" style="margin:9px 0 0">&hellip;and {{ strip.hidden }} more below.</p>{% endif %}
+  {% if strip.hidden %}
+  <button type="button" class="cap strip-toggle" id="stripToggle">
+    &hellip;and {{ strip.hidden }} more below &mdash; show all
+  </button>
+  {% endif %}
 </section>
 {% endif %}
 
@@ -126,12 +130,12 @@
 {% endif %}
 
 {% macro sort_th(key, label, cls='', title='') %}
-{% set active_col = ranking.parse_column_mode(mode) %}
-{% set is_on = active_col and active_col[0] == key %}
-{% set next_sort = key ~ ('_desc' if (is_on and active_col[1]) else '_asc') %}
+{% set active_cols = ranking.parse_mode_columns(mode) %}
+{% set is_on = key in active_cols %}
+{% set is_asc = active_cols.get(key, True) %}
 <th class="{{ cls }}{{ ' sorted' if is_on }}"{% if title %} title="{{ title }}"{% endif %}>
-  <a href="{{ url_for('index', sort=next_sort) }}" class="sortth" data-col="{{ key }}">{{ label
-  }}<span class="arrow" {{ 'hidden' if not is_on }}>{{ ('&#9650;' if (is_on and active_col[1]) else '&#9660;')|safe }}</span></a>
+  <a href="{{ url_for('index', sort=ranking.mode_after_click(mode, key)) }}" class="sortth" data-col="{{ key }}">{{ label
+  }}<span class="arrow" {{ 'hidden' if not is_on }}>{{ ('&#9650;' if is_asc else '&#9660;')|safe }}</span></a>
 </th>
 {% endmacro %}
 
@@ -142,8 +146,34 @@
     <a href="{{ url_for('index', sort='score') }}" data-sort="score"
        class="{{ 'on' if mode == 'score' }}">By value</a>
   </div>
-  <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=1) }}">hidden</a>
+  <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=(0 if show_hidden else 1)) }}">hidden</a>
   <a class="chip" href="{{ url_for('plan_text') }}">plan file</a>
+  <details class="filters-dd" id="rangeDd">
+    <summary id="rangeSummary">Range filters{% if range_filters %} ({{ range_filters|length }}){% endif %}</summary>
+    <div class="filters-panel">
+      {% for key, meta in ranking.SORTABLE_COLUMNS.items() %}
+      {% set range = range_filters.get(key) %}
+      <div class="filter-item">
+        <div class="filter-row">
+          <span class="filter-label">{{ meta.label }}</span>
+          <input type="number" step="any" class="range-input{{ ' active' if range and range[0] is not none }}"
+                 id="rangeMin-{{ key }}" data-col="{{ key }}" data-bound="min" placeholder="min"
+                 value="{{ '%g'|format(range[0]) if range and range[0] is not none else '' }}">
+          <span class="dim">&ndash;</span>
+          <input type="number" step="any" class="range-input{{ ' active' if range and range[1] is not none }}"
+                 id="rangeMax-{{ key }}" data-col="{{ key }}" data-bound="max" placeholder="max"
+                 value="{{ '%g'|format(range[1]) if range and range[1] is not none else '' }}">
+        </div>
+        {% if key == 'alt' %}
+        {% set below_floor = range and ((range[0] is not none and range[0] < config.MIN_ALT) or (range[1] is not none and range[1] < config.MIN_ALT)) %}
+        <div class="filter-warn" id="warn-alt" {{ 'hidden' if not below_floor }}>
+          Below {{ config.MIN_ALT|int }}&deg; cannot be observed from here
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </details>
   <span class="rules">
     score&nbsp;&ge;&nbsp;{{ config.MIN_SCORE }} &middot; V&nbsp;&le;&nbsp;{{ config.MAX_MAG }} &middot;
     motion&nbsp;&ge;&nbsp;{{ config.MIN_MOTION }}&Prime;/min &middot; moon&nbsp;&ge;&nbsp;{{ config.MOON_SEP_MIN }}&deg; &middot;
@@ -253,6 +283,30 @@ function applyOpenPlans() {
 // re-render the whole page (night strip, upcoming cards, everything) for a
 // change that only affects table order, which is both slow and resets
 // scroll position, making the page visibly jump.
+// Mirrors ranking.parse_mode_columns() / ranking.mode_after_click() so the
+// no-reload path can compute the same thing the server would have rendered,
+// without a round trip. Map preserves insertion order like the Python dict
+// does, which is what makes several active columns combine into one
+// compound sort in click order.
+function parseModeColumns(mode) {
+  const active = new Map();
+  if (!mode || mode === 'chronological' || mode === 'score') return active;
+  mode.split(',').forEach(token => {
+    const m = /^([a-z0-9_]+)_(asc|desc)$/.exec(token);
+    if (m) active.set(m[1], m[2] === 'asc');
+  });
+  return active;
+}
+
+function modeAfterClick(mode, key) {
+  const active = parseModeColumns(mode);
+  if (!active.has(key)) active.set(key, true);
+  else if (active.get(key)) active.set(key, false);
+  else active.delete(key);
+  if (active.size === 0) return 'chronological';
+  return Array.from(active, ([k, asc]) => k + '_' + (asc ? 'asc' : 'desc')).join(',');
+}
+
 function updateSortBar(mode) {
   document.querySelectorAll('.seg a[data-sort]').forEach(a => {
     a.classList.toggle('on', a.dataset.sort === mode);
@@ -261,21 +315,77 @@ function updateSortBar(mode) {
   document.querySelector('.seg a[data-sort="chronological"]').href = withSort('chronological');
   document.querySelector('.seg a[data-sort="score"]').href = withSort('score');
 
-  const m = /^([a-z0-9_]+)_(asc|desc)$/.exec(mode);
-  const activeCol = m ? m[1] : null, activeAsc = m ? m[2] === 'asc' : true;
+  const active = parseModeColumns(mode);
 
   document.querySelectorAll('.sortth').forEach(a => {
     const key = a.dataset.col;
-    const isOn = key === activeCol;
+    const isOn = active.has(key);
     a.closest('th').classList.toggle('sorted', isOn);
     const arrow = a.querySelector('.arrow');
     arrow.hidden = !isOn;
-    if (isOn) arrow.textContent = activeAsc ? '▲' : '▼';
-    a.href = withSort(key + '_' + (isOn && activeAsc ? 'desc' : 'asc'));
+    if (isOn) arrow.textContent = active.get(key) ? '▲' : '▼';
+    a.href = withSort(modeAfterClick(mode, key));
   });
 }
 
+// Typed min/max bounds per column, e.g. "mag:18:21,alt:15:" (an empty side
+// is an open bound, not zero). Rebuilt from the actual inputs on every
+// keystroke rather than tracked separately, so there's exactly one source
+// of truth and nothing to fall out of sync. Independent of the sort links
+// above -- a range can narrow the table regardless of what it's sorted by.
+function applyRangeFilters() {
+  const tokens = [];
+  document.querySelectorAll('.range-input[data-bound="min"]').forEach(minInput => {
+    const key = minInput.dataset.col;
+    const maxInput = document.getElementById('rangeMax-' + key);
+    const lo = minInput.value.trim(), hi = maxInput.value.trim();
+    minInput.classList.toggle('active', lo !== '');
+    maxInput.classList.toggle('active', hi !== '');
+    if (lo !== '' || hi !== '') tokens.push(key + ':' + lo + ':' + hi);
+  });
+  if (tokens.length) params.set('range', tokens.join(',')); else params.delete('range');
+  history.replaceState(null, '', location.pathname + '?' + params);
+  document.getElementById('rangeSummary').textContent =
+    tokens.length ? `Range filters (${tokens.length})` : 'Range filters';
+  refresh();
+}
+
+// The horizon floor is a physical limit (pipeline.row_rejections), not a
+// preference -- no target can ever have an altitude below it, so warn
+// immediately rather than let someone wait on an empty table wondering why.
+const MIN_ALT_DEG = {{ config.MIN_ALT }};
+function checkAltWarning() {
+  const warn = document.getElementById('warn-alt');
+  if (!warn) return;
+  const lo = document.getElementById('rangeMin-alt').value.trim();
+  const hi = document.getElementById('rangeMax-alt').value.trim();
+  const below = (lo !== '' && parseFloat(lo) < MIN_ALT_DEG) ||
+                (hi !== '' && parseFloat(hi) < MIN_ALT_DEG);
+  warn.hidden = !below;
+}
+
+// Debounced so a range doesn't refetch on every keystroke while typing a
+// number -- only once you pause, same as the eventual page feels for a poll.
+let rangeDebounce;
+document.querySelectorAll('.range-input').forEach(input => {
+  input.addEventListener('input', () => {
+    checkAltWarning();
+    clearTimeout(rangeDebounce);
+    rangeDebounce = setTimeout(applyRangeFilters, 400);
+  });
+});
+
 document.addEventListener('click', ev => {
+  const stripToggle = ev.target.closest('#stripToggle');
+  if (stripToggle) {
+    const extra = document.querySelectorAll('.lane-extra');
+    const expanding = extra.length && extra[0].hidden;
+    extra.forEach(lane => { lane.hidden = !expanding; });
+    stripToggle.textContent = expanding
+      ? 'show fewer'
+      : `…and ${extra.length} more below — show all`;
+    return;
+  }
   const sortLink = ev.target.closest('.seg a[data-sort], .sortth');
   if (sortLink) {
     ev.preventDefault();

@@ -65,48 +65,129 @@ def sort_key_score(row):
             row["desig"])
 
 
-# Every column the board can sort by beyond the two curated modes above,
-# keyed by the URL sort-mode prefix ("mag", not "vmag", so the URLs already
-# shipped as sort=mag_asc/mag_desc keep working). Clicking the column's own
-# header activates/reverses it -- there's no separate control -- so all this
-# needs is which row field backs it.
+# Every column the board can sort or range-filter by beyond the two curated
+# sort modes above, keyed by the URL sort-mode prefix ("mag", not "vmag", so
+# the URLs already shipped as sort=mag_asc/mag_desc keep working). Sorting is
+# driven by clicking the column's own header, so this only needs the row
+# field; the range-filter panel also shows `label`, since there's no header
+# text to borrow there.
 SORTABLE_COLUMNS = {
-    "mag":          {"field": "vmag"},
-    "digest2":      {"field": "score"},
-    "exposure_min": {"field": "exposure_min"},
-    "motion":       {"field": "cur_motion"},
-    "alt":          {"field": "cur_alt"},
-    "az":           {"field": "cur_az"},
-    "moon":         {"field": "cur_moon_dist"},
-    "unseen":       {"field": "not_seen_days"},
-    "q":            {"field": "q"},
+    "mag":          {"field": "vmag",          "label": "Magnitude"},
+    "digest2":      {"field": "score",         "label": "Score"},
+    "exposure_min": {"field": "exposure_min",  "label": "Exposure"},
+    "motion":       {"field": "cur_motion",    "label": "Motion"},
+    "alt":          {"field": "cur_alt",       "label": "Altitude"},
+    "az":           {"field": "cur_az",        "label": "Azimuth"},
+    "moon":         {"field": "cur_moon_dist", "label": "Moon distance"},
+    "unseen":       {"field": "not_seen_days", "label": "Not seen"},
+    "q":            {"field": "q",             "label": "Perihelion (q)"},
 }
 
 
-def parse_column_mode(mode):
-    """(column_key, ascending) for a mode string like "mag_desc", or None if
-    mode names no real column -- the two curated modes, or anything a stray
-    URL edit made up. Used both to sort and by the template, so the active
-    column header and the actual order can never drift apart."""
+def parse_mode_columns(mode):
+    """{column_key: ascending}, in priority order (the first entry breaks
+    the most ties, each later one only matters among rows still tied on
+    everything before it), from a mode string like "mag_desc,alt_asc".
+    Empty for the two curated modes, or for anything that names no real
+    column. Used both to sort and by the template, so several headers can
+    be active together and the table's actual order can never drift from
+    what they show."""
     if not mode or mode in ("chronological", "score"):
-        return None
-    for suffix, ascending in (("_asc", True), ("_desc", False)):
-        if mode.endswith(suffix):
-            key = mode[: -len(suffix)]
-            if key in SORTABLE_COLUMNS:
-                return key, ascending
-    return None
+        return {}
+    active = {}
+    for token in mode.split(","):
+        for suffix, ascending in (("_asc", True), ("_desc", False)):
+            if token.endswith(suffix):
+                key = token[: -len(suffix)]
+                if key in SORTABLE_COLUMNS:
+                    active[key] = ascending
+                break
+    return active
 
 
-def sort_key_column(field, ascending=True):
-    """Sort by any single numeric field, observable targets first (as with
-    the two curated modes above). Missing values sink to the end of their
-    group regardless of direction, and ties break by designation so the
-    table never shuffles targets that are equal."""
+def mode_after_click(mode, key):
+    """The mode string after clicking column `key`'s header once: a
+    three-state cycle, off -> ascending -> descending -> off again. Every
+    other active column keeps both its direction and its place in the
+    priority order -- clicking one header never disturbs another, which is
+    what lets several of them combine into one compound sort."""
+    active = parse_mode_columns(mode)
+    if key not in active:
+        active[key] = True
+    elif active[key]:
+        active[key] = False
+    else:
+        del active[key]
+    if not active:
+        return "chronological"
+    return ",".join(f"{k}_{'asc' if asc else 'desc'}" for k, asc in active.items())
+
+
+def parse_range_filters(raw):
+    """{column_key: (min_or_None, max_or_None)} from a URL value like
+    "mag:18:21,alt:15:" -- each token is col:min:max, either bound left
+    blank for an open-ended range (there's no lower bound, rather than a
+    lower bound of zero). Malformed tokens, unknown columns and non-numeric
+    bounds are dropped rather than raising, since this comes straight from
+    the URL and a stray edit shouldn't 500 the page."""
+    if not raw:
+        return {}
+    filters = {}
+    for token in raw.split(","):
+        parts = token.split(":")
+        if len(parts) != 3:
+            continue
+        key, lo_s, hi_s = parts
+        if key not in SORTABLE_COLUMNS:
+            continue
+        try:
+            lo = float(lo_s) if lo_s else None
+            hi = float(hi_s) if hi_s else None
+        except ValueError:
+            continue
+        if lo is None and hi is None:
+            continue
+        filters[key] = (lo, hi)
+    return filters
+
+
+def apply_range_filters(rows, filters):
+    """Keep only rows whose value for every filtered column falls inside
+    that column's [min, max] (either end optional, both inclusive). A row
+    missing the field entirely fails any range set on it -- there's no
+    sensible "unknown falls inside 18-21" reading, so it's excluded rather
+    than kept or guessed at."""
+    if not filters:
+        return rows
+    bounds = [(SORTABLE_COLUMNS[key]["field"], lo, hi)
+              for key, (lo, hi) in filters.items()]
+
+    def keep(row):
+        for field, lo, hi in bounds:
+            v = row.get(field)
+            if v is None:
+                return False
+            if lo is not None and v < lo:
+                return False
+            if hi is not None and v > hi:
+                return False
+        return True
+    return [r for r in rows if keep(r)]
+
+
+def sort_key_compound(columns):
+    """Sort by several columns at once, in the order given: the first
+    breaks the most ties, each later one only matters among rows still
+    tied on everything before it. Missing values sink within their own
+    column's contribution, same as a single-column sort would."""
     def key(row):
-        v = row.get(field)
-        ordered = 0.0 if v is None else (v if ascending else -v)
-        return (0 if row.get("observable") else 1, v is None, ordered, row["desig"])
+        parts = [0 if row.get("observable") else 1]
+        for field, ascending in columns:
+            v = row.get(field)
+            parts.append(v is None)
+            parts.append(0.0 if v is None else (v if ascending else -v))
+        parts.append(row["desig"])
+        return tuple(parts)
     return key
 
 
@@ -117,7 +198,7 @@ def sort_targets(rows, mode=None):
     elif mode == "score":
         key = sort_key_score
     else:
-        parsed = parse_column_mode(mode)
-        key = (sort_key_column(SORTABLE_COLUMNS[parsed[0]]["field"], parsed[1])
-               if parsed else sort_key_chronological)
+        active = parse_mode_columns(mode)
+        columns = [(SORTABLE_COLUMNS[k]["field"], asc) for k, asc in active.items()]
+        key = sort_key_compound(columns) if columns else sort_key_chronological
     return sorted(rows, key=key)
