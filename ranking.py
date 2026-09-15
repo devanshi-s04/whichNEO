@@ -67,63 +67,46 @@ def sort_key_score(row):
 
 # Every column the board can sort by beyond the two curated modes above,
 # keyed by the URL sort-mode prefix ("mag", not "vmag", so the URLs already
-# shipped as sort=mag_asc/mag_desc keep working). Each entry names the row
-# field to read and the two captions the flip button shows for that field.
+# shipped as sort=mag_asc/mag_desc keep working). Clicking the column's own
+# header activates/reverses it -- there's no separate control -- so all this
+# needs is which row field backs it.
 SORTABLE_COLUMNS = {
-    "mag":          {"field": "vmag",           "label": "Magnitude",
-                      "low": "brightest first",    "high": "faintest first"},
-    "digest2":      {"field": "score",           "label": "Digest2",
-                      "low": "lowest first",       "high": "highest first"},
-    "exposure_min": {"field": "exposure_min",     "label": "Exposure",
-                      "low": "shortest first",     "high": "longest first"},
-    "motion":       {"field": "cur_motion",       "label": "Motion",
-                      "low": "slowest first",      "high": "fastest first"},
-    "alt":          {"field": "cur_alt",          "label": "Altitude",
-                      "low": "lowest first",       "high": "highest first"},
-    "az":           {"field": "cur_az",           "label": "Azimuth",
-                      "low": "lowest first",       "high": "highest first"},
-    "moon":         {"field": "cur_moon_dist",    "label": "Moon distance",
-                      "low": "closest first",      "high": "farthest first"},
-    "unseen":       {"field": "not_seen_days",    "label": "Not seen",
-                      "low": "most recent first",  "high": "longest first"},
-    "q":            {"field": "q",                "label": "Perihelion (q)",
-                      "low": "smallest first",     "high": "largest first"},
+    "mag":          {"field": "vmag"},
+    "digest2":      {"field": "score"},
+    "exposure_min": {"field": "exposure_min"},
+    "motion":       {"field": "cur_motion"},
+    "alt":          {"field": "cur_alt"},
+    "az":           {"field": "cur_az"},
+    "moon":         {"field": "cur_moon_dist"},
+    "unseen":       {"field": "not_seen_days"},
+    "q":            {"field": "q"},
 }
 
 
-def parse_mode_columns(mode):
-    """{column_key: ascending}, in priority order, for a mode string like
-    "mag_desc,alt_asc" -- the compound-sort combination the filter dropdown
-    built. Used both to actually sort and to prefill the dropdown's checkboxes
-    and flip buttons, so the two can never drift apart. Empty for the two
-    curated modes, or for anything that names no real column.
-    """
+def parse_column_mode(mode):
+    """(column_key, ascending) for a mode string like "mag_desc", or None if
+    mode names no real column -- the two curated modes, or anything a stray
+    URL edit made up. Used both to sort and by the template, so the active
+    column header and the actual order can never drift apart."""
     if not mode or mode in ("chronological", "score"):
-        return {}
-    active = {}
-    for token in mode.split(","):
-        for suffix, ascending in (("_asc", True), ("_desc", False)):
-            if token.endswith(suffix):
-                key = token[: -len(suffix)]
-                if key in SORTABLE_COLUMNS:
-                    active[key] = ascending
-                break
-    return active
+        return None
+    for suffix, ascending in (("_asc", True), ("_desc", False)):
+        if mode.endswith(suffix):
+            key = mode[: -len(suffix)]
+            if key in SORTABLE_COLUMNS:
+                return key, ascending
+    return None
 
 
-def sort_key_compound(columns):
-    """Sort by several columns at once, in the order given: the first breaks
-    the most ties, each later one only matters among rows still tied on
-    everything before it. Missing values sink within their own column's
-    contribution, same as a single-column sort would."""
+def sort_key_column(field, ascending=True):
+    """Sort by any single numeric field, observable targets first (as with
+    the two curated modes above). Missing values sink to the end of their
+    group regardless of direction, and ties break by designation so the
+    table never shuffles targets that are equal."""
     def key(row):
-        parts = [0 if row.get("observable") else 1]
-        for field, ascending in columns:
-            v = row.get(field)
-            parts.append(v is None)
-            parts.append(0.0 if v is None else (v if ascending else -v))
-        parts.append(row["desig"])
-        return tuple(parts)
+        v = row.get(field)
+        ordered = 0.0 if v is None else (v if ascending else -v)
+        return (0 if row.get("observable") else 1, v is None, ordered, row["desig"])
     return key
 
 
@@ -134,7 +117,7 @@ def sort_targets(rows, mode=None):
     elif mode == "score":
         key = sort_key_score
     else:
-        active = parse_mode_columns(mode)
-        columns = [(SORTABLE_COLUMNS[k]["field"], asc) for k, asc in active.items()]
-        key = sort_key_compound(columns) if columns else sort_key_chronological
+        parsed = parse_column_mode(mode)
+        key = (sort_key_column(SORTABLE_COLUMNS[parsed[0]]["field"], parsed[1])
+               if parsed else sort_key_chronological)
     return sorted(rows, key=key)
