@@ -94,6 +94,22 @@ class Row:
                 * config.EXPOSURE_MIN_PER_MAG)
         return round(max(mins, config.EXPOSURE_FLOOR_MIN), 2)
 
+    def frame_seconds(self):
+        """Seconds per frame for this row's sky motion, from the observatory's
+        own table in config.EXPOSURE_SPEED_BANDS.
+
+        The faster an object moves, the shorter each frame must be to keep it
+        from trailing across the detector. Bounds are upper-inclusive.
+        """
+        for limit, seconds in config.EXPOSURE_SPEED_BANDS:
+            if self.motion <= limit:
+                return seconds
+        return config.EXPOSURE_FASTEST_SEC
+
+    def frame_plan(self):
+        """(frames, seconds) -- the instruction for this row."""
+        return config.EXPOSURE_FRAMES, self.frame_seconds()
+
     def as_dict(self):
         return {k: getattr(self, k) for k in self.__slots__}
 

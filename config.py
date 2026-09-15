@@ -195,6 +195,37 @@ EXPOSURE_MIN_PER_MAG = 5.0
 # Clamped here; ask Luka what the floor should really be.
 EXPOSURE_FLOOR_MIN = 1.0             # TBD
 
+# --- Frames: the observatory's own speed table --------------------------------
+# Given by Luka. A fixed number of frames for every target, with the length of
+# each frame set by how fast the object is moving -- the faster it goes, the
+# shorter each frame has to be to stop it trailing across the detector.
+#
+#   0-5 "/min -> 30 s,  5-25 -> 15 s,  25-50 -> 10 s,
+#   50-100    ->  5 s, 100-200 -> 2 s,  200+  ->  1 s
+#
+# Upper bound INCLUSIVE, so a target at exactly 25.00 "/min gets 15 s, not 10.
+# MPC reports motion to two decimals, so exact boundary values are rare but do
+# occur.
+#
+# This answers what PR #3 was blocked on. That draft derived frame length from
+# a trailing budget and derived the count from the magnitude rule; the
+# observatory has a table instead, so the table wins.
+#
+# Note this is a SEPARATE quantity from EXPOSURE_* above. Those give
+# obsExposure -- total integration in minutes, from magnitude, inherited from
+# planets-new.py. This gives the per-frame instruction, from speed. They are
+# not meant to agree and generally do not: a slow target here gets 36 x 30 s =
+# 18 minutes on sky while its obsExposure asks for around 27.
+EXPOSURE_FRAMES = 36
+EXPOSURE_SPEED_BANDS = [             # (max "/min inclusive, seconds per frame)
+    (5.0, 30),
+    (25.0, 15),
+    (50.0, 10),
+    (100.0, 5),
+    (200.0, 2),
+]
+EXPOSURE_FASTEST_SEC = 1             # anything above the last band
+
 # --- Ranking -----------------------------------------------------------------
 # Default ordering is chronological by time of maximum altitude, matching the
 # legacy planner: the list is a working sequence for the night, not a

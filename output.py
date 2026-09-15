@@ -92,7 +92,16 @@ def plan_entry(t):
     if t.get("e") is not None:
         parts.append(f"e={t['e']}")
 
-    out = [f"* {t['desig']}         " + ", ".join(parts)]
+    # The observatory's frame instruction, in the format Luka specified:
+    #   * ZTF10G9 36 x 02 sec score=100, obs=4, ...
+    # Seconds are zero-padded to two digits and the separators are single
+    # spaces, exactly as he wrote it. NEOCP designations are all seven
+    # characters, so the columns still line up without the old padding.
+    if t.get("frames") and t.get("frame_sec"):
+        head = f"* {t['desig']} {t['frames']} x {t['frame_sec']:02d} sec "
+    else:
+        head = f"* {t['desig']}         "
+    out = [head + ", ".join(parts)]
     if t.get("map_url"):
         out.append(f"   mapLink={t['map_url']}")
 

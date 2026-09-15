@@ -864,6 +864,78 @@ def _fake_eph(n=12, rising=True):
     return out
 
 
+def test_frame_speed_table():
+    """The observatory's own speed table, as given by Luka.
+
+      0-5 "/min -> 30s, 5-25 -> 15s, 25-50 -> 10s,
+      50-100    ->  5s, 100-200 -> 2s, 200+  ->  1s
+
+    Upper bound inclusive. These are someone else's numbers for protecting
+    someone else's detector, so they are pinned literally rather than derived.
+    """
+    def secs(motion):
+        r = ephemeris.Row(SAMPLE_EPH)
+        r.motion = motion
+        return r.frame_seconds()
+
+    for motion, expected in [
+            (0.0, 30), (1.7, 30), (4.99, 30),
+            (5.0, 30),                      # boundary: upper bound INCLUSIVE
+            (5.01, 15), (14.6, 15), (25.0, 15),
+            (25.01, 10), (43.4, 10), (50.0, 10),
+            (50.01, 5), (64.5, 5), (100.0, 5),
+            (100.01, 2), (179.1, 2), (200.0, 2),
+            (200.01, 1), (231.0, 1), (5000.0, 1)]:
+        check(f"{motion:>8.2f} \"/min -> {expected:2d} s", secs(motion) == expected,
+              f"got {secs(motion)}")
+
+    check("every band boundary takes the SHORTER-speed band",
+          secs(5.0) == 30 and secs(25.0) == 15 and secs(200.0) == 2)
+
+    r = ephemeris.Row(SAMPLE_EPH)
+    r.motion = 8.5
+    check("frame count is fixed for every target",
+          r.frame_plan() == (config.EXPOSURE_FRAMES, 15), r.frame_plan())
+
+    # Real values from the night this was specified.
+    for desig, motion, expected in [("P22pZo5", 5.03, 15), ("A11GP9t", 64.45, 5),
+                                    ("ZTF10G9", 179.1, 2), ("P12pRQk", 1.0, 30)]:
+        check(f"{desig} at {motion} \"/min -> {expected} s",
+              secs(motion) == expected, f"got {secs(motion)}")
+
+
+def test_plan_line_carries_the_frame_instruction():
+    """Luka's format, literally: `* DESIG 36 x 02 sec score=...`"""
+    row = ephemeris.Row(SAMPLE_EPH)
+    t = dict(desig="ZTF10G9", score=100, nobs=4, arc_days=0.02,
+             not_seen_days=0.667, exposure_min=9.0, frames=36, frame_sec=2,
+             max_alt_row=row, nearest_row=row, interp_row=row,
+             live_row_is_now=True)
+    first = output.plan_entry(t).splitlines()[0]
+
+    check("frames and seconds sit between the designation and score",
+          first.startswith("* ZTF10G9 36 x 02 sec score=100,"), first)
+    check("seconds are zero-padded to two digits",
+          " x 02 sec " in first, first)
+    check("obsExposure is still present and untouched",
+          "obsExposure=9.0min" in first, first)
+
+    t1 = dict(t, frame_sec=30)
+    check("a two-digit value is not padded further",
+          output.plan_entry(t1).splitlines()[0].startswith("* ZTF10G9 36 x 30 sec"),
+          output.plan_entry(t1).splitlines()[0])
+
+    # Without a frame plan the old layout is kept rather than emitting a
+    # half-written instruction.
+    t2 = dict(t, frames=None, frame_sec=None)
+    check("no frame plan falls back to the original line",
+          output.plan_entry(t2).splitlines()[0].startswith("* ZTF10G9    "),
+          output.plan_entry(t2).splitlines()[0])
+
+    check("the frame fields are stored for the board",
+          all(c in db._COLS for c in ("frames", "frame_sec", "frame_motion")))
+
+
 def test_keepout_wedge():
     """Sky the mount must not be pointed at. Hard, and never overridable.
 
@@ -1166,6 +1238,8 @@ def main():
                test_ranking_bounds, test_row_rejection_reasons,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
+               test_frame_speed_table,
+               test_plan_line_carries_the_frame_instruction,
                test_keepout_wedge,
                test_plan_file_never_publishes_a_stale_pointing_line,
                test_altitude_plot,

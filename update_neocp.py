@@ -183,6 +183,7 @@ def run_update(conn, source=None):
             t.update(discard_reasons=t["cheap_reject"], observable=False,
                      max_alt=None, max_alt_ts=None, max_alt_az=None,
                      mask_flags=[], exposure_min=None, live_row_is_now=False,
+                     frames=None, frame_sec=None, frame_motion=None,
                      window_minutes=0.0, eph_rows_total=0, eph_rows_usable=0,
                      eph_error=None, eph_report={}, map_url=None,
                      offsets_url=None, scatteredness=None,

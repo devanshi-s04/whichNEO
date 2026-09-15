@@ -156,7 +156,9 @@
       <th class="l">#</th><th>Peak</th><th class="l">Target</th>
       <th class="l" title="Observatory code of the discovery observation">Disc. obs</th>
       <th class="l">MPC</th>
-      <th>Score</th><th>V</th><th>Exp</th><th>&Prime;/min</th>
+      <th>Score</th><th>V</th>
+      <th title="Frames x seconds, from the observatory's speed table at each target's best altitude">Shoot</th>
+      <th>&Prime;/min</th>
       <th title="Altitude at the next usable moment, which is now while the target is up">Alt</th>
       <th title="Azimuth at the next usable moment. Compass bearing from north; the sky map above shows the same position">Az</th>
       <th>Moon</th><th>Unseen</th><th>q / e</th>
@@ -195,9 +197,25 @@
       &mdash; read as compass, five of 579 targets fall in the north; read
       raw, north would be the busiest sector on the sky.
       <br><br>
-      Exposure follows the observatory's own rule,
-      <code>{{ config.EXPOSURE_BASE_MIN|int }} + (V &minus; {{ config.EXPOSURE_REF_MAG|int }}) &times; {{ config.EXPOSURE_MIN_PER_MAG|int }}</code>
-      minutes, floored at {{ config.EXPOSURE_FLOOR_MIN|int }}.
+      <strong>Shoot</strong> is {{ config.EXPOSURE_FRAMES }} frames for every
+      target, with the frame length set by how fast the object is moving at its
+      best altitude &mdash; the observatory's own table:
+      {% for limit, secs in config.EXPOSURE_SPEED_BANDS %}&le;{{ limit|int }}&Prime;/min
+      &rarr; {{ secs }}s{{ ', ' if not loop.last }}{% endfor %},
+      faster &rarr; {{ config.EXPOSURE_FASTEST_SEC }}s.
+      <br><br>
+      The plan file also still carries <code>obsExposure</code>, the legacy
+      figure from <code>planets-new.py</code>: total integration in minutes
+      from magnitude alone,
+      <code>{{ config.EXPOSURE_BASE_MIN|int }} + (V &minus; {{ config.EXPOSURE_REF_MAG|int }}) &times; {{ config.EXPOSURE_MIN_PER_MAG|int }}</code>,
+      floored at {{ config.EXPOSURE_FLOOR_MIN|int }} (unfloored it goes
+      negative for bright targets, and the observatory's own files contain
+      <code>obsExposure=-2.0min</code>). It ignores sky motion entirely, so it
+      will not agree with <em>Shoot</em> &mdash; a slow target is
+      {{ config.EXPOSURE_FRAMES }}&times;{{ config.EXPOSURE_SPEED_BANDS[0][1] }}s
+      = {{ (config.EXPOSURE_FRAMES * config.EXPOSURE_SPEED_BANDS[0][1] / 60)|int }}
+      minutes on sky against an obsExposure nearer 27.
+      <strong>Shoot is the instruction.</strong>
       <br><br>
       <strong>Still open:</strong> which sectors, if any, are real
       obstructions rather than preferences. Also SW, never specified and
