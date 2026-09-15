@@ -36,7 +36,12 @@ _UA = {"User-Agent": "visnjan_whichneo/0.2 "
 #   2 -- offsets regex now tolerates MPC's trailing ! / !! motion flag, which
 #        had been silently discarding the uncertainty cloud of every fast
 #        mover.
-CACHE_SCHEMA = 2
+#   3 -- payloads now carry gap_fill_lines, the floor-free ephemeris the
+#        altitude plot uses to fill holes where MPC withheld rows. Without a
+#        bump an entry cached at 2 is still perfectly valid by every other
+#        test, so it is never refetched and simply has no gap-fill data --
+#        measured as 106 of 114 objects silently keeping a gapped plot.
+CACHE_SCHEMA = 3
 
 # Row layout, whitespace separated:
 #   0    1  2   3      4  5   6    7   8  9   10     11     12     13    14   15   16    17    18   19
