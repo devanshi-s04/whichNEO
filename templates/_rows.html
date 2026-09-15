@@ -59,7 +59,7 @@
     {%- else -%}&mdash;{%- endif -%}
   </td>
 
-  <td>{{ '%.2f'|format(r.score_total + (r.priority_bump or 0)) }}</td>
+  <td>{{ '%.2f'|format(r.score_total) }}</td>
 
   <td class="l">
     {% if r.observed %}<span class="pill ob">observed</span>
@@ -83,8 +83,6 @@
       {% endif %}
       {% if r.observed %}<button name="action" value="unobserved">undo</button>
       {% else %}<button name="action" value="observed">done</button>{% endif %}
-      <button name="action" value="up" title="Raise priority">&uarr;</button>
-      <button name="action" value="down" title="Lower priority">&darr;</button>
       {% if r.hidden %}<button name="action" value="restore">restore</button>
       {% else %}<button name="action" value="hide">hide</button>{% endif %}
     </form>
