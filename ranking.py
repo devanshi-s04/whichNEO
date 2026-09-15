@@ -65,20 +65,6 @@ def sort_key_score(row):
             row["desig"])
 
 
-def sort_key_column(field, ascending=True):
-    """Sort by any single numeric field, observable targets first (as with
-    the two curated modes above). Missing values sink to the end of their
-    group regardless of direction -- a target with no current position, say,
-    shouldn't jump to the top just because "ascending" is active -- and ties
-    break by designation so the table never shuffles targets that are equal.
-    """
-    def key(row):
-        v = row.get(field)
-        ordered = 0.0 if v is None else (v if ascending else -v)
-        return (0 if row.get("observable") else 1, v is None, ordered, row["desig"])
-    return key
-
-
 # Every column the board can sort by beyond the two curated modes above,
 # keyed by the URL sort-mode prefix ("mag", not "vmag", so the URLs already
 # shipped as sort=mag_asc/mag_desc keep working). Each entry names the row
@@ -105,22 +91,50 @@ SORTABLE_COLUMNS = {
 }
 
 
-def _column_sort_keys():
-    keys = {}
-    for prefix, meta in SORTABLE_COLUMNS.items():
-        keys[f"{prefix}_asc"] = sort_key_column(meta["field"], True)
-        keys[f"{prefix}_desc"] = sort_key_column(meta["field"], False)
-    return keys
+def parse_mode_columns(mode):
+    """{column_key: ascending}, in priority order, for a mode string like
+    "mag_desc,alt_asc" -- the compound-sort combination the filter dropdown
+    built. Used both to actually sort and to prefill the dropdown's checkboxes
+    and flip buttons, so the two can never drift apart. Empty for the two
+    curated modes, or for anything that names no real column.
+    """
+    if not mode or mode in ("chronological", "score"):
+        return {}
+    active = {}
+    for token in mode.split(","):
+        for suffix, ascending in (("_asc", True), ("_desc", False)):
+            if token.endswith(suffix):
+                key = token[: -len(suffix)]
+                if key in SORTABLE_COLUMNS:
+                    active[key] = ascending
+                break
+    return active
 
 
-_SORT_KEYS = {
-    "chronological": sort_key_chronological,
-    "score": sort_key_score,
-    **_column_sort_keys(),
-}
+def sort_key_compound(columns):
+    """Sort by several columns at once, in the order given: the first breaks
+    the most ties, each later one only matters among rows still tied on
+    everything before it. Missing values sink within their own column's
+    contribution, same as a single-column sort would."""
+    def key(row):
+        parts = [0 if row.get("observable") else 1]
+        for field, ascending in columns:
+            v = row.get(field)
+            parts.append(v is None)
+            parts.append(0.0 if v is None else (v if ascending else -v))
+        parts.append(row["desig"])
+        return tuple(parts)
+    return key
 
 
 def sort_targets(rows, mode=None):
     mode = mode or config.DEFAULT_SORT
-    key = _SORT_KEYS.get(mode, sort_key_chronological)
+    if mode == "chronological":
+        key = sort_key_chronological
+    elif mode == "score":
+        key = sort_key_score
+    else:
+        active = parse_mode_columns(mode)
+        columns = [(SORTABLE_COLUMNS[k]["field"], asc) for k, asc in active.items()]
+        key = sort_key_compound(columns) if columns else sort_key_chronological
     return sorted(rows, key=key)

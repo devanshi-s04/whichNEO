@@ -244,6 +244,39 @@ body {
 }
 .dirbtn:hover { border-color: rgba(240,166,60,.4); }
 .dirbtn.flip { transform: rotate(180deg); }
+/* A class alone can't beat the browser's own [hidden] rule here: author CSS
+   wins ties against the user-agent stylesheet, so an unconditional `display`
+   on the same element silently defeats `hidden` unless it's overridden back. */
+.dirbtn[hidden] { display: none; }
+
+/* ---------- filters dropdown ---------- */
+.filters-dd { position: relative; }
+.filters-dd > summary {
+  list-style: none; cursor: pointer; user-select: none;
+  padding: 5px 11px; font-size: 12px; color: var(--muted); font-weight: 500;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+}
+.filters-dd > summary::-webkit-details-marker { display: none; }
+.filters-dd > summary::after { content: "\25BE"; margin-left: 6px; color: var(--faint); }
+.filters-dd > summary:hover { color: var(--ink); }
+.filters-dd[open] > summary { color: var(--amber); border-color: rgba(240,166,60,.4); }
+.filters-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 10;
+  min-width: 250px; background: var(--raised); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 6px; box-shadow: 0 10px 28px rgba(0,0,0,.45);
+}
+.filter-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 7px; border-radius: 5px;
+}
+.filter-row:hover { background: rgba(255,255,255,.035); }
+.filter-row label {
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  font-size: 12.5px; color: var(--ink); cursor: pointer;
+}
+.filter-row input[type="checkbox"] { accent-color: var(--amber); }
+.filter-row .dirbtn { flex: 0 0 auto; width: 21px; height: 21px; }
+.filter-row .dirbtn svg { width: 11px; height: 11px; }
+.filter-row .dim { flex: 0 0 auto; font-size: 10.5px; white-space: nowrap; }
 .rules { margin-left: auto; font-size: 11.5px; color: var(--faint); }
 .rules code { font-family: var(--mono); color: var(--muted); }
 
