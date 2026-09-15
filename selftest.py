@@ -970,6 +970,32 @@ def test_cache_schema_forces_one_refetch():
     check("an entry predating the field entirely is refetched",
           update_neocp.needs_refetch((sig, missing), target, now))
 
+    # Adding a payload key without bumping the schema is the failure this
+    # guards against, and it is silent: an entry cached at the old schema
+    # passes every other test, is never refetched, and simply lacks the new
+    # data forever. Measured live when gap_fill_lines was introduced -- 106 of
+    # 114 objects kept a gapped altitude plot with nothing to indicate why.
+    at_2 = dict(current, cache_schema=2)
+    check("an entry cached before gap_fill_lines existed is refetched",
+          update_neocp.needs_refetch((sig, at_2), target, now),
+          "schema is %d; a payload at 2 has no gap_fill_lines"
+          % ephemeris.CACHE_SCHEMA)
+    check("the schema is past 2, so gap-fill data actually reaches objects",
+          ephemeris.CACHE_SCHEMA > 2, ephemeris.CACHE_SCHEMA)
+
+    # Every key _aux writes should be one the staleness test knows about,
+    # either by name or by the schema having moved since it was added.
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "update_neocp.py")).read()
+    aux = src.split("def _aux")[1].split("new_cache = {}")[0]
+    written = set(re.findall(r'^\s+"(\w+)":', aux, re.M))
+    expected = {"lines", "gap_fill_lines", "fetched_ts", "last_row_ts",
+                "cache_schema", "offsets_url", "map_url", "observations_url",
+                "offsets", "scatteredness", "observed_from_site",
+                "discovery_code", "obs_codes", "error"}
+    check("the payload's keys are the ones this test knows about",
+          written == expected, sorted(written ^ expected))
+
 
 def test_frame_speed_table():
     """The observatory's own speed table, as given by Luka.

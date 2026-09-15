@@ -199,6 +199,19 @@ def load_tracks(conn, desigs):
     return out
 
 
+def load_gap_fill_lines(conn, desig):
+    """The same object's ephemeris with no altitude floor, cached
+    specifically to patch holes the normal (oalt=20) fetch leaves in the
+    altitude plot. See ephemeris.fetch_gap_fill / update_neocp.py's _aux.
+    None if this object was never stale since that fetch was added, or the
+    fetch itself failed."""
+    row = conn.execute("SELECT payload FROM ephemeris_cache WHERE desig=?",
+                       (desig,)).fetchone()
+    if not row:
+        return None
+    return json.loads(row["payload"]).get("gap_fill_lines") or None
+
+
 def save_cache(conn, entries):
     """entries: {desig: (signature, payload dict)}"""
     now = utcnow()

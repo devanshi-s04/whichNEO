@@ -379,12 +379,38 @@ def target_detail(desig):
 
         # Same cached lines the sky map reads; full Row objects this time,
         # because the altitude plot needs moon_alt and sun_alt per row, not
-        # just the position triple track() returns.
+        # just the position triple track() returns. Merged with the wider
+        # (no altitude floor) fetch scoped only to this plot -- see
+        # ephemeris.fetch_gap_fill -- by timestamp, so a hole in the normal
+        # feed is patched wherever the wider one actually covers it.
         eph_lines = db.load_tracks(conn, [desig]).get(desig)
-        eph_rows = ephemeris.from_lines(desig, eph_lines).rows if eph_lines else []
+        gap_fill_lines = db.load_gap_fill_lines(conn, desig)
+        primary_rows = ephemeris.from_lines(desig, eph_lines or []).rows
+        filler_rows = ephemeris.from_lines(desig, gap_fill_lines or []).rows
+        seen_ts = {r.ts for r in primary_rows}
+        combined_rows = sorted(
+            primary_rows + [r for r in filler_rows if r.ts not in seen_ts],
+            key=lambda r: r.ts)
+
+        # The Moon needs no orbit fit -- its position is exactly knowable for
+        # any instant -- so its curve is computed independently across the
+        # whole span rather than only wherever the object has a row, and
+        # stays gap-free even when combined_rows above still has a real hole.
+        moon_track = None
+        if len(combined_rows) >= 2:
+            t0, t1 = combined_rows[0].ts, combined_rows[-1].ts
+            step_s = 900.0   # 15 min, matching MPC's usual cadence
+            n = max(2, int((t1 - t0) / step_s) + 1)
+            sample_ts = [t0 + (t1 - t0) * i / (n - 1) for i in range(n)]
+            try:
+                moon_track = observability.moon_altitudes(sample_ts)
+            except Exception:
+                moon_track = None   # never take the page down for this
+
         moon_svg = moonplot.render_svg(
-            eph_rows, rows[0]["window_start_ts"], rows[0]["window_end_ts"],
-            localt=localt, tzlabel=_tzabbr()) if eph_rows else None
+            combined_rows, rows[0]["window_start_ts"], rows[0]["window_end_ts"],
+            localt=localt, tzlabel=_tzabbr(), moon_track=moon_track
+        ) if len(combined_rows) >= 2 else None
 
         return render_template(
             "target.html", row=rows[0],
