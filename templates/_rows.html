@@ -39,7 +39,12 @@
 
   <td>{{ r.score }}</td>
   <td>{{ '%.1f'|format(r.vmag) }}</td>
-  <td class="expo">{{ '%.0f'|format(r.exposure_min) if r.exposure_min else '&mdash;'|safe }}</td>
+  <td class="expo"
+      title="{{ r.frames }} frames of {{ r.frame_sec }} s, from {{ '%.2f'|format(r.frame_motion) if r.frame_motion else '?' }}&Prime;/min at best altitude &mdash; obsExposure (the legacy magnitude figure) says {{ '%.0f'|format(r.exposure_min) if r.exposure_min else '—' }} min, which is not the instruction">
+    {%- if r.frames and r.frame_sec -%}
+      {{ r.frames }}&times;{{ '%02d'|format(r.frame_sec) }}s
+    {%- else -%}&mdash;{%- endif -%}
+  </td>
   <td>{{ '%.1f'|format(r.cur_motion) if r.cur_motion is not none else '&mdash;'|safe }}</td>
 
   <td>{{ '%.0f'|format(r.cur_alt) ~ '&deg;'|safe if r.cur_alt is not none else '&mdash;'|safe }}</td>

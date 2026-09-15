@@ -128,7 +128,21 @@
         Kept in the queue deliberately &mdash; that limit is light pollution,
         not an obstruction.</span></td></tr>
       {% endif %}
-      <tr><th>Exposure</th><td>{{ '%.1f'|format(row.exposure_min) ~ ' min' if row.exposure_min else '—' }}</td></tr>
+      <tr><th>Shoot</th><td>
+        {% if row.frames and row.frame_sec %}
+          <strong class="shoot">{{ row.frames }} &times; {{ '%02d'|format(row.frame_sec) }} sec</strong>
+          <span class="dim">= {{ '%.1f'|format(row.frames * row.frame_sec / 60) }} min on sky</span>
+          <br><span class="dim">frame length from
+          {{ '%.2f'|format(row.frame_motion) }}&Prime;/min at its best altitude,
+          on the observatory's speed table</span>
+        {% else %}&mdash;{% endif %}</td></tr>
+      <tr><th>obsExposure</th><td class="dim">
+        {{ '%.1f'|format(row.exposure_min) ~ ' min' if row.exposure_min else '—' }}
+        &mdash; the legacy figure from <code>planets-new.py</code>,
+        total integration from magnitude alone
+        (<code>10 + (V &minus; 18) &times; 5</code>). It ignores sky motion, so
+        it will not match the line above; <strong>shoot what the line above
+        says</strong>.</td></tr>
       <tr><th>Window</th><td>{{ '%.0f'|format(row.window_minutes) }} min</td></tr>
       <tr><th>Alt / Az now</th><td>
         {% if now_pos and now_pos.up %}
