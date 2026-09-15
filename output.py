@@ -102,7 +102,22 @@ def plan_entry(t):
         out.append("// " + ephemeris_line(t["nearest_row"]))
     live = t.get("interp_row") or t.get("nearest_row")
     if live is not None:
-        out.append(ephemeris_line(live))
+        # The one uncommented line is what gets pointed at, so it must refer
+        # to *now*. interpolate_at() clamps to the nearest usable row when now
+        # falls outside the usable span, which happens constantly -- before a
+        # target rises, and again once its window closes. The coordinates are
+        # then right for a moment that is not this one, and the sky has turned
+        # since: slewing to them points somewhere else entirely, which on a
+        # mount with keep-out wedges is a way to hit one. Measured on a live
+        # board, 4 of 24 targets were publishing such a line.
+        #
+        # Comment it out rather than drop it: the block keeps its shape, the
+        # coordinates stay readable as a reference, and there is simply no
+        # pointable line until the target really is pointable.
+        pointable = t.get("live_row_is_now")
+        out.append(ephemeris_line(live) if pointable
+                   else "// " + ephemeris_line(live)
+                        + "   <- not now, do not slew")
     return "\n".join(out)
 
 

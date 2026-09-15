@@ -68,6 +68,28 @@ def hard_min_altitude(az_deg):
     return np.where(_HARD_BY_SECTOR[idx], _MIN_ALT_BY_SECTOR[idx], -np.inf)
 
 
+def in_arc(az_deg, start_deg, end_deg):
+    """Is an azimuth inside the arc running CLOCKWISE from start to end?
+
+    Clockwise matters: (270, 45) is west through north to north-east, not the
+    long way round through south. Both are "W to NE" in English.
+    """
+    return ((np.asarray(az_deg) - start_deg) % 360.0) <= ((end_deg - start_deg) % 360.0)
+
+
+def keepout_violation(az_deg, alt_deg):
+    """The keep-out wedge this position falls in, or None.
+
+    Unlike the horizon mask this is never advisory: config.KEEPOUT_WEDGES
+    describes sky that would put the telescope somewhere it can be damaged,
+    so a hit here is a refusal with no override.
+    """
+    for start, end, min_alt, reason in config.KEEPOUT_WEDGES:
+        if bool(in_arc(az_deg, start, end)) and alt_deg < min_alt:
+            return reason
+    return None
+
+
 def mask_violation(az_deg, alt_deg):
     """How a single position sits against the mask.
 
@@ -278,6 +300,10 @@ def compute(rows, when=None, scan_hours=24, scan_step_min=2):
         # Only hard limits close a window. A soft sector is poor sky, not
         # unreachable sky, so it must not shorten what we report as available.
         ok_grid = (alt_grid >= hard_min_altitude(az_grid)) & dark_grid
+        # Keep-out wedges do close it: time the telescope cannot be pointed is
+        # not time available, so it must not be counted as a window.
+        for start, end, min_alt, _reason in config.KEEPOUT_WEDGES:
+            ok_grid &= ~(in_arc(az_grid, start, end) & (alt_grid < min_alt))
         if config.MAX_ALTITUDE is not None:
             ok_grid &= alt_grid <= config.MAX_ALTITUDE
 
@@ -305,6 +331,9 @@ def evaluate_flags(r):
         flags.append("TOO_FAINT")
     if r["sun_alt_deg"] >= config.SUN_ALT_MAX:
         flags.append("SUN_UP")
+
+    if keepout_violation(r["az_deg"], r["alt_deg"]):
+        flags.append("KEEP_OUT")
 
     # A mask violation only refuses when the sector is hard. Soft sectors
     # record a warning instead, so nothing is ever dropped for poor sky.

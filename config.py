@@ -105,6 +105,26 @@ HORIZON_MASK = [
     (292.5, 337.5, 40.0, "soft"),  # NW - "Northwest = 40"
 ]
 SECTOR_NAMES = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+# --- Keep-out wedges: hard, and about the equipment ---------------------------
+# Sky the telescope must not be pointed at, whatever else is true.
+#
+# Deliberately NOT part of HORIZON_MASK. That mask is advisory -- it describes
+# sky that is poor because of Trieste's light dome, and it never removes a
+# target, because an impactor discovered in a light-polluted direction still
+# has to appear on the board. These are the opposite: a slew into one risks
+# damaging the mount, so they reject outright and no display setting, filter
+# or view can bring the affected rows back.
+#
+# Each entry is (az_from, az_to, min_altitude, reason). The arc runs CLOCKWISE
+# from az_from to az_to, so (270, 45) is west -> north -> north-east, the
+# northern half, and NOT the southern one. Getting that backwards would cut
+# 87% of a typical night's rows rather than 9%.
+#
+# Below min_altitude inside the arc is forbidden; above it is allowed.
+KEEPOUT_WEDGES = [
+    (270.0, 45.0, 70.0, "mount/dome collision risk"),
+]
 # Flat floor applied in addition to the mask.
 MIN_ALT = 15.0                       # legacy
 # Zenith blind spot. The observer mentioned an upper elevation limit but gave

@@ -123,6 +123,11 @@ def target_marks(rows, tracks, now):
         }
         if abs(nearest[0] - now) <= gap:
             az, alt = _interpolate(track, now)
+            # Inside a keep-out wedge the target is simply not drawn. It is
+            # sky the mount must not be sent to, so a marker there is an
+            # invitation to do exactly that. It reappears if it comes out.
+            if observability.keepout_violation(az, alt):
+                continue
             # Judged at the position being drawn, not from the stored peak
             # flag. The queue badge answers "is tonight's best moment in poor
             # sky"; a live map has to answer "is it in poor sky right now",
@@ -133,7 +138,9 @@ def target_marks(rows, tracks, now):
             marks.append(dict(common, up=True, az=az, alt=alt,
                               mask=bool(reason)))
             continue
-        ahead = [p for p in track if p[0] > now]
+        ahead = [p for p in track
+                 if p[0] > now
+                 and not observability.keepout_violation(p[1], p[2])]
         if ahead:
             reason, _hard = observability.mask_violation(ahead[0][1],
                                                          ahead[0][2])
@@ -228,6 +235,15 @@ def render_svg(marks, moon=None, size=None, localt=None):
     p = [f'<svg viewBox="0 0 {size} {size}" width="100%" '
          f'style="max-width:{size}px;display:block;margin:0 auto" role="img" '
          f'aria-label="All-sky map of tonight\'s targets, north up, east right">',
+         # Hatching for the keep-out wedges. Deliberately a different visual
+         # language from the flat pink of the advisory mask: one means poor
+         # sky, the other means the mount can be damaged, and they must not be
+         # mistaken for each other at a glance in a dark dome.
+         '<defs><pattern id="keepout" width="7" height="7" '
+         'patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
+         '<rect width="7" height="7" fill="rgba(207,97,84,.13)"/>'
+         '<line x1="0" y1="0" x2="0" y2="7" stroke="#cf6154" '
+         'stroke-opacity=".55" stroke-width="2"/></pattern></defs>',
          f'<circle cx="{cx}" cy="{cy}" r="{radius:.1f}" fill="#080a11" '
          f'stroke="#242b3a"/>']
 
@@ -243,6 +259,17 @@ def render_svg(marks, moon=None, size=None, localt=None):
         p.append(f'<path d="{_wedge_path(cx, cy, radius, r_in, a0, a0 + _SECTOR_WIDTH)}" '
                  f'fill="{fill}"><title>{config.SECTOR_NAMES[idx]} &#8212; '
                  f'{label}</title></path>')
+
+    # --- keep-out wedges, over the advisory mask and under everything else ---
+    for start, end, min_alt, reason in config.KEEPOUT_WEDGES:
+        span = (end - start) % 360.0
+        r_in = _radius_for(min_alt, radius)
+        p.append(f'<path d="{_wedge_path(cx, cy, radius, r_in, start, start + span)}" '
+                 f'fill="url(#keepout)" stroke="#cf6154" stroke-opacity=".5" '
+                 f'stroke-width="1.2"><title>Keep out &#8212; {reason}. '
+                 f'Below {min_alt:.0f}&#176; between azimuth {start:.0f}&#176; '
+                 f'and {end:.0f}&#176;, the telescope must not be pointed here.'
+                 f'</title></path>')
 
     # --- altitude rings and the compass rose ---
     for alt in config.SKYMAP_RINGS:

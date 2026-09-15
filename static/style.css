@@ -108,6 +108,12 @@ body {
 .sw.done { background: var(--go); }
 .sw.tick { border-radius: 1px; width: 3px; height: 12px; background: var(--amber); }
 .sw.poll { background: rgba(207,97,84,.30); border: 1px dashed var(--no); }
+/* Hatched, matching the map: a hard limit, not a preference. */
+.sw.keepout {
+  border-radius: 2px; border: 1px solid var(--no);
+  background: repeating-linear-gradient(45deg,
+    rgba(207,97,84,.15) 0 2px, rgba(207,97,84,.6) 2px 4px);
+}
 .sw.moon { background: #e8ecf5; border: 1px solid var(--cyan); }
 
 /* Marker <-> row highlight, driven from the page script. */

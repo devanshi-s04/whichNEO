@@ -59,6 +59,13 @@ def row_rejections(row, night_end_ts):
     if row.motion < config.MIN_MOTION:
         out.append("tooSlow")
 
+    # Equipment safety first, and unconditionally: a row inside a keep-out
+    # wedge can never become usable, so it can never be the peak, the pointing
+    # row, or a line in the plan file. Nothing downstream has to remember to
+    # re-check it.
+    if observability.keepout_violation(row.az, row.alt):
+        out.append("keepOut")
+
     reason, hard = observability.mask_violation(row.az, row.alt)
     if reason and hard:
         out.append(reason)
@@ -162,6 +169,7 @@ def analyze(target, eph, orbit, now=None):
     if not rows:
         discard.append("NO_WINDOW")
         target.update(max_alt_row=None, nearest_row=None, interp_row=None,
+                      live_row_is_now=False,
                       max_alt_ts=None, max_alt=None, max_alt_az=None,
                       exposure_min=None, window_minutes=0.0,
                       window_start_ts=None, window_end_ts=None, mpc_flag=None,
@@ -204,6 +212,13 @@ def analyze(target, eph, orbit, now=None):
         # daylight, and emits a live pointing line with the sun up.
         target["interp_row"] = ephemeris.ObjectEphemeris(
             target["desig"], rows).interpolate_at(at)
+        # Whether that row genuinely refers to `at`, or was clamped to the end
+        # of the usable span because the target has not risen yet or its window
+        # has already closed. Only a genuine one may be published as a
+        # pointable line -- see output.plan_entry.
+        target["live_row_is_now"] = (
+            target["interp_row"] is not None
+            and abs(target["interp_row"].ts - at) < 60.0)
 
     target["discard_reasons"] = discard
     target["observable"] = not discard
