@@ -77,6 +77,21 @@
       and the plan file, and no marker is drawn, for as long as they are
       inside it. Nothing can override it.
     </p>
+    {% if strip %}
+    <div class="replay">
+      <div class="replay-row">
+        <span class="replay-label">Replay</span>
+        <span class="replay-time" id="replayTime">live</span>
+      </div>
+      <input type="range" id="replaySlider" min="{{ strip.start_ts|int }}"
+             max="{{ strip.end_ts|int }}" step="60" value="{{ strip.end_ts|int }}">
+      <div class="replay-row">
+        <span class="dim">{{ strip.start }}</span>
+        <button type="button" class="ghost" id="replayLive">back to live</button>
+        <span class="dim">{{ strip.end }}</span>
+      </div>
+    </div>
+    {% endif %}
   </div>
 </section>
 {% endif %}
@@ -417,16 +432,54 @@ document.addEventListener('mouseout', ev => {
   if (el) linkHover(el.dataset.desig, false);
 });
 
+// Replaying the sky map. Scrubbing sets replayTs and takes the map out of
+// live polling -- the ephemeris tracks behind it already span the whole
+// night, so this reads the same data the live map does, just at an earlier
+// instant, rather than collecting anything new.
+let replayTs = null;
+const replaySlider = document.getElementById('replaySlider');
+const replayTimeEl = document.getElementById('replayTime');
+const replayLiveBtn = document.getElementById('replayLive');
+
+async function loadSky(ts) {
+  const qs = new URLSearchParams(params);
+  if (ts !== null) qs.set('ts', ts);
+  const resp = await fetch('/skymap.svg?' + qs.toString());
+  const svg = await resp.text();
+  const plot = document.getElementById('skyplot');
+  if (plot) plot.innerHTML = svg;
+  if (replayTimeEl) {
+    replayTimeEl.textContent = ts === null
+      ? 'live' : (resp.headers.get('X-Sky-Time') || '');
+  }
+}
+
+if (replaySlider) {
+  replaySlider.addEventListener('input', () => {
+    replayTs = Number(replaySlider.value);
+    loadSky(replayTs);
+  });
+}
+if (replayLiveBtn) {
+  replayLiveBtn.addEventListener('click', () => {
+    replayTs = null;
+    replaySlider.value = replaySlider.max;
+    loadSky(null);
+  });
+}
+
 async function refresh() {
   try {
     const [rows, sky, st] = await Promise.all([
       fetch('/rows?' + params.toString()).then(r => r.text()),
-      fetch('/skymap.svg?' + params.toString()).then(r => r.text()),
+      replayTs === null ? fetch('/skymap.svg?' + params.toString()).then(r => r.text()) : null,
       fetch('/status').then(r => r.json())
     ]);
     document.getElementById('rows').innerHTML = rows;
-    const plot = document.getElementById('skyplot');
-    if (plot) plot.innerHTML = sky;
+    if (sky !== null) {
+      const plot = document.getElementById('skyplot');
+      if (plot) plot.innerHTML = sky;
+    }
     applyOpenPlans();
     document.getElementById('last-update').innerHTML =
       st.last_update_local + '<small> ' + TZ + '</small>';

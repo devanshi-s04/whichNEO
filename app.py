@@ -5,6 +5,7 @@ rendering stays fast. The updater has already done all the work.
 """
 
 import json
+import math
 import time
 from datetime import datetime, timezone
 
@@ -179,6 +180,7 @@ def night_strip(rows, max_lanes=16):
     return {
         "start": localt(start), "end": localt(end),
         "start_ut": utct(start), "end_ut": utct(end),
+        "start_ts": start, "end_ts": end,
         "hours": ticks,
         "lanes": lanes,
         "now_pct": round(pct(now), 2) if start <= now <= end else None,
@@ -267,16 +269,61 @@ def index():
         conn.close()
 
 
+# How far either side of now the replay slider will honour a timestamp. A
+# night is hours; a year of slack is generous for anything anyone would want
+# to replay, and stays far inside what a clock can represent on any platform.
+_REPLAY_WINDOW_S = 366 * 24 * 3600
+
+
+def _replay_ts(raw):
+    """?ts= as a timestamp we can actually render, or None meaning live.
+
+    A value float() accepts is not necessarily one datetime can represent.
+    `?ts=99999999999999` parses fine and then raises out of localt() when the
+    response header is built -- ValueError: year 3170843 is out of range --
+    turning a public, unauthenticated, frequently polled endpoint into a 500.
+    `nan` and `inf` slip through float() the same way.
+
+    The slider only ever sends instants inside the night it is showing, so
+    anything outside a sane window is a typo or a probe. Fall back to live,
+    exactly as a malformed float already did, rather than failing: a wrong
+    query string should not be able to take the map down.
+    """
+    if not raw:
+        return None
+    try:
+        ts = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ts) or abs(ts - time.time()) > _REPLAY_WINDOW_S:
+        return None
+    try:                       # the clock itself must accept it
+        datetime.fromtimestamp(ts, _TZ)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return ts
+
+
 @app.route("/skymap.svg")
 def skymap_svg():
-    """Just the map, so the page can refresh it without a full reload."""
+    """Just the map, so the page can refresh it without a full reload.
+
+    An optional ?ts=<unix time> draws the map as it stood at that instant
+    instead of live -- the replay slider under "Sky now" uses this to step
+    back through a night after it is over, reading the same cached ephemeris
+    tracks the live map already does. No new data collection required: those
+    tracks already span the whole night, not just the instant being shown.
+    """
     v = _view_args()
+    ts = _replay_ts(request.args.get("ts"))
     conn = get_conn()
     try:
         rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
-        return (sky_view(conn, rows)["svg"], 200,
+        used = ts if ts is not None else time.time()
+        return (sky_view(conn, rows, now=ts)["svg"], 200,
                 {"Content-Type": "image/svg+xml; charset=utf-8",
-                 "Cache-Control": "no-store"})
+                 "Cache-Control": "no-store",
+                 "X-Sky-Time": f"{localt(used)} {_tzabbr(used)}"})
     finally:
         conn.close()
 
