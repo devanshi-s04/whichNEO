@@ -25,6 +25,7 @@ from astropy.time import Time
 from astropy.coordinates import SkyCoord, AltAz, TETE, get_body
 
 import config
+import db
 import ephemeris
 import neocp
 import observability
@@ -588,13 +589,15 @@ def test_row_rejection_reasons():
           pipeline.row_mask_flags(r5))
 
     r6 = ephemeris.Row(SAMPLE_EPH)
-    # 260, not 270: due west is inside the keep-out wedge, where the hard rule
-    # rightly wins and there is nothing left for the soft mask to say. 260 is
-    # still the W sector, just clear of the wedge's edge.
-    r6.az, r6.alt = 260.0, 25.0            # west, under its 40 deg preference
-    check("low western row kept but flagged",
+    # South-west, not west. The keep-out wedge now starts at 247.5, which is
+    # the W sector's own western boundary, so the ENTIRE W sector below 70 deg
+    # is refused outright and its soft 40-degree limit can never fire again.
+    # Same for NW and N. SW is the nearest sector the advisory mask still
+    # governs, so it is what exercises this behaviour now.
+    r6.az, r6.alt = 225.0, 25.0            # south-west, under its 30 deg preference
+    check("low south-western row kept but flagged",
           pipeline.row_rejections(r6, far_future) == []
-          and pipeline.row_mask_flags(r6) == ["belowMask:W"],
+          and pipeline.row_mask_flags(r6) == ["belowMask:SW"],
           (pipeline.row_rejections(r6, far_future), pipeline.row_mask_flags(r6)))
 
     # ...but a sector marked hard still refuses, which is the whole point of
@@ -869,30 +872,43 @@ def test_keepout_wedge():
     87% of usable rows rather than 9% -- so the direction is pinned here.
     """
     far_future = 2 ** 40
+    # Read the edges from config rather than hardcoding them. The boundary has
+    # already moved once and will move again when the observatory gives us the
+    # real mount limit; what must never change is the INVARIANT -- north is
+    # inside, south is outside, and a low row in there is refused.
+    start, end, min_alt, _reason = config.KEEPOUT_WEDGES[0]
+    inside_az = (start + end) / 2.0 if start < end else ((start + 360.0 + end) / 2.0) % 360.0
 
-    check("arc runs clockwise from west, through north, to north-east",
-          all(bool(observability.in_arc(a, 270.0, 45.0))
-              for a in (270.0, 300.0, 350.0, 0.0, 20.0, 44.9)),
-          [a for a in (270.0, 300.0, 350.0, 0.0, 20.0, 44.9)
-           if not observability.in_arc(a, 270.0, 45.0)])
+    check("the arc runs clockwise and swallows the north",
+          all(bool(observability.in_arc(a, start, end))
+              for a in (start + 1.0, 315.0, 350.0, 0.0, 20.0, end - 1.0)),
+          [a for a in (start + 1.0, 315.0, 350.0, 0.0, 20.0, end - 1.0)
+           if not observability.in_arc(a, start, end)])
     check("and NOT the long way round through the south",
-          not any(bool(observability.in_arc(a, 270.0, 45.0))
-                  for a in (90.0, 135.0, 180.0, 225.0, 269.0)),
-          [a for a in (90.0, 135.0, 180.0, 225.0, 269.0)
-           if observability.in_arc(a, 270.0, 45.0)])
+          not any(bool(observability.in_arc(a, start, end))
+                  for a in (90.0, 135.0, 180.0, 200.0, start - 1.0)),
+          [a for a in (90.0, 135.0, 180.0, 200.0, start - 1.0)
+           if observability.in_arc(a, start, end)])
 
     check("just outside the western edge is clear",
-          observability.keepout_violation(269.0, 30.0) is None)
+          observability.keepout_violation(start - 1.0, 30.0) is None)
     check("just inside the western edge is not",
-          observability.keepout_violation(271.0, 30.0) is not None)
+          observability.keepout_violation(start + 1.0, 30.0) is not None)
     check("just inside the north-eastern edge is not",
-          observability.keepout_violation(44.0, 30.0) is not None)
+          observability.keepout_violation(end - 1.0, 30.0) is not None)
     check("just outside the north-eastern edge is clear",
-          observability.keepout_violation(46.0, 30.0) is None)
+          observability.keepout_violation(end + 1.0, 30.0) is None)
     check("high enough inside the wedge is allowed",
-          observability.keepout_violation(315.0, 75.0) is None)
+          observability.keepout_violation(inside_az, min_alt + 5.0) is None)
     check("but not a shade under the limit",
-          observability.keepout_violation(315.0, 69.9) is not None)
+          observability.keepout_violation(inside_az, min_alt - 0.1) is not None)
+
+    # The specific case that moved the edge: a target tracking down the
+    # west-south-west used to slip under a due-west boundary for a whole
+    # night. Its real position when it was reported is pinned here.
+    check("a target at azimuth 259, altitude 33 is inside the wedge",
+          observability.keepout_violation(259.1, 32.9) is not None,
+          "P22pZo5 as reported; a due-west edge missed it entirely")
 
     # It rejects rows outright, and no view or flag can bring them back.
     r = ephemeris.Row(SAMPLE_EPH)
@@ -977,6 +993,12 @@ def test_plan_file_never_publishes_a_stale_pointing_line():
     check("a clamped one gets none", len(body) == 0, body)
     check("its coordinates are kept, commented, and marked",
           "do not slew" in stale and "// 2026" in stale, stale.splitlines()[-1])
+
+    # The same flag drives the queue badge. A target whose window has closed,
+    # or which has moved into a keep-out wedge, is still "observable tonight"
+    # -- but badging it GO invites a slew at something unpointable.
+    check("the flag that suppresses the line is stored for the board",
+          "live_row_is_now" in db._COLS, db._COLS[-6:])
 
     check("the block is otherwise unchanged in shape",
           len(live.splitlines()) == len(stale.splitlines()),

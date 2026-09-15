@@ -58,7 +58,13 @@
 
   <td class="l">
     {% if r.observed %}<span class="pill ob">observed</span>
-    {% elif r.observable %}<span class="pill go">GO</span>
+    {% elif r.observable and r.live_row_is_now %}<span class="pill go">GO</span>
+    {% elif r.observable %}
+      {# Observable tonight, but not at this moment -- it has not risen into
+         its window yet, or the window has closed behind it, or it has moved
+         into a keep-out wedge. GO here would be an invitation to slew at
+         something that cannot be pointed at. #}
+      <span class="pill ob" title="Observable tonight, but not right now &mdash; its usable window is not open at this moment, so there is no pointable position">not now</span>
     {% else %}{% for f in r.discard_reasons[:2] %}<span class="pill no">{{ f|lower|replace('_',' ') }}</span> {% endfor %}
       {%- if r.discard_reasons|length > 2 %}<span class="dim">+{{ r.discard_reasons|length - 2 }}</span>{% endif %}
     {% endif %}

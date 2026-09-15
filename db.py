@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS targets (
     cur_sun_alt          REAL,
     cur_vmag             REAL,
     cur_ts               REAL,
+    live_row_is_now      INTEGER,
 
     scat_ra              INTEGER,
     scat_dec             INTEGER,
@@ -117,7 +118,7 @@ _COLS = [
     "exposure_min", "window_minutes",
     "window_start_ts", "window_end_ts",
     "cur_alt", "cur_az", "cur_motion", "cur_moon_dist", "cur_sun_alt",
-    "cur_vmag", "cur_ts",
+    "cur_vmag", "cur_ts", "live_row_is_now",
     "scat_ra", "scat_dec", "scattered_warn", "observed_from_site",
     "eph_rows_total", "eph_rows_usable", "eph_error", "eph_report",
     "map_url", "offsets_url",
@@ -241,6 +242,7 @@ def replace_targets(conn, rows):
         d["obs_codes"] = json.dumps(d["obs_codes"]) if d.get("obs_codes") else None
         d["crosscheck"] = json.dumps(d.get("crosscheck")) if d.get("crosscheck") else None
         d["observable"] = int(bool(d.get("observable")))
+        d["live_row_is_now"] = int(bool(d.get("live_row_is_now")))
         d["is_new"] = int(bool(d.get("is_new")))
         d["first_seen_utc"] = first_seen.get(d["desig"], now)
         d["last_updated_utc"] = now

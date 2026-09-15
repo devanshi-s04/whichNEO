@@ -122,8 +122,20 @@ SECTOR_NAMES = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 # 87% of a typical night's rows rather than 9%.
 #
 # Below min_altitude inside the arc is forbidden; above it is allowed.
+# 247.5 rather than 270: the western edge started at due west, and a target
+# tracking down the west-south-west slipped under it for a whole night --
+# P22pZo5 ran from azimuth 189 to 269 and never once entered the wedge, while
+# being far enough west to be a problem. 247.5 is the W sector's own boundary,
+# so the rule reads as "W, NW, N and NE below 70 degrees" rather than as an
+# arbitrary number.
+#
+# This has now moved once in response to a target someone spotted. Fitting a
+# safety limit to individual complaints will keep finding gaps: the real
+# answer is the mount's actual limit from the observatory, which is open
+# question 1 in TBD.md. Find_Orb supports a continuous horizon profile
+# (site_L01.txt) if L01 has one, and we should use it directly if so.
 KEEPOUT_WEDGES = [
-    (270.0, 45.0, 70.0, "mount/dome collision risk"),
+    (247.5, 45.0, 70.0, "mount/dome collision risk"),
 ]
 # Flat floor applied in addition to the mask.
 MIN_ALT = 15.0                       # legacy
