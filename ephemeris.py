@@ -262,6 +262,37 @@ def fetch(desig):
         return ObjectEphemeris(desig, [], error=f"{type(e).__name__}: {e}")
 
 
+def _post_gap_fill(desig, timeout=None):
+    """Same request as _post(), but with no altitude floor at all.
+
+    Scoped deliberately: this exists only to fill holes in moonplot.py's
+    chart when the object dips under MPC_SERVER_MIN_ALT for part of the
+    night (see update_neocp.py's _aux and app.py's target_detail, the only
+    two callers of this and fetch_gap_fill below). The filter cascade, the
+    sky map, and the uncertainty plot all keep reading the normal oalt=20
+    fetch untouched, so loosening the floor here changes nothing about what
+    gets filtered, ranked, or drawn anywhere else.
+    """
+    return requests.post(
+        config.EPHEMERIS_URL,
+        data={"mb": -30, "mf": 30, "dl": -90, "du": 90, "nl": 0, "nu": 100,
+              "sort": "d", "W": "j", "obj": desig, "Parallax": 1,
+              "obscode": config.MPC_CODE, "int": 1, "start": 0, "raty": "a",
+              "mot": "m", "dmot": "p", "out": "f", "sun": "x", "oalt": -90},
+        timeout=timeout or config.EPHEMERIS_TIMEOUT_S, headers=_UA)
+
+
+def fetch_gap_fill(desig):
+    """The same object's ephemeris with no altitude floor. Never raises;
+    an empty ObjectEphemeris on failure, exactly like fetch()."""
+    try:
+        r = _post_gap_fill(desig)
+        r.raise_for_status()
+        return parse(desig, r.text)
+    except Exception as e:
+        return ObjectEphemeris(desig, [], error=f"{type(e).__name__}: {e}")
+
+
 def fetch_many(desigs, workers=None):
     """Fetch several objects concurrently, politely."""
     desigs = list(desigs)
