@@ -814,7 +814,8 @@ def test_ephemeris_refetched_when_its_window_runs_out():
     target = {"desig": "TEST01", "nobs": 12, "arc_days": 0.5}
     sig = ephemeris.signature(target)
     full = {"offsets": [], "obs_codes": {}, "fetched_ts": now - 600,
-            "last_row_ts": now + 6 * 3600}
+            "last_row_ts": now + 6 * 3600,
+            "cache_schema": ephemeris.CACHE_SCHEMA}
 
     check("a covering ephemeris is left alone",
           not update_neocp.needs_refetch((sig, full), target, now))
@@ -862,6 +863,74 @@ def _fake_eph(n=12, rising=True):
         r.moon_dist = 95.0
         out.append(r)
     return out
+
+
+def test_offsets_parse_with_the_fast_motion_flag():
+    """MPC appends ! or !! after the ephemeris number on fast movers.
+
+    The pattern used to anchor `$` straight after the digits, so every line of
+    a fast mover's offsets page failed and the object was recorded as having
+    no uncertainty data. On a live board that was 40 of 103 objects, median
+    motion 17.6 "/min against 2.4 for those that parsed -- the uncertainty was
+    being stripped from exactly the objects whose uncertainty matters.
+
+    Lines below are copied verbatim from ZTF10G9's page.
+    """
+    page = "\n".join([
+        "      +0      +0      Ephemeris #    1 !!",
+        "   +6581   +4822      Ephemeris #    2 !!",
+        "   -2327   -1517      Ephemeris #    3 !!",
+        "  +11175   +7757      Ephemeris #    4 !!",
+    ])
+    got = [(int(a), int(b)) for a, b in ephemeris._OFFSET_RE.findall(page)]
+    check("all four flagged lines parse", len(got) == 4, got)
+    check("values are read correctly",
+          got[:2] == [(0, 0), (6581, 4822)], got[:2])
+
+    # The unflagged and single-! forms must keep working.
+    for line, want in (
+            ("   +6581   +4822      Ephemeris #    2", (6581, 4822)),
+            ("   +6581   +4822      Ephemeris #    2 !", (6581, 4822)),
+            ("   -2327   -1517      Ephemeris #    3 !! ", (-2327, -1517))):
+        m = ephemeris._OFFSET_RE.findall(line)
+        check("parses %r" % line[-12:].strip(),
+              m and (int(m[0][0]), int(m[0][1])) == want, m)
+
+    # Header and decoration must still be ignored.
+    check("a line without an ephemeris number is ignored",
+          ephemeris._OFFSET_RE.findall("   +1   +2   some other text") == [])
+
+    spread = ephemeris.spread(got)
+    check("spread over the real ZTF10G9 sample is enormous",
+          spread == (13502, 9274), spread)
+    check("and a cloud that size dwarfs the telescope's field",
+          spread[0] > config.FOV_ARCSEC * 4,
+          "%d\" vs %d\" field" % (spread[0], config.FOV_ARCSEC))
+
+
+def test_cache_schema_forces_one_refetch():
+    """Bumping the payload schema must invalidate every cached entry once.
+
+    Without it a parser fix never reaches objects already cached: their
+    signature does not change until new astrometry arrives, so they keep
+    serving the wrong result indefinitely.
+    """
+    now = 1_760_000_000.0
+    target = {"desig": "T1", "nobs": 12, "arc_days": 0.5}
+    sig = ephemeris.signature(target)
+    current = {"offsets": [], "obs_codes": {}, "fetched_ts": now - 600,
+               "last_row_ts": now + 3600,
+               "cache_schema": ephemeris.CACHE_SCHEMA}
+    check("an entry at the current schema is left alone",
+          not update_neocp.needs_refetch((sig, current), target, now))
+
+    old = dict(current, cache_schema=ephemeris.CACHE_SCHEMA - 1)
+    check("an entry at an older schema is refetched",
+          update_neocp.needs_refetch((sig, old), target, now))
+
+    missing = {k: v for k, v in current.items() if k != "cache_schema"}
+    check("an entry predating the field entirely is refetched",
+          update_neocp.needs_refetch((sig, missing), target, now))
 
 
 def test_frame_speed_table():
@@ -1238,6 +1307,8 @@ def main():
                test_ranking_bounds, test_row_rejection_reasons,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
+               test_offsets_parse_with_the_fast_motion_flag,
+               test_cache_schema_forces_one_refetch,
                test_frame_speed_table,
                test_plan_line_carries_the_frame_instruction,
                test_keepout_wedge,

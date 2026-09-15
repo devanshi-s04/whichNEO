@@ -24,6 +24,20 @@ import config
 _UA = {"User-Agent": "visnjan_whichneo/0.2 "
                      "(Visnjan Observatory L01 follow-up planning)"}
 
+# Version of the cached payload's CONTENT, not its shape. Bump it whenever a
+# parser changes what we would extract from the same page, so every cached
+# entry is refetched once.
+#
+# Without this a parser fix never reaches objects already cached: an entry is
+# only refreshed when its signature changes, and the signature tracks new
+# astrometry, not our own bugs. Entries would keep serving the wrong result
+# until the object happened to be observed again.
+#
+#   2 -- offsets regex now tolerates MPC's trailing ! / !! motion flag, which
+#        had been silently discarding the uncertainty cloud of every fast
+#        mover.
+CACHE_SCHEMA = 2
+
 # Row layout, whitespace separated:
 #   0    1  2   3      4  5   6    7   8  9   10     11     12     13    14   15   16    17    18   19
 #   2026 09 10 2000   02 30 34.7 +36 47 19  118.3   16.4  391.9  047.2  240  +23  -26  0.00   115  -28
@@ -290,8 +304,23 @@ def fetch_many(desigs, workers=None):
 
 # --- auxiliary pages -------------------------------------------------------
 
-_OFFSET_RE = re.compile(r"([+-][0-9]+)\s+([+-][0-9]+).*?Ephemeris #\s*[0-9]+$",
-                        re.M)
+# The trailing `\s*[!]*\s*$` is the whole point. MPC appends its fast-motion
+# flag AFTER the ephemeris number:
+#
+#     +6581   +4822      Ephemeris #    2 !!
+#
+# and the previous pattern anchored `$` immediately after the digits, so every
+# line of a fast mover's page failed to match and the object was recorded as
+# having no uncertainty data at all. Measured on a live board that was 40 of
+# 103 objects, with a median motion of 17.6 "/min against 2.4 for those that
+# parsed -- so it stripped the uncertainty from precisely the objects whose
+# uncertainty matters most. ZTF10G9's page held 2000 real variants reaching
+# 11175 arcsec from the nominal position; we read none of them.
+#
+# Same failure as the ObsCodes parser: a regex anchored to end-of-line, broken
+# by an optional trailing token, failing silently rather than raising.
+_OFFSET_RE = re.compile(
+    r"([+-][0-9]+)\s+([+-][0-9]+).*?Ephemeris #\s*[0-9]+\s*!*\s*$", re.M)
 
 
 def offsets(offsets_url):
