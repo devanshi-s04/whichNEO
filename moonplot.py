@@ -67,7 +67,8 @@ def _twilight_bounds(pts):
 
 
 def render_svg(rows, window_start_ts=None, window_end_ts=None,
-                size_w=560, size_h=320, localt=None, tzlabel=None):
+                size_w=560, size_h=320, localt=None, tzlabel=None,
+                moon_track=None):
     """Inline SVG: object altitude and Moon altitude vs. time, with the
     angular separation to the Moon printed under every point.
 
@@ -77,6 +78,19 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
     ephemeris happens to run either side of the night. window_start_ts/
     window_end_ts, when given, are shaded as the sub-span pipeline.py
     determined to actually be usable, but never clip the curves themselves.
+
+    rows can (and, from app.py, does) already be a merge of the normal
+    oalt=20 fetch with a second, wider one scoped only to this plot -- see
+    ephemeris.fetch_gap_fill -- so a hole in the ordinary feed doesn't
+    necessarily mean a hole here too.
+
+    moon_track, when given, is [(unix_ts, moon_alt_deg), ...] computed
+    independently (see observability.moon_state) rather than read off rows.
+    The Moon's position needs no orbit fit -- unlike the object's, it is
+    exactly knowable for any instant -- so when this covers the plotted
+    span, the Moon curve is drawn gap-free even where the object's own
+    curve still has a real hole. Falls back to each row's own moon_alt
+    (and that hole) when not supplied or too sparse.
 
     localt formats a timestamp for the axis. The board shows observatory local
     time everywhere, because the people reading it are standing in the dome;
@@ -101,7 +115,16 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
         t0, t1 = pts[0].ts, pts[-1].ts
     tspan = max(t1 - t0, 1.0)
 
-    vals = [r.alt for r in pts] + [r.moon_alt for r in pts]
+    # Independent Moon track for this same span, when the caller supplied
+    # enough of one; otherwise fall back to reading moon_alt off the
+    # object's own rows, gaps and all, exactly as before.
+    moon_pts = sorted((ts, alt) for ts, alt in (moon_track or [])
+                      if t0 <= ts <= t1)
+    moon_from_rows = len(moon_pts) < 2
+    if moon_from_rows:
+        moon_pts = [(r.ts, r.moon_alt) for r in pts]
+
+    vals = [r.alt for r in pts] + [v for _, v in moon_pts]
     vmin, vmax = min(vals), max(vals)
     lo = min(0.0, vmin - 5.0)
     hi = max(90.0, vmax + 5.0) if vmax > 80 else vmax + 8.0
@@ -218,7 +241,17 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
                 f'stroke-width="1.6"{dasharray}/>')
 
     parts.append(curve("alt", "#5fc9d4"))
-    parts.append(curve("moon_alt", "#9aa3b8", dash="5 3"))
+
+    if moon_from_rows:
+        parts.append(curve("moon_alt", "#9aa3b8", dash="5 3"))
+    else:
+        # An independent track has no MPC-shaped holes to break at -- the
+        # Moon's position is exactly knowable for every instant in range.
+        moon_path = " ".join(
+            f'{"M" if i == 0 else "L"}{px(t):.1f},{py(v):.1f}'
+            for i, (t, v) in enumerate(moon_pts))
+        parts.append(f'<path d="{moon_path}" fill="none" stroke="#9aa3b8" '
+                     f'stroke-width="1.6" stroke-dasharray="5 3"/>')
 
     # Point colour flags the Moon-separation check itself: green when the
     # object clears the observatory's minimum separation at that timestamp,
@@ -260,16 +293,18 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
     legend_w, legend_h = 132, 56
 
     def _clearance(ox, oy):
-        """Smallest distance from a legend box at (ox, oy) to any plotted point."""
+        """Smallest distance from a legend box at (ox, oy) to any plotted point,
+        on either curve -- checked against the Moon track actually drawn,
+        not just wherever the object happens to have a row."""
         x0, x1 = ox - 6, ox - 6 + legend_w
         y0, y1 = oy - 10, oy - 10 + legend_h
         worst = float("inf")
-        for r in pts:
-            for value in (r.alt, r.moon_alt):
-                x, y = px(r.ts), py(value)
-                dx = max(x0 - x, 0.0, x - x1)
-                dy = max(y0 - y, 0.0, y - y1)
-                worst = min(worst, (dx * dx + dy * dy) ** 0.5)
+        points = [(r.ts, r.alt) for r in pts] + moon_pts
+        for t, value in points:
+            x, y = px(t), py(value)
+            dx = max(x0 - x, 0.0, x - x1)
+            dy = max(y0 - y, 0.0, y - y1)
+            worst = min(worst, (dx * dx + dy * dy) ** 0.5)
         return worst
 
     lx, ly = max([(pad_l + 8, pad_t + 12),
