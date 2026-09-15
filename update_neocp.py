@@ -7,6 +7,13 @@ Network cost is kept down two ways: objects rejected by the cheap NEOCP-level
 filters never trigger a per-object request at all, and ephemerides are cached
 against a signature of the object's NEOCP row so they are re-requested only
 when new observations change the solution.
+
+Each cycle's freshly fetched, freshly parsed NEOCP list is also handed
+straight to neocp_history.record_cycle() to build the longitudinal history
+database (see that module) -- rather than neocp_history.py fetching an
+identical copy of the same list again on its own separate schedule, this is
+now the only place that list gets requested. Run neocp_history.py's own
+--loop only as a standalone fallback, never alongside this one.
 """
 
 import argparse
@@ -20,6 +27,7 @@ import config
 import db
 import ephemeris
 import neocp
+import neocp_history
 import output
 import pipeline
 import ranking
@@ -105,7 +113,7 @@ def needs_refetch(entry, target, now):
         config.EPHEMERIS_REFETCH_BACKOFF_S
 
 
-def run_update(conn, source=None):
+def run_update(conn, hist_conn=None, source=None):
     timings = {}
     t0 = time.perf_counter()
 
@@ -119,6 +127,14 @@ def run_update(conn, source=None):
     if not targets:
         raise RuntimeError("NEOCP returned no parseable targets")
     mark("fetch_list")
+
+    # Same parsed list the rest of this cycle uses -- not a `source` test
+    # fixture, and only when the caller actually wants history recorded
+    # (see main()'s --no-history) -- fed straight to neocp_history's own
+    # database instead of it fetching an identical copy of this list itself.
+    if hist_conn is not None and source is None:
+        neocp_history.record_cycle(hist_conn, targets)
+    mark("history")
 
     try:
         orbits = neocp.parse_neocp_info(neocp.fetch_neocp_info())
@@ -265,23 +281,28 @@ def main():
     ap.add_argument("--source", help="read NEOCP text from a local file")
     ap.add_argument("--loop", action="store_true",
                     help=f"run forever, every {config.UPDATE_INTERVAL_S}s")
+    ap.add_argument("--no-history", action="store_true",
+                    help="don't also record this cycle's list into "
+                         "neocp_history.py's database")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
     setup_logging(args.verbose)
     conn = db.connect()
     db.init(conn)
+    hist_conn = None if args.no_history else neocp_history.ensure_db()
 
     while True:
         try:
-            timings, n, n_obs, n_fetched, mism = run_update(conn, args.source)
+            timings, n, n_obs, n_fetched, mism = run_update(
+                conn, hist_conn, args.source)
             logging.info(
                 "%d targets, %d observable, %d ephemerides fetched, "
                 "%d crosscheck mismatches, %.1f s "
-                "(list %.0f, orbits %.0f, eph %.0f, aux %.0f, analyze %.0f, "
-                "xcheck %.0f, rank %.0f, plan %.0f, db %.0f ms)",
+                "(list %.0f, history %.0f, orbits %.0f, eph %.0f, aux %.0f, "
+                "analyze %.0f, xcheck %.0f, rank %.0f, plan %.0f, db %.0f ms)",
                 n, n_obs, n_fetched, mism, timings["total"] / 1000,
-                timings["fetch_list"], timings["fetch_orbits"],
+                timings["fetch_list"], timings["history"], timings["fetch_orbits"],
                 timings["fetch_ephemerides"], timings["fetch_aux"],
                 timings["analyze"], timings["crosscheck"], timings["rank"],
                 timings["plan"], timings["database"])
