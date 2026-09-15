@@ -136,19 +136,16 @@
 </section>
 {% endif %}
 
-{% macro dir_button(key, is_on, is_asc) %}
-<button type="button" id="sortDir-{{ key }}" data-col="{{ key }}"
-        class="dirbtn{{ ' flip' if is_on and not is_asc }}"
-        title="Flip sort direction" {{ 'hidden' if not is_on }}>
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"
-    stroke-linecap="round" stroke-linejoin="round">
-    <path d="M17 2l4 4-4 4"/><path d="M21 6H8a4 4 0 0 0-4 4"/>
-    <path d="M7 22l-4-4 4-4"/><path d="M3 18h13a4 4 0 0 0 4-4"/>
-  </svg>
-</button>
+{% macro sort_th(key, label, cls='', title='') %}
+{% set active_col = ranking.parse_column_mode(mode) %}
+{% set is_on = active_col and active_col[0] == key %}
+{% set next_sort = key ~ ('_desc' if (is_on and active_col[1]) else '_asc') %}
+<th class="{{ cls }}{{ ' sorted' if is_on }}"{% if title %} title="{{ title }}"{% endif %}>
+  <a href="{{ url_for('index', sort=next_sort) }}" class="sortth" data-col="{{ key }}">{{ label
+  }}<span class="arrow" {{ 'hidden' if not is_on }}>{{ ('&#9650;' if (is_on and active_col[1]) else '&#9660;')|safe }}</span></a>
+</th>
 {% endmacro %}
 
-{% set active_cols = ranking.parse_mode_columns(mode) %}
 <div class="bar-row">
   <div class="seg">
     <a href="{{ url_for('index', sort='chronological') }}" data-sort="chronological"
@@ -156,25 +153,6 @@
     <a href="{{ url_for('index', sort='score') }}" data-sort="score"
        class="{{ 'on' if mode == 'score' }}">By value</a>
   </div>
-  <details class="filters-dd" id="filtersDd">
-    <summary id="filtersSummary">Filters{% if active_cols %} ({{ active_cols|length }}){% endif %}</summary>
-    <div class="filters-panel">
-      {% for key, meta in ranking.SORTABLE_COLUMNS.items() %}
-      {% set is_on = key in active_cols %}
-      {% set is_asc = active_cols.get(key, True) %}
-      <div class="filter-row">
-        <label>
-          <input type="checkbox" class="filter-check" id="filterCheck-{{ key }}"
-                 data-col="{{ key }}" {{ 'checked' if is_on }}>
-          {{ meta.label }}
-        </label>
-        {{ dir_button(key, is_on, is_asc) }}
-        <span id="sortLabel-{{ key }}" class="dim" data-low="{{ meta.low }}" data-high="{{ meta.high }}"
-              {{ 'hidden' if not is_on }}>{{ meta.low if is_asc else meta.high }}</span>
-      </div>
-      {% endfor %}
-    </div>
-  </details>
   <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=1) }}">hidden</a>
   <a class="chip" href="{{ url_for('plan_text') }}" target="_blank" rel="noopener">plan file</a>
   <span class="rules">
@@ -190,12 +168,15 @@
       <th class="l">#</th><th>Peak</th><th class="l">Target</th>
       <th class="l" title="Observatory code of the discovery observation">Disc. obs</th>
       <th class="l">MPC</th>
-      <th>Score</th><th>V</th>
-      <th title="Frames x seconds, from the observatory's speed table at each target's best altitude">Shoot</th>
-      <th>&Prime;/min</th>
-      <th title="Altitude at the next usable moment, which is now while the target is up">Alt</th>
-      <th title="Azimuth at the next usable moment. Compass bearing from north; the sky map above shows the same position">Az</th>
-      <th>Moon</th><th>Unseen</th><th>q / e</th>
+      {{ sort_th('digest2', 'Score') }}
+      {{ sort_th('mag', 'V') }}
+      {{ sort_th('exposure_min', 'Shoot', title="Frames x seconds, from the observatory's speed table at each target's best altitude") }}
+      {{ sort_th('motion', '&Prime;/min'|safe) }}
+      {{ sort_th('alt', 'Alt', title='Altitude at the next usable moment, which is now while the target is up') }}
+      {{ sort_th('az', 'Az', title='Azimuth at the next usable moment. Compass bearing from north; the sky map above shows the same position') }}
+      {{ sort_th('moon', 'Moon') }}
+      {{ sort_th('unseen', 'Unseen') }}
+      {{ sort_th('q', 'q / e') }}
       <th>Value</th><th class="l">Status</th><th></th>
     </tr></thead>
     <tbody id="rows">{% include "_rows.html" %}</tbody>
@@ -293,31 +274,13 @@ function applyOpenPlans() {
   });
 }
 
-// Sort-bar links/checkboxes drive the table order without a full page
-// reload -- just refetch /rows. A full navigation here would re-render the
-// whole page (night strip, upcoming cards, everything) for a change that
-// only affects table order, which is both slow and resets scroll position,
-// making the page visibly jump.
-const SORT_COLUMNS = {{ ranking.SORTABLE_COLUMNS.keys()|list|tojson }};
-
-// Ordered column -> ascending map. Order is insertion order (the sequence
-// columns were checked in), which is also the compound sort's tie-break
-// priority: the first entry sorts first, later ones only matter among rows
-// still tied on everything before them. Seeded from what the page loaded
-// with, so a refresh or a shared link reproduces the same combination.
-const activeCols = new Map(Object.entries({{ active_cols|tojson }}));
-
-function currentMode() {
-  if (activeCols.size === 0) return 'chronological';
-  return Array.from(activeCols, ([k, asc]) => k + '_' + (asc ? 'asc' : 'desc')).join(',');
-}
-
-function updateSortBar() {
-  // Read back from params (already updated by whichever caller changed the
-  // sort) rather than recomputing from activeCols, so this reflects the
-  // Sequence/By value modes too -- those aren't part of the column
-  // combination at all.
-  const mode = params.get('sort') || 'chronological';
+// Sort links (Sequence/By value, and now every column header) carry the new
+// mode in their own href's ?sort=, so clicking them is handled without a
+// full page reload -- just refetch /rows. A full navigation here would
+// re-render the whole page (night strip, upcoming cards, everything) for a
+// change that only affects table order, which is both slow and resets
+// scroll position, making the page visibly jump.
+function updateSortBar(mode) {
   document.querySelectorAll('.seg a[data-sort]').forEach(a => {
     a.classList.toggle('on', a.dataset.sort === mode);
   });
@@ -325,59 +288,28 @@ function updateSortBar() {
   document.querySelector('.seg a[data-sort="chronological"]').href = withSort('chronological');
   document.querySelector('.seg a[data-sort="score"]').href = withSort('score');
 
-  const summary = document.getElementById('filtersSummary');
-  summary.textContent = activeCols.size ? `Filters (${activeCols.size})` : 'Filters';
+  const m = /^([a-z0-9_]+)_(asc|desc)$/.exec(mode);
+  const activeCol = m ? m[1] : null, activeAsc = m ? m[2] === 'asc' : true;
 
-  SORT_COLUMNS.forEach(key => {
-    const active = activeCols.has(key);
-    document.getElementById('filterCheck-' + key).checked = active;
-    const dirBtn = document.getElementById('sortDir-' + key);
-    const label = document.getElementById('sortLabel-' + key);
-    dirBtn.hidden = !active;
-    label.hidden = !active;
-    if (active) {
-      const asc = activeCols.get(key);
-      dirBtn.classList.toggle('flip', !asc);
-      label.textContent = asc ? label.dataset.low : label.dataset.high;
-    }
+  document.querySelectorAll('.sortth').forEach(a => {
+    const key = a.dataset.col;
+    const isOn = key === activeCol;
+    a.closest('th').classList.toggle('sorted', isOn);
+    const arrow = a.querySelector('.arrow');
+    arrow.hidden = !isOn;
+    if (isOn) arrow.textContent = activeAsc ? '▲' : '▼';
+    a.href = withSort(key + '_' + (isOn && activeAsc ? 'desc' : 'asc'));
   });
 }
-
-function applySort() {
-  params.set('sort', currentMode());
-  history.replaceState(null, '', location.pathname + '?' + params);
-  updateSortBar();
-  refresh();
-}
-
-document.querySelectorAll('.filter-check').forEach(cb => {
-  cb.addEventListener('change', () => {
-    const key = cb.dataset.col;
-    if (cb.checked) {
-      if (!activeCols.has(key)) activeCols.set(key, true);   // default: ascending
-    } else {
-      activeCols.delete(key);
-    }
-    applySort();
-  });
-});
 
 document.addEventListener('click', ev => {
-  const dirBtn = ev.target.closest('.dirbtn[data-col]');
-  if (dirBtn) {
-    const key = dirBtn.dataset.col;
-    if (activeCols.has(key)) activeCols.set(key, !activeCols.get(key));
-    applySort();
-    return;
-  }
-  const seqLink = ev.target.closest('.seg a[data-sort]');
-  if (seqLink) {
+  const sortLink = ev.target.closest('.seg a[data-sort], .sortth');
+  if (sortLink) {
     ev.preventDefault();
-    activeCols.clear();
-    const newSort = new URL(seqLink.href, location.href).searchParams.get('sort');
+    const newSort = new URL(sortLink.href, location.href).searchParams.get('sort');
     params.set('sort', newSort);
     history.replaceState(null, '', location.pathname + '?' + params);
-    updateSortBar();
+    updateSortBar(newSort);
     refresh();
     return;
   }
