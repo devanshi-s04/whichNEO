@@ -618,6 +618,53 @@ def test_row_rejection_reasons():
           pipeline.row_rejections(r5, far_future) == [])
 
 
+def test_replay_ts_never_takes_the_map_down():
+    """?ts= must never turn /skymap.svg into a 500.
+
+    float() accepting a value does not mean datetime can represent it:
+    ?ts=99999999999999 parsed fine and then raised out of localt() building
+    the response header -- "year 3170843 is out of range" -- on a public,
+    unauthenticated endpoint the page polls every 20 seconds. nan and inf
+    slipped through the same way.
+    """
+    import app
+    now = time.time()
+
+    check("a live request has no timestamp", app._replay_ts(None) is None)
+    check("an empty value is live", app._replay_ts("") is None)
+
+    ok = now - 3600
+    got = app._replay_ts(str(ok))
+    check("an instant inside the window is honoured",
+          got is not None and abs(got - ok) < 1e-6, got)
+
+    for bad, why in (("99999999999999", "the original crash"),
+                     ("-99999999999999", "far past"),
+                     ("nan", "not a number"),
+                     ("inf", "infinite"),
+                     ("-inf", "negative infinite"),
+                     ("1e308", "enormous but finite"),
+                     ("banana", "not a number at all"),
+                     ("", "empty")):
+        check("%-16s -> live, not a crash (%s)" % (bad, why),
+              app._replay_ts(bad) is None, app._replay_ts(bad))
+
+    # Anything accepted must survive the calls that previously blew up.
+    for offset in (0, -3600, 3600, -86400, 86400):
+        v = app._replay_ts(str(now + offset))
+        if v is None:
+            continue
+        try:
+            app.localt(v), app._tzabbr(v)
+            fine = True
+        except Exception as e:
+            fine = "%s: %s" % (type(e).__name__, e)
+        check("accepted ts %+7ds renders a header" % offset, fine is True, fine)
+
+    check("beyond the window falls back to live",
+          app._replay_ts(str(now + 2 * app._REPLAY_WINDOW_S)) is None)
+
+
 def test_skymap_orientation():
     """North up, east right, south down, west left.
 
@@ -1369,6 +1416,7 @@ def main():
                test_auth_protects_state_changes,
                test_schema_migration_from_older_db,
                test_ranking_bounds, test_row_rejection_reasons,
+               test_replay_ts_never_takes_the_map_down,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
                test_priority_bump_is_fully_gone,
