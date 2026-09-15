@@ -83,8 +83,6 @@
       {% endif %}
       {% if r.observed %}<button name="action" value="unobserved">undo</button>
       {% else %}<button name="action" value="observed">done</button>{% endif %}
-      <button name="action" value="up" title="Raise priority">&uarr;</button>
-      <button name="action" value="down" title="Lower priority">&darr;</button>
       {% if r.hidden %}<button name="action" value="restore">restore</button>
       {% else %}<button name="action" value="hide">hide</button>{% endif %}
     </form>
