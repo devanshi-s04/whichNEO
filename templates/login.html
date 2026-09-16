@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in &mdash; WhichNEO</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+<div class="top">
+  <div class="brand">
+    <h1>Which<b>NEO</b></h1>
+    <div class="where">L01 &middot; TI&#268;AN STATION, VI&#352;NJAN</div>
+  </div>
+</div>
+
+<div class="authbox">
+  <h2>Sign in</h2>
+  <p class="cap">The board is open to read without an account. Marking a target
+    done, hiding one, or anything else that changes what the next observer
+    sees, needs one &mdash; so the change has a name against it.</p>
+
+  {% if error %}<p class="autherr">{{ error }}</p>{% endif %}
+
+  <form method="post" action="{{ url_for('login') }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label for="username">Username</label>
+    <input id="username" name="username" value="{{ username }}"
+           autocomplete="username" autocapitalize="none" autofocus required>
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password"
+           autocomplete="current-password" required>
+
+    <button class="primary" type="submit">Sign in</button>
+  </form>
+
+  <p class="cap alt"><a href="{{ url_for('forgot') }}">Forgot your password?</a></p>
+  {% if config.ALLOW_SIGNUP %}
+  <p class="cap alt">No account?
+    <a href="{{ url_for('register', next=next) }}">Create one</a>.</p>
+  {% endif %}
+  <p class="cap alt"><a href="{{ url_for('index') }}">&larr; Back to the board</a></p>
+</div>
+
+</div>
+</body>
+</html>

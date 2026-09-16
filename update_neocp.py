@@ -126,7 +126,15 @@ def run_update(conn, source=None):
         try:
             db.archive_night(conn, outgoing_night)
         except Exception:
+            # Logged and swallowed: a failed archive costs a night of replay,
+            # and taking the updater down over it would cost the board. But it
+            # is silent by the same token, so the first real rollover after
+            # this ships is worth watching in the log rather than assuming.
             logging.exception("failed to archive night %s", outgoing_night)
+    # Billed as its own stage rather than folded into fetch_list: archiving
+    # serialises every observable target's whole track, and hiding that inside
+    # a network timing is how a slow one becomes impossible to spot.
+    mark("archive")
 
     raw = open(source).read() if source else neocp.fetch_neocp()
     targets = neocp.parse_neocp(raw)
@@ -154,9 +162,9 @@ def run_update(conn, source=None):
     fresh = ephemeris.fetch_many(t["desig"] for t in stale)
     mark("fetch_ephemerides")
 
-    # Auxiliary pages, only for objects we just refetched. Two more requests
-    # each, so they run through the same bounded pool -- done sequentially a
-    # cold start spends over a minute here.
+    # Auxiliary pages, only for objects we just refetched. Three more
+    # requests each, so they run through the same bounded pool -- done
+    # sequentially a cold start spends over a minute here.
     def _aux(t):
         e = fresh.get(t["desig"])
         if e is None:
@@ -167,8 +175,13 @@ def run_update(conn, source=None):
         # One fetch of the astrometry serves both the already-observed check
         # and the discovering observatory.
         obs = ephemeris.observations(e.observations_url) or {}
+        # No altitude floor, scoped only to filling holes in the altitude
+        # plot -- see fetch_gap_fill's own docstring for why this is safe
+        # to loosen here without touching the normal fetch above.
+        gap_fill = ephemeris.fetch_gap_fill(t["desig"])
         return t["desig"], (ephemeris.signature(t), {
             "lines": [r.line for r in e.rows],
+            "gap_fill_lines": [r.line for r in gap_fill.rows],
             # When this was fetched, and how far forward it reaches. Together
             # these are what let is_stale() notice an ephemeris that has run
             # out of night without waiting for new astrometry to arrive.
