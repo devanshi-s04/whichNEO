@@ -246,6 +246,56 @@ def csrf_ok():
     return hmac.compare_digest(sent, held)
 
 
+# --- password-reset tokens --------------------------------------------------
+#
+# No table, on purpose. A reset token is a signed statement, not a stored
+# secret: it carries the account id and a fingerprint of that account's
+# current password hash, both signed with the site key and stamped with a
+# time. Nothing to clean up, nothing to leak at rest, and -- because changing
+# the password changes the hash, which changes the fingerprint -- a token
+# stops working the moment it is used. That is single-use without a table.
+
+RESET_SALT = "whichneo-password-reset"
+
+
+def _serializer():
+    from itsdangerous import URLSafeTimedSerializer
+    return URLSafeTimedSerializer(secret_key(), salt=RESET_SALT)
+
+
+def _hash_fingerprint(password_hash):
+    import hashlib
+    # A digest, never the hash itself: the token travels in a URL, through a
+    # mail relay, into an inbox and quite possibly into a log on the way.
+    return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
+
+
+def reset_token(user):
+    return _serializer().dumps({"uid": user["id"],
+                                "fp": _hash_fingerprint(user["password_hash"])})
+
+
+def reset_token_user(conn, token, max_age=None):
+    """The account a reset token names, or None if it is invalid, expired, or
+    already spent."""
+    from itsdangerous import BadSignature, SignatureExpired
+    if max_age is None:
+        max_age = config.RESET_TOKEN_MAX_AGE_S
+    try:
+        data = _serializer().loads(token, max_age=max_age)
+    except (SignatureExpired, BadSignature):
+        return None
+    if not isinstance(data, dict):
+        return None
+    user = db.user_by_id(conn, data.get("uid"))
+    if not user:
+        return None
+    if not hmac.compare_digest(str(data.get("fp", "")),
+                               _hash_fingerprint(user["password_hash"])):
+        return None                       # password already changed since
+    return user
+
+
 # --- transitional basic auth ------------------------------------------------
 
 def _load_basic():

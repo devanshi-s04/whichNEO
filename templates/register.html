@@ -31,12 +31,14 @@
     <p class="hint">2&ndash;32 characters: letters, digits, dot, dash or
       underscore.</p>
 
-    <label for="email">Email <span class="dim">(optional)</span></label>
+    <label for="email">Email
+      <span class="dim">(optional, but worth giving)</span></label>
     <input id="email" name="email" type="email" value="{{ email }}"
            autocomplete="email">
-    <p class="hint">Only used if we ever add password resets. There is no
-      mail relay on this host yet, so leaving it blank costs you nothing
-      today &mdash; and if you forget your password, ask an admin.</p>
+    <p class="hint">The only thing it is used for is resetting your password.
+      Leave it blank and that route is closed to you &mdash; a forgotten
+      password then means asking an admin to run
+      <code>manage.py passwd</code> on epyc. No other mail is ever sent.</p>
 
     <label for="password">Password</label>
     <input id="password" name="password" type="password"

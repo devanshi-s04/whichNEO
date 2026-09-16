@@ -37,6 +37,7 @@
     <button class="primary" type="submit">Sign in</button>
   </form>
 
+  <p class="cap alt"><a href="{{ url_for('forgot') }}">Forgot your password?</a></p>
   {% if config.ALLOW_SIGNUP %}
   <p class="cap alt">No account?
     <a href="{{ url_for('register', next=next) }}">Create one</a>.</p>

@@ -16,6 +16,7 @@ import auth
 import config
 import db
 import ephemeris
+import mailer
 import moonplot
 import observability
 import observatories
@@ -506,6 +507,93 @@ def register():
 
     return render_template("register.html", error=error, username=username,
                            email=email, next=nxt), (200 if error is None else 400)
+
+
+RESET_SUBJECT = "WhichNEO password reset"
+
+RESET_BODY = """\
+Someone asked to reset the password for the WhichNEO account "{username}"
+at {site}.
+
+Open this link within the next {hours} to choose a new one:
+
+    {link}
+
+The link works once. Using it, or letting it expire, makes it useless.
+
+If this was not you, nothing has happened to your account and you can ignore
+this message -- but tell whoever runs the board, because it means somebody
+knows the account exists.
+
+-- WhichNEO, L01 Tican Station, Visnjan Observatory
+"""
+
+
+@app.route("/forgot", methods=["GET", "POST"])
+def forgot():
+    """Ask for a reset link.
+
+    This route answers identically whether or not the account exists: same
+    page, same wording, same timing (the send is threaded). Anything else
+    turns the form into an account-enumeration oracle, which on a board with
+    open sign-up is the one piece of information an attacker cannot get any
+    other way.
+    """
+    if not mailer.available():
+        return render_template(
+            "forgot.html", sent=False,
+            error="This board cannot send email yet, so there is no reset "
+                  "link. Ask an admin to run `manage.py passwd` for you."), 503
+
+    if request.method == "POST":
+        needle = (request.form.get("who") or "").strip()
+        conn = get_conn()
+        try:
+            user = db.user_by_name_or_email(conn, needle)
+            if user and user["email"]:
+                link = (config.SITE_URL.rstrip("/")
+                        + url_for("reset", token=auth.reset_token(user)))
+                hours = config.RESET_TOKEN_MAX_AGE_S // 3600
+                mailer.send(user["email"], RESET_SUBJECT, RESET_BODY.format(
+                    username=user["username"], site=config.SITE_URL, link=link,
+                    hours=f"{hours} hour" + ("s" if hours != 1 else "")))
+            # No else. An account with no email on file, an account that does
+            # not exist, and a successful send all end here the same way.
+        finally:
+            conn.close()
+        return render_template("forgot.html", sent=True)
+
+    return render_template("forgot.html", sent=False)
+
+
+@app.route("/reset/<token>", methods=["GET", "POST"])
+def reset(token):
+    conn = get_conn()
+    try:
+        user = auth.reset_token_user(conn, token)
+        if not user:
+            return render_template(
+                "reset.html", user=None,
+                error="This reset link is expired, already used, or not "
+                      "valid. Ask for a new one."), 400
+
+        error = None
+        if request.method == "POST":
+            password = request.form.get("password") or ""
+            error = auth.password_error(password, request.form.get("confirm"))
+            if error is None:
+                db.update_password(conn, user["id"],
+                                   auth.hash_password(password))
+                db.touch_login(conn, user["id"])
+                # Signed in straight away: the person holding this link has
+                # just proved they control the address on file, which is the
+                # same proof the login form asks for.
+                auth.start_session(db.user_by_id(conn, user["id"]))
+                return redirect(url_for("index"))
+        return render_template("reset.html", user=user, error=error), (
+            200 if error is None else 400)
+    finally:
+        conn.close()
 
 
 @app.post("/logout")
