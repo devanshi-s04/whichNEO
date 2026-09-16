@@ -150,13 +150,14 @@ def cmd_invite(conn, args):
         print(f"created {user['username']}"
               + (" (admin)" if args.admin else ""))
 
-    link = (config.SITE_URL.rstrip("/") + "/reset/" + auth.reset_token(user))
-    hours = config.RESET_TOKEN_MAX_AGE_S // 3600
+    link = (config.SITE_URL.rstrip("/")
+            + "/reset/" + auth.reset_token(user, kind="invite"))
+    window = auth.lifetime_phrase("invite")
     body = (f"You have a WhichNEO account on the L01 target board at "
             f"{config.SITE_URL}.\n\n"
             f'Username: {user["username"]}\n\n'
-            f"Choose a password here, within the next {hours} hour"
-            f"{'s' if hours != 1 else ''}:\n\n    {link}\n\n"
+            f"Choose a password here, within the next {window}:\n\n"
+            f"    {link}\n\n"
             "The link works once. If it expires, ask for another.\n\n"
             "-- WhichNEO, L01 Tican Station, Visnjan Observatory\n")
     try:
@@ -170,7 +171,7 @@ def cmd_invite(conn, args):
               f"{user['username']} --resend", file=sys.stderr)
         return 1
     print(f"invitation sent to {user['email']} ({mid})")
-    print(f"good for {hours} hour{'s' if hours != 1 else ''}, once.")
+    print(f"good for {window}, once.")
     return 0
 
 

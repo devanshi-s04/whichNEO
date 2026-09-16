@@ -298,5 +298,14 @@ SMTP_TIMEOUT_S = 20
 # not a standing key to the account.
 RESET_TOKEN_MAX_AGE_S = 3600
 
+# An invitation is a different situation from a reset and needs a different
+# window. A reset is asked for by someone sitting at the page, waiting; an
+# hour is generous. An invitation is pushed at someone who was not expecting
+# it, and the clock starts when it is minted, not when it is read -- so an
+# hour means anyone invited while they are asleep, or during a mail deferral,
+# gets a link that is already dead when they open it, and no way to tell that
+# from a broken board.
+INVITE_TOKEN_MAX_AGE_S = 86400
+
 UPDATE_INTERVAL_S = 300
 WEB_POLL_INTERVAL_S = 20
