@@ -278,6 +278,14 @@ body {
 }
 .chip:hover { color: var(--ink); border-color: var(--faint); }
 .chip.on { color: var(--amber); border-color: rgba(240,166,60,.4); }
+/* The plan-sync button is a <button> wearing .chip, which an <a> does not
+   need: a button brings its own font and cursor from the user agent. */
+button.chip { font-family: inherit; cursor: pointer; appearance: none; }
+button.chip:disabled { cursor: default; opacity: .5; }
+button.chip:disabled:hover { color: var(--muted); border-color: var(--line); }
+.syncstatus { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.syncstatus.bad { color: var(--no); }
+
 /* ---------- range filters dropdown ---------- */
 .filters-dd { position: relative; }
 .filters-dd > summary {

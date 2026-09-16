@@ -2149,6 +2149,70 @@ def test_altitude_plot():
     check("the legend moves to the clearer corner for a setting target",
           legend_x(setting) > legend_x(rising),
           (legend_x(setting), legend_x(rising)))
+def test_plan_sync_button_and_the_toolbar_it_merged_past():
+    """The plan-sync control renders, and nothing it merged past regressed.
+
+    This branch was cut 21 commits back and its version of the toolbar still
+    had the one-way `hidden=1` chip that #25 fixed, plus the plan-file link
+    that #25 moved into the header. Resolving that hunk by taking its side
+    would have quietly undone both -- a chip that can be clicked on and never
+    off, and two plan-file links. Neither raises; both just look like someone
+    else's styling bug. Hence checking for them here rather than trusting the
+    merge.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+        page = c.get("/").data.decode()
+
+        check("the sync button renders", 'id="planSyncBtn"' in page)
+        check("so does its status label", 'id="planSyncStatus"' in page)
+        check("it sits with the plan file it syncs",
+              page.index('class="plan-btn"') < page.index('id="planSyncBtn"')
+              < page.index('class="live"'))
+
+        # Four call sites, all wanted: on connect, on resume, on load, and
+        # once per poll. A fifth would mean the refresh hook got duplicated
+        # by the merge, which would double every write.
+        check("syncPlanNow is called from exactly four places",
+              page.count("await syncPlanNow();") == 4,
+              page.count("await syncPlanNow();"))
+
+        # The regressions this merge could have reintroduced.
+        check("exactly one plan-file link on the page",
+              len(re.findall(r'<a[^>]+href="/plan"', page)) == 1,
+              re.findall(r'<a[^>]+href="/plan"', page))
+        # The round trip, not the markup. A page with the chip OFF correctly
+        # contains hidden=1 -- that is the link that turns it on -- so
+        # grepping for that string proves nothing. What the old bug got wrong
+        # is the other direction: once on, it still pointed at hidden=1 and
+        # there was no way back.
+        def chip_link(html):
+            m = re.search(r'<a class="chip[^"]*"[^>]*href="([^"]+)"[^>]*>hidden<',
+                          html)
+            return m.group(1) if m else None
+
+        off_link = chip_link(page)
+        on_link = chip_link(c.get("/?hidden=1").data.decode())
+        check("off, the chip offers to turn hidden on",
+              off_link is not None and "hidden=1" in off_link, off_link)
+        check("on, the chip offers to turn it back off",
+              on_link is not None and "hidden=0" in on_link, on_link)
+
+        check("the plan route it syncs from still exists",
+              c.get("/plan").status_code in (200, 404))
+    finally:
+        config.DB_PATH = prev_db
+        importlib.reload(appmod)
+
+
 def test_done_targets_stay_in_the_list():
     """Marking a target done must not remove it from the board.
 
@@ -2327,6 +2391,7 @@ def main():
                test_plan_file_never_publishes_a_stale_pointing_line,
                test_altitude_plot,
                test_moon_phase_geometry, test_ephemeris_track_matches_row,
+               test_plan_sync_button_and_the_toolbar_it_merged_past,
                test_done_targets_stay_in_the_list,
                test_done_target_is_green_on_the_sky_map,
                test_interpolate_clamps_to_the_right_end,
