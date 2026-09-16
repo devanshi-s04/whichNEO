@@ -172,8 +172,10 @@ def run_update(conn, source=None):
         # One fetch serves both: the spread feeds the filter cascade, the
         # points let the detail page draw the uncertainty map itself.
         pts = ephemeris.offsets(e.offsets_url)
-        # One fetch of the astrometry serves both the already-observed check
-        # and the discovering observatory.
+        # One fetch of the astrometry serves the already-observed check, the
+        # discovering observatory, and -- since the records were being parsed
+        # and thrown away anyway -- the records themselves, which are what
+        # ds42 scores and the only copy we will ever have of them.
         obs = ephemeris.observations(e.observations_url) or {}
         # No altitude floor, scoped only to filling holes in the altitude
         # plot -- see fetch_gap_fill's own docstring for why this is safe
@@ -196,6 +198,10 @@ def run_update(conn, source=None):
             "observed_from_site": obs.get("observed_from_site"),
             "discovery_code": obs.get("discovery_code"),
             "obs_codes": obs.get("codes"),
+            # The raw 80-column astrometry. Kept because it is unrecoverable
+            # once MPC drops the object from NEOCP, and because it is ds42's
+            # input. ~0.8 KB per object, ~62 KB a night. See ds42.md.
+            "obs_records": obs.get("records"),
             "error": e.error,
         })
 
