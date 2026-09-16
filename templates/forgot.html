@@ -24,8 +24,7 @@
        the account exists without telling a stranger the same thing. #}
     <p class="cap">If that matches an account with an email address on file,
       a reset link is on its way. It is good for
-      {{ (config.RESET_TOKEN_MAX_AGE_S // 3600) }} hour{{ 's' if
-      (config.RESET_TOKEN_MAX_AGE_S // 3600) != 1 }} and works once.</p>
+      {{ lifetime_phrase('reset') }} and works once.</p>
     <p class="cap">Nothing arriving? An account with no email on file cannot
       be reset this way &mdash; ask an admin to run
       <code>manage.py passwd</code> instead.</p>

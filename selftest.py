@@ -1011,6 +1011,88 @@ def test_invite_creates_an_account_nobody_can_sign_into():
         config.DB_PATH = prev_db
 
 
+def test_invitations_outlive_a_reset_link():
+    """An invitation must survive being read the next morning.
+
+    A reset is asked for by someone sitting at the page waiting. An invitation
+    is pushed at someone who was not expecting it, and the clock starts when
+    it is minted, not when it is read -- so on one shared hour, anyone invited
+    while they were asleep opens a dead link, with nothing to distinguish that
+    from a broken board.
+    """
+    import tempfile
+    import time as _time
+
+    import auth
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        db.create_user(conn, "ana", auth.hash_password("first-password-1"),
+                       "ana@example.org")
+        user = db.user_by_name(conn, "ana")
+
+        check("an invitation lasts longer than a reset",
+              auth.token_lifetime("invite") > auth.token_lifetime("reset"))
+        check("an invitation lasts at least a night",
+              auth.token_lifetime("invite") >= 12 * 3600)
+
+        invite = auth.reset_token(user, kind="invite")
+        reset = auth.reset_token(user)
+        check("both kinds work when fresh",
+              auth.reset_token_user(conn, invite) is not None
+              and auth.reset_token_user(conn, reset) is not None)
+
+        # The case that bit: read two hours after it was sent.
+        real = _time.time
+        _time.time = lambda: real() + 2 * 3600
+        try:
+            check("a reset link is dead after two hours",
+                  auth.reset_token_user(conn, reset) is None)
+            check("an invitation is still good",
+                  auth.reset_token_user(conn, invite) is not None)
+        finally:
+            _time.time = real
+
+        _time.time = lambda: real() + auth.token_lifetime("invite") + 60
+        try:
+            check("but an invitation does expire eventually",
+                  auth.reset_token_user(conn, invite) is None)
+        finally:
+            _time.time = real
+
+        # The kind decides the lifetime, so it must not be editable by whoever
+        # holds the link -- otherwise an hour becomes a day for the asking.
+        forged = auth.reset_token(user, kind="invite")
+        tampered = reset.split(".")[0] + "." + ".".join(forged.split(".")[1:])
+        check("a token cannot be re-labelled as an invitation",
+              auth.reset_token_user(conn, tampered) is None)
+
+        # Tokens minted before invitations existed carry no kind at all.
+        from itsdangerous import URLSafeTimedSerializer
+        legacy = URLSafeTimedSerializer(
+            auth.secret_key(), salt=auth.RESET_SALT).dumps(
+                {"uid": user["id"],
+                 "fp": auth._hash_fingerprint(user["password_hash"])})
+        check("a token with no kind still works",
+              auth.reset_token_user(conn, legacy) is not None)
+        _time.time = lambda: real() + 2 * 3600
+        try:
+            check("and is treated as the shorter reset, not the longer invite",
+                  auth.reset_token_user(conn, legacy) is None)
+        finally:
+            _time.time = real
+
+        check("the wording matches the clock",
+              auth.lifetime_phrase("reset") == "1 hour"
+              and auth.lifetime_phrase("invite") == "1 day")
+        conn.close()
+    finally:
+        config.DB_PATH = prev_db
+
+
 def test_mailer_builds_a_sane_message():
     """The parts of a message that decide whether it is delivered or filed as
     spam, checked without sending anything."""
@@ -2032,6 +2114,7 @@ def main():
                test_observer_state_migration_keeps_every_mark,
                test_password_reset_by_email,
                test_invite_creates_an_account_nobody_can_sign_into,
+               test_invitations_outlive_a_reset_link,
                test_mailer_builds_a_sane_message,
                test_login_throttle,
                test_secret_key_is_stable_and_private,

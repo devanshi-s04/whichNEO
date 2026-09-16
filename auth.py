@@ -270,23 +270,67 @@ def _hash_fingerprint(password_hash):
     return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
 
 
-def reset_token(user):
-    return _serializer().dumps({"uid": user["id"],
+def token_lifetime(kind):
+    """How long a link of this kind is good for.
+
+    Two kinds, because they are different situations. A reset is asked for by
+    someone sitting at the page waiting for it. An invitation is pushed at
+    someone who was not expecting it, and the clock starts when it is minted
+    rather than when it is read.
+    """
+    return (config.INVITE_TOKEN_MAX_AGE_S if kind == "invite"
+            else config.RESET_TOKEN_MAX_AGE_S)
+
+
+def lifetime_phrase(kind):
+    """"24 hours" / "1 hour", for saying in an email what the clock is."""
+    seconds = token_lifetime(kind)
+    if seconds >= 86400 and seconds % 86400 == 0:
+        n, unit = seconds // 86400, "day"
+    elif seconds >= 3600:
+        n, unit = seconds // 3600, "hour"
+    else:
+        n, unit = max(1, seconds // 60), "minute"
+    return f"{n} {unit}" + ("s" if n != 1 else "")
+
+
+def reset_token(user, kind="reset"):
+    """A signed link for this account. `kind` selects the lifetime.
+
+    The kind rides inside the signature rather than beside it, so it cannot be
+    edited into "invite" by whoever is holding the link to buy themselves a
+    day.
+    """
+    return _serializer().dumps({"uid": user["id"], "k": kind,
                                 "fp": _hash_fingerprint(user["password_hash"])})
 
 
 def reset_token_user(conn, token, max_age=None):
     """The account a reset token names, or None if it is invalid, expired, or
-    already spent."""
+    already spent.
+
+    `max_age` overrides the kind's own lifetime; tests use it, routes do not.
+    """
     from itsdangerous import BadSignature, SignatureExpired
-    if max_age is None:
-        max_age = config.RESET_TOKEN_MAX_AGE_S
+    # Unsealed at the longest lifetime we ever issue, then aged against the
+    # one its own kind is entitled to. The alternative -- reading the kind
+    # before checking the signature -- would mean trusting an unverified
+    # field to decide how long to trust it for.
+    ceiling = max(config.RESET_TOKEN_MAX_AGE_S, config.INVITE_TOKEN_MAX_AGE_S)
     try:
-        data = _serializer().loads(token, max_age=max_age)
+        data, issued = _serializer().loads(
+            token, max_age=max_age if max_age is not None else ceiling,
+            return_timestamp=True)
     except (SignatureExpired, BadSignature):
         return None
     if not isinstance(data, dict):
         return None
+    if max_age is None:
+        # Tokens minted before invitations had their own lifetime carry no
+        # kind, and a reset is the safer thing to assume for them.
+        age = time.time() - issued.timestamp()
+        if age > token_lifetime(data.get("k", "reset")):
+            return None
     user = db.user_by_id(conn, data.get("uid"))
     if not user:
         return None

@@ -56,7 +56,8 @@ def inject_config():
     return {"config": config, "tzname": _tzabbr(), "ranking": ranking,
             "current_user": auth.current_user(),
             "csrf_token": auth.csrf_token,
-            "min_password": auth.MIN_PASSWORD}
+            "min_password": auth.MIN_PASSWORD,
+            "lifetime_phrase": auth.lifetime_phrase}
 
 
 def _tzabbr(ts=None):
@@ -553,10 +554,9 @@ def forgot():
             if user and user["email"]:
                 link = (config.SITE_URL.rstrip("/")
                         + url_for("reset", token=auth.reset_token(user)))
-                hours = config.RESET_TOKEN_MAX_AGE_S // 3600
                 mailer.send(user["email"], RESET_SUBJECT, RESET_BODY.format(
                     username=user["username"], site=config.SITE_URL, link=link,
-                    hours=f"{hours} hour" + ("s" if hours != 1 else "")))
+                    hours=auth.lifetime_phrase("reset")))
             # No else. An account with no email on file, an account that does
             # not exist, and a successful send all end here the same way.
         finally:
