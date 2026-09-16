@@ -262,5 +262,50 @@ LOG_PATH = os.path.join(DATA_DIR, "update.log")
 PLAN_DIR = os.path.join(BASE_DIR, "plans")
 WRITE_NIGHTLY_PLAN = True
 
+# --- Accounts ----------------------------------------------------------------
+# Marks the session cookie Secure. Leave it off while the dome reaches the
+# board over plain http://epyc:12600 -- a Secure cookie is simply not sent on
+# an http connection, so turning this on early means nobody at the observatory
+# can log in, with no error to explain why. Turn it on when every route in
+# is https (WHICHNEO_HTTPS=1 in the environment does the same).
+REQUIRE_HTTPS = os.environ.get("WHICHNEO_HTTPS", "") not in ("", "0", "no")
+
+# Open self-service sign-up. The board is a small collaboration, not a public
+# service; if it ever attracts nuisance registrations, set this false and
+# create accounts with `python3 manage.py adduser <name>`.
+ALLOW_SIGNUP = True
+
+# Where the board answers from the outside. Password-reset links are absolute
+# URLs in an email, so they cannot be derived from the request the way every
+# other link on the site can -- a link built from a request to
+# http://epyc:12600 is useless in somebody's inbox.
+SITE_URL = os.environ.get("WHICHNEO_SITE_URL", "https://whichneo.juriclab.org")
+
+# --- Outgoing mail ------------------------------------------------------------
+# The relay at infra.juriclab.org. The password is NOT here: it comes from
+# WHICHNEO_SMTP_PASSWORD or data/smtp_password, both outside the repository.
+# With no password configured the site runs exactly as before, minus the
+# reset link.
+SMTP_HOST = os.environ.get("WHICHNEO_SMTP_HOST", "mail.infra.juriclab.org")
+SMTP_PORT = int(os.environ.get("WHICHNEO_SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("WHICHNEO_SMTP_USER", "whichneo@infra.juriclab.org")
+SMTP_FROM = os.environ.get("WHICHNEO_SMTP_FROM", "whichneo@infra.juriclab.org")
+SMTP_STARTTLS = True
+SMTP_TIMEOUT_S = 20
+
+# How long a password-reset link stays good. Long enough to survive a night
+# shift and a slow mail queue, short enough that a link left in an inbox is
+# not a standing key to the account.
+RESET_TOKEN_MAX_AGE_S = 3600
+
+# An invitation is a different situation from a reset and needs a different
+# window. A reset is asked for by someone sitting at the page, waiting; an
+# hour is generous. An invitation is pushed at someone who was not expecting
+# it, and the clock starts when it is minted, not when it is read -- so an
+# hour means anyone invited while they are asleep, or during a mail deferral,
+# gets a link that is already dead when they open it, and no way to tell that
+# from a broken board.
+INVITE_TOKEN_MAX_AGE_S = 86400
+
 UPDATE_INTERVAL_S = 300
 WEB_POLL_INTERVAL_S = 20

@@ -11,6 +11,12 @@
   <td class="l nm">
     <a href="{{ url_for('target_detail', desig=r.desig) }}">{{ r.desig }}</a>
     {% if r.is_new %} <span class="pill new">new</span>{% endif %}
+    {# Observer state is per account, so a target another observer has already
+       shot still sits in your list looking outstanding. This is the only thing
+       standing between that and two twenty-minute integrations on the same
+       object, so it is on the designation rather than tucked in the actions. #}
+    {% if r.others_observed %} <span class="pill byother"
+        title="Already marked done by {{ r.others_names }}. Their marks are their own &mdash; this target is still outstanding on your list.">done by {{ r.others_names }}</span>{% endif %}
     {% if r.crosscheck and not r.crosscheck.ok %} <span class="pill xc">xcheck</span>{% endif %}
   </td>
 
@@ -77,6 +83,7 @@
 
   <td>
     <form method="post" action="{{ url_for('mark', desig=r.desig) }}" class="acts">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
       {% if r.plan_block %}
       <button type="button" class="ghost" data-plan="{{ r.desig }}"
               title="Show this target's plan entry">plan</button>

@@ -5,8 +5,10 @@ rendering stays fast. The updater has already done all the work.
 """
 
 import json
+import math
+import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -14,6 +16,7 @@ import auth
 import config
 import db
 import ephemeris
+import mailer
 import moonplot
 import observability
 import observatories
@@ -22,6 +25,20 @@ import skymap
 import uncertainty
 
 app = Flask(__name__)
+app.secret_key = auth.secret_key()
+
+# A session that expires overnight is a session that expires mid-observation.
+# Thirty days, refreshed on each request, so an observer who logged in at the
+# start of the season is still logged in at the end of it.
+app.permanent_session_lifetime = timedelta(days=30)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,       # JavaScript has no business reading it
+    SESSION_COOKIE_SAMESITE="Lax",      # second line of defence behind CSRF
+    # Secure would be right for whichneo.juriclab.org and wrong for
+    # http://epyc:12600, which is how the dome actually reaches the board --
+    # a Secure cookie there is simply never sent, and nobody can log in.
+    SESSION_COOKIE_SECURE=bool(config.REQUIRE_HTTPS),
+)
 
 
 try:
@@ -36,7 +53,11 @@ def inject_config():
     """Templates read limits and the horizon mask straight from config, and
     the sortable-column registry straight from ranking so the sort bar and
     the sort logic never drift apart."""
-    return {"config": config, "tzname": _tzabbr(), "ranking": ranking}
+    return {"config": config, "tzname": _tzabbr(), "ranking": ranking,
+            "current_user": auth.current_user(),
+            "csrf_token": auth.csrf_token,
+            "min_password": auth.MIN_PASSWORD,
+            "lifetime_phrase": auth.lifetime_phrase}
 
 
 def _tzabbr(ts=None):
@@ -78,10 +99,34 @@ def get_conn():
     return conn
 
 
+def viewer_id():
+    """Whose observer state this request sees.
+
+    A signed-out visitor gets None, not 0: 0 is the shared basic-auth bucket,
+    a real set of marks made by a real person, and a stranger reading the
+    board should not inherit them as their own.
+    """
+    user = auth.current_user()
+    return user["id"] if user else None
+
+
+def writer_id():
+    """Whose observer state this request writes. 0 means the shared
+    credential -- a write nobody's name is on."""
+    user = auth.current_user()
+    return user["id"] if user else 0
+
+
 def load_sorted(conn, show_observed=False, show_hidden=False, mode=None,
-                 range_filters=None):
+                range_filters=None):
+    # Both sides of the merge changed this function, for unrelated reasons:
+    # main narrowed observer state to the viewing account, this branch added
+    # the range filters. Filter before sorting -- sorting a set you are about
+    # to discard most of is wasted work, and the compound sort is the
+    # expensive half.
     rows = db.load_targets(conn, include_hidden=show_hidden,
-                           include_observed=show_observed)
+                           include_observed=show_observed,
+                           user_id=viewer_id())
     rows = ranking.apply_range_filters(rows, range_filters)
     return ranking.sort_targets(rows, mode)
 
@@ -184,6 +229,7 @@ def night_strip(rows, max_lanes=16):
     return {
         "start": localt(start), "end": localt(end),
         "start_ut": utct(start), "end_ut": utct(end),
+        "start_ts": start, "end_ts": end,
         "hours": ticks,
         "lanes": lanes,
         "now_pct": round(pct(now), 2) if start <= now <= end else None,
@@ -219,6 +265,42 @@ def sky_view(conn, rows, now=None):
         "flagged": sum(1 for m in marks if m["up"] and m["mask"]),
         "total": len(shown),
     }
+
+
+def archived_sky_view(conn, archived, now=None):
+    """The all-sky map for a night that has already ended.
+
+    Same rendering pipeline as sky_view(), sourced from night_archive
+    instead of the live tables -- those get rewritten every cycle and
+    pruned as objects roll off NEOCP, so nothing about a past night
+    survives there once the next one starts.
+
+    Takes an already-loaded archive rather than a night label, because the
+    caller has to load it anyway to know the night's bounds, and the payload
+    is a JSON blob worth parsing once per request rather than twice.
+
+    Green means the same thing here as on the live board, which is why the
+    archive stores who observed each target rather than a single flag: to a
+    signed-in observer it means "you shot this", and to a signed-out visitor,
+    for whom there is no "you", it falls back to "somebody did".
+    """
+    if archived is None:
+        return None
+    now = now if now is not None else archived["end_ts"]
+    me = auth.current_user()
+    rows = []
+    for t in archived["targets"]:
+        observers = t.get("observers") or []
+        mine = (me["username"] in observers) if me else bool(t["observed"])
+        rows.append({"desig": t["desig"], "observed": mine,
+                     "vmag": t["vmag"], "score": t["score"]})
+    tracks = {t["desig"]: ephemeris.track(t["lines"]) for t in archived["targets"]}
+    marks = skymap.target_marks(rows, tracks, now)
+    try:
+        moon = observability.moon_state(now)
+    except Exception:
+        moon = None                       # never take the board down for this
+    return {"svg": skymap.render_svg(marks, moon, localt=localt), "used": now}
 
 
 def true_now(conn, desig, now=None):
@@ -264,25 +346,137 @@ def index():
     try:
         rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["range_filters"])
         upcoming = pick_upcoming(rows)
+        strip = night_strip(rows)
+        archived_nights = db.list_archived_nights(conn)
+        for n in archived_nights:
+            n["start_label"] = localt(n["start_ts"])
+            n["end_label"] = localt(n["end_ts"])
+
+        # Bounds the replay slider opens with. Tonight's own window when
+        # there is one; otherwise the most recently archived night, so the
+        # slider is still useful before tonight's targets are up, or before
+        # the first update cycle of a fresh night has run at all.
+        if strip:
+            replay_default = {"night": "", "start_ts": strip["start_ts"],
+                              "end_ts": strip["end_ts"],
+                              "start_label": strip["start"], "end_label": strip["end"]}
+        elif archived_nights:
+            latest = archived_nights[0]
+            replay_default = dict(latest)
+        else:
+            replay_default = None
+
         return render_template(
-            "index.html", rows=rows, strip=night_strip(rows),
+            "index.html", rows=rows, strip=strip,
             upcoming=upcoming, status=status(conn), sky=sky_view(conn, rows),
+            archived_nights=archived_nights, replay_default=replay_default,
             max_score=ranking.max_possible_score(),
             poll_interval=config.WEB_POLL_INTERVAL_S, **v)
     finally:
         conn.close()
 
 
+# How far either side of now the replay slider will honour a timestamp. A
+# night is hours; a year of slack is generous for anything anyone would want
+# to replay, and stays far inside what a clock can represent on any platform.
+_REPLAY_WINDOW_S = 366 * 24 * 3600
+
+
+def _replay_ts(raw, window=None):
+    """?ts= as a timestamp we can actually render, or None meaning live.
+
+    `window` is (start_ts, end_ts) for an archived night, which knows exactly
+    which instants it can draw. Without it the check is "within a year of
+    now", which is right for tonight and wrong for an archive: a night older
+    than that would have every ?ts= rejected and the slider would silently
+    snap to the end with nothing to explain why.
+
+    A value float() accepts is not necessarily one datetime can represent.
+    `?ts=99999999999999` parses fine and then raises out of localt() when the
+    response header is built -- ValueError: year 3170843 is out of range --
+    turning a public, unauthenticated, frequently polled endpoint into a 500.
+    `nan` and `inf` slip through float() the same way.
+
+    The slider only ever sends instants inside the night it is showing, so
+    anything outside a sane window is a typo or a probe. Fall back to live,
+    exactly as a malformed float already did, rather than failing: a wrong
+    query string should not be able to take the map down.
+    """
+    if not raw:
+        return None
+    try:
+        ts = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(ts):
+        return None
+    if window is not None:
+        # An hour of slack each side: the slider's own end stops are the
+        # night's bounds, and rounding a step to the minute can land a
+        # fraction outside them.
+        lo, hi = window[0] - 3600, window[1] + 3600
+        if not (lo <= ts <= hi):
+            return None
+    elif abs(ts - time.time()) > _REPLAY_WINDOW_S:
+        return None
+    try:                       # the clock itself must accept it
+        datetime.fromtimestamp(ts, _TZ)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return ts
+
+
 @app.route("/skymap.svg")
 def skymap_svg():
-    """Just the map, so the page can refresh it without a full reload."""
+    """Just the map, so the page can refresh it without a full reload.
+
+    An optional ?ts=<unix time> draws the map as it stood at that instant
+    instead of live -- the replay slider under "Sky now" uses this to step
+    back through a night, reading the same cached ephemeris tracks the live
+    map already does. No new data collection required: those tracks already
+    span the whole night, not just the instant being shown.
+
+    An optional ?night=<label> instead draws a night that has already ended,
+    from night_archive rather than the live tables -- see archive_night() in
+    db.py for why that archive exists at all: without it, a past night's
+    tracks are gone by the time anyone wants to look back at them.
+    """
     v = _view_args()
+    night = request.args.get("night") or None
     conn = get_conn()
     try:
-        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["range_filters"])
-        return (sky_view(conn, rows)["svg"], 200,
+        if night:
+            archived = db.load_archived_night(conn, night)
+            if archived is None:
+                return f"No archive for night {night}", 404
+            # An archived night knows its own bounds, so scrub against those
+            # rather than against "near enough to now" -- tighter for a recent
+            # night, and the only thing that keeps a year-old one scrubbable
+            # at all once it falls outside _REPLAY_WINDOW_S.
+            ts = _replay_ts(request.args.get("ts"),
+                            window=(archived["start_ts"], archived["end_ts"]))
+            # Range filters deliberately do not apply here, and cannot. The
+            # archive keeps a target's designation, score, magnitude and
+            # track -- not the altitude, motion or moon distance most of the
+            # filters range over, and those were true at a moment that has
+            # passed. Narrowing a past night by tonight's numbers would be a
+            # fiction. The visible consequence is that with a past night
+            # selected the table narrows and the map does not; worth closing
+            # later by hiding the control for a past night, not by inventing
+            # values the archive never held.
+            view = archived_sky_view(conn, archived, now=ts)
+            used = view["used"]
+            svg = view["svg"]
+        else:
+            ts = _replay_ts(request.args.get("ts"))
+            rows = load_sorted(conn, v["show_observed"], v["show_hidden"],
+                               v["mode"], v["range_filters"])
+            used = ts if ts is not None else time.time()
+            svg = sky_view(conn, rows, now=ts)["svg"]
+        return (svg, 200,
                 {"Content-Type": "image/svg+xml; charset=utf-8",
-                 "Cache-Control": "no-store"})
+                 "Cache-Control": "no-store",
+                 "X-Sky-Time": f"{localt(used)} {_tzabbr(used)}"})
     finally:
         conn.close()
 
@@ -339,20 +533,205 @@ def plan_text():
         return f"Could not read {path}: {e}", 500
 
 
+def _safe_next(raw):
+    """Where to go after logging in.
+
+    Only a path on this site. A `next` taken from the query string and handed
+    straight to redirect() is an open redirect: a link to our own login page
+    that lands the observer on somebody else's, wearing our URL as cover.
+    """
+    if not raw or not raw.startswith("/") or raw.startswith("//"):
+        return url_for("index")
+    return raw
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    nxt = _safe_next(request.values.get("next"))
+    if auth.current_user():
+        return redirect(nxt)
+
+    if not auth.HASHING_AVAILABLE:
+        return render_template("login.html", error=auth.NO_HASHING,
+                               username="", next=nxt), 503
+
+    error = None
+    username = (request.form.get("username") or "").strip()
+    if request.method == "POST":
+        if auth.throttled():
+            error = ("Too many failed attempts from this address. "
+                     "Wait a few minutes and try again.")
+        else:
+            conn = get_conn()
+            try:
+                user = db.user_by_name(conn, username)
+                ok, rehashed = (False, None)
+                if user:
+                    ok, rehashed = auth.verify_password(
+                        user["password_hash"], request.form.get("password") or "")
+                if ok:
+                    if rehashed:
+                        db.update_password(conn, user["id"], rehashed)
+                    db.touch_login(conn, user["id"])
+                    auth.start_session(user)
+                    auth.clear_failures()
+                    return redirect(nxt)
+            finally:
+                conn.close()
+            auth.note_failure()
+            # One message for both halves. "No such user" tells a stranger
+            # which names exist, which is the first half of a password guess.
+            error = "That username and password do not match an account."
+
+    return render_template("login.html", error=error, username=username,
+                           next=nxt), (200 if error is None else 401)
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    nxt = _safe_next(request.values.get("next"))
+    if not config.ALLOW_SIGNUP:
+        return render_template("login.html", error="Sign-up is closed.",
+                               username="", next=nxt), 403
+    if not auth.HASHING_AVAILABLE:
+        return render_template("login.html", error=auth.NO_HASHING,
+                               username="", next=nxt), 503
+    if auth.current_user():
+        return redirect(nxt)
+
+    error = None
+    username = (request.form.get("username") or "").strip()
+    email = (request.form.get("email") or "").strip()
+    if request.method == "POST":
+        password = request.form.get("password") or ""
+        error = (auth.username_error(username)
+                 or auth.password_error(password,
+                                        request.form.get("confirm")))
+        if error is None:
+            conn = get_conn()
+            try:
+                uid = db.create_user(conn, username,
+                                     auth.hash_password(password), email)
+                auth.start_session(db.user_by_id(conn, uid))
+                return redirect(nxt)
+            except sqlite3.IntegrityError:
+                error = ("That username or email is already taken."
+                         if email else "That username is already taken.")
+            finally:
+                conn.close()
+
+    return render_template("register.html", error=error, username=username,
+                           email=email, next=nxt), (200 if error is None else 400)
+
+
+RESET_SUBJECT = "WhichNEO password reset"
+
+RESET_BODY = """\
+Someone asked to reset the password for the WhichNEO account "{username}"
+at {site}.
+
+Open this link within the next {hours} to choose a new one:
+
+    {link}
+
+The link works once. Using it, or letting it expire, makes it useless.
+
+If this was not you, nothing has happened to your account and you can ignore
+this message -- but tell whoever runs the board, because it means somebody
+knows the account exists.
+
+-- WhichNEO, L01 Tican Station, Visnjan Observatory
+"""
+
+
+@app.route("/forgot", methods=["GET", "POST"])
+def forgot():
+    """Ask for a reset link.
+
+    This route answers identically whether or not the account exists: same
+    page, same wording, same timing (the send is threaded). Anything else
+    turns the form into an account-enumeration oracle, which on a board with
+    open sign-up is the one piece of information an attacker cannot get any
+    other way.
+    """
+    if not mailer.available():
+        return render_template(
+            "forgot.html", sent=False,
+            error="This board cannot send email yet, so there is no reset "
+                  "link. Ask an admin to run `manage.py passwd` for you."), 503
+
+    if request.method == "POST":
+        needle = (request.form.get("who") or "").strip()
+        conn = get_conn()
+        try:
+            user = db.user_by_name_or_email(conn, needle)
+            if user and user["email"]:
+                link = (config.SITE_URL.rstrip("/")
+                        + url_for("reset", token=auth.reset_token(user)))
+                mailer.send(user["email"], RESET_SUBJECT, RESET_BODY.format(
+                    username=user["username"], site=config.SITE_URL, link=link,
+                    hours=auth.lifetime_phrase("reset")))
+            # No else. An account with no email on file, an account that does
+            # not exist, and a successful send all end here the same way.
+        finally:
+            conn.close()
+        return render_template("forgot.html", sent=True)
+
+    return render_template("forgot.html", sent=False)
+
+
+@app.route("/reset/<token>", methods=["GET", "POST"])
+def reset(token):
+    conn = get_conn()
+    try:
+        user = auth.reset_token_user(conn, token)
+        if not user:
+            return render_template(
+                "reset.html", user=None,
+                error="This reset link is expired, already used, or not "
+                      "valid. Ask for a new one."), 400
+
+        error = None
+        if request.method == "POST":
+            password = request.form.get("password") or ""
+            error = auth.password_error(password, request.form.get("confirm"))
+            if error is None:
+                db.update_password(conn, user["id"],
+                                   auth.hash_password(password))
+                db.touch_login(conn, user["id"])
+                # Signed in straight away: the person holding this link has
+                # just proved they control the address on file, which is the
+                # same proof the login form asks for.
+                auth.start_session(db.user_by_id(conn, user["id"]))
+                return redirect(url_for("index"))
+        return render_template("reset.html", user=user, error=error), (
+            200 if error is None else 400)
+    finally:
+        conn.close()
+
+
+@app.post("/logout")
+def logout():
+    auth.end_session()
+    return redirect(url_for("index"))
+
+
 @app.post("/mark/<desig>")
 @auth.required
 def mark(desig):
     action = request.form.get("action", "observed")
+    uid = writer_id()
     conn = get_conn()
     try:
         if action == "observed":
-            db.set_state(conn, desig, observed=1, observed_at_utc=db.utcnow())
+            db.set_state(conn, desig, uid, observed=1,
+                         observed_at_utc=db.utcnow())
         elif action == "unobserved":
-            db.set_state(conn, desig, observed=0, observed_at_utc=None)
+            db.set_state(conn, desig, uid, observed=0, observed_at_utc=None)
         elif action == "hide":
-            db.set_state(conn, desig, hidden=1)
+            db.set_state(conn, desig, uid, hidden=1)
         elif action == "restore":
-            db.set_state(conn, desig, hidden=0)
+            db.set_state(conn, desig, uid, hidden=0)
         # "up" and "down" are deliberately gone rather than left accepting a
         # request nothing can send: the arrows that produced them are removed,
         # and priority_bump is no longer read by the sort or the score. An
@@ -369,7 +748,8 @@ def mark(desig):
 def target_detail(desig):
     conn = get_conn()
     try:
-        rows = [r for r in db.load_targets(conn, True, True)
+        rows = [r for r in db.load_targets(conn, True, True,
+                                           user_id=viewer_id())
                 if r["desig"] == desig]
         if not rows:
             return f"Unknown target {desig}", 404
