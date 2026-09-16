@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import config
 import db
+import ds42score
 import ephemeris
 import neocp
 import output
@@ -103,6 +104,37 @@ def needs_refetch(entry, target, now):
         return False
     return now - (payload.get("fetched_ts") or 0) > \
         config.EPHEMERIS_REFETCH_BACKOFF_S
+
+
+def _score_new_objects(conn, cache):
+    """Score, with ds42, every cached object that has astrometry and no score.
+
+    One subprocess for the whole batch, never one per object: the model load
+    is 1.5 s of the ~4.8 s it takes to score a full night.
+
+    Entirely best effort. Wrapped so that nothing here -- a missing install, a
+    broken model, a timeout -- can fail an update cycle whose actual job is
+    telling an observer where to point a telescope.
+    """
+    if not ds42score.available():
+        return
+    try:
+        with_records = {d: (payload.get("obs_records") or [])
+                        for d, (_sig, payload) in cache.items()
+                        if payload.get("obs_records")}
+        todo = db.unscored_desigs(conn, list(with_records))
+        if not todo:
+            return
+        batch = {d: with_records[d] for d in todo}
+        scores = ds42score.score_records(batch)
+        if not scores:
+            return
+        written = db.save_ds42_scores(conn, scores, ds42score.provenance())
+        ok = sum(1 for s in scores.values() if s.get("status") == "ok")
+        logging.info("ds42 scored %d new object(s), %d ok, %d stored",
+                     len(scores), ok, written)
+    except Exception:
+        logging.exception("ds42 scoring step failed; continuing")
 
 
 def run_update(conn, source=None):
@@ -216,6 +248,9 @@ def run_update(conn, source=None):
     if new_cache:
         db.save_cache(conn, new_cache)
     cache.update(new_cache)
+
+    _score_new_objects(conn, cache)
+    mark("ds42")
 
     for t in targets:
         if t["cheap_reject"]:

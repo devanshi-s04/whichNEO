@@ -1927,6 +1927,174 @@ def test_cache_schema_forces_one_refetch():
           ephemeris.CACHE_SCHEMA > 3, ephemeris.CACHE_SCHEMA)
 
 
+def test_ds42_score_parsing():
+    """ds42's TSV, including the rows that are not a posterior.
+
+    p_neo comes back as `nan` for an undefined result, and a nan must not
+    reach storage: it survives into SQLite and JSON, and compares false
+    against itself, so a stored nan is a value no query can ever match again.
+    """
+    import ds42score
+
+    tsv = ("object_id\tn_obs\tarc_h\tepoch\tobscode\tV\tp_neo\tlog_lr\tstatus\n"
+           "P12aaaa\t3\t0.2993\t2026-09-13T00:06:47Z\tW94\t19.94\t1\tinf\tok\n"
+           "P12bbbb\t4\t0.4400\t2026-09-13T01:00:00Z\tF51\t20.10\t0.3058\t-1.2\tok\n"
+           "ZTF10G2\t4\t0.1400\t2026-09-13T02:00:00Z\tI41\t21.00\tnan\tnan\tempty_region\n")
+    got = ds42score._parse_scores(tsv)
+
+    check("every row parses", sorted(got) == ["P12aaaa", "P12bbbb", "ZTF10G2"],
+          sorted(got))
+    check("a posterior survives intact",
+          abs(got["P12bbbb"]["p_neo"] - 0.3058) < 1e-9)
+    check("integer-looking p_neo becomes a float",
+          got["P12aaaa"]["p_neo"] == 1.0)
+    check("an undefined posterior stores None, never nan",
+          got["ZTF10G2"]["p_neo"] is None and got["ZTF10G2"]["log_lr"] is None)
+    check("its status says why",
+          got["ZTF10G2"]["status"] == "empty_region")
+    check("the observations ds42 actually used are recorded",
+          got["P12bbbb"]["n_obs"] == 4 and abs(got["P12bbbb"]["arc_h"] - 0.44)
+          < 1e-9)
+    check("the observatory comes across", got["P12aaaa"]["obscode"] == "W94")
+
+    check("a truncated row is skipped, not guessed at",
+          ds42score._parse_scores(
+              "object_id\tn_obs\tp_neo\nP12cccc\t3\n") == {})
+    check("empty input is empty output", ds42score._parse_scores("") == {})
+
+
+def test_ds42_never_breaks_an_update_cycle():
+    """Everything about ds42 is best effort, and this proves it.
+
+    The board's job is telling an observer where to point a telescope. A
+    research score is not worth risking that, which is why ds42 runs as a
+    subprocess rather than an import -- and why every failure below has to
+    come back as an empty result rather than an exception.
+    """
+    import tempfile
+
+    import ds42score
+
+    prev = (config.DS42_ENABLED, config.DS42_BIN, config.DS42_MODEL,
+            config.DS42_TIMEOUT_S)
+    recs = {"P12aaaa": ["x" * 80]}
+    try:
+        config.DS42_ENABLED = False
+        check("disabled means unavailable", not ds42score.available())
+        check("and scoring is a no-op, not an error",
+              ds42score.score_records(recs) == {})
+
+        config.DS42_ENABLED = True
+        config.DS42_BIN = "/nonexistent/ds42"
+        check("a missing binary is unavailable", not ds42score.available())
+        check("and still returns nothing rather than raising",
+              ds42score.score_records(recs) == {})
+
+        config.DS42_BIN = prev[1]
+        config.DS42_MODEL = "/nonexistent/model.csv"
+        check("a missing model is unavailable", not ds42score.available())
+
+        config.DS42_MODEL = prev[2]
+        # A binary that exists and fails, which is the case no amount of
+        # existence-checking catches.
+        broken = os.path.join(tempfile.mkdtemp(), "ds42")
+        with open(broken, "w") as f:
+            f.write("#!/bin/sh\necho 'model parse failed' >&2\nexit 3\n")
+        os.chmod(broken, 0o755)
+        config.DS42_BIN = broken
+        check("a non-zero exit is handled, not raised",
+              ds42score.score_records(recs) == {})
+
+        # And one that hangs.
+        hangs = os.path.join(tempfile.mkdtemp(), "ds42")
+        with open(hangs, "w") as f:
+            f.write("#!/bin/sh\nsleep 30\n")
+        os.chmod(hangs, 0o755)
+        config.DS42_BIN = hangs
+        config.DS42_TIMEOUT_S = 2
+        check("a hang is bounded by the timeout",
+              ds42score.score_records(recs) == {})
+
+        check("no records means no subprocess at all",
+              ds42score.score_records({}) == {}
+              and ds42score.score_records({"P12aaaa": []}) == {})
+    finally:
+        (config.DS42_ENABLED, config.DS42_BIN, config.DS42_MODEL,
+         config.DS42_TIMEOUT_S) = prev
+
+
+def test_ds42_scores_are_stored_once_and_survive_pruning():
+    """The table has to outlive the things that get rewritten around it.
+
+    targets is rebuilt every cycle and prune_cache drops an object the moment
+    it leaves NEOCP -- which is exactly when its score becomes interesting,
+    because that is when we can finally ask whether ds42 was right. A score
+    kept in either place would be deleted at that moment.
+    """
+    import tempfile
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+
+        prov = {"ds42_rev": "a4bc848", "ds42_dirty": False,
+                "model_sha256": "2b9d9d2a", "config": {"variant": "All"}}
+        scores = {
+            "P12aaaa": {"p_neo": 0.75, "log_lr": 1.1, "status": "ok",
+                        "n_obs": 3, "arc_h": 0.3, "obscode": "W94",
+                        "vmag": 20.1},
+            "ZTF10G2": {"p_neo": None, "log_lr": None,
+                        "status": "empty_region", "n_obs": 4, "arc_h": 0.14,
+                        "obscode": "I41", "vmag": 21.0},
+        }
+        check("both scores are written", db.save_ds42_scores(conn, scores, prov) == 2)
+        check("counted", db.count_ds42_scores(conn) == 2)
+
+        got = db.load_ds42_scores(conn)
+        check("the posterior round-trips", got["P12aaaa"]["p_neo"] == 0.75)
+        check("an undefined one stays NULL, not nan",
+              got["ZTF10G2"]["p_neo"] is None)
+        check("provenance is stored with the score",
+              got["P12aaaa"]["ds42_rev"] == "a4bc848"
+              and got["P12aaaa"]["model_sha256"] == "2b9d9d2a"
+              and got["P12aaaa"]["ds42_dirty"] == 0)
+        check("the configuration is stored too",
+              json.loads(got["P12aaaa"]["config_json"]) == {"variant": "All"})
+
+        # Scoring is one-shot. Re-running must not spend the model load, and
+        # must not let a different revision overwrite a recorded one.
+        check("already-scored objects are filtered out",
+              db.unscored_desigs(conn, ["P12aaaa", "ZTF10G2", "P12new"])
+              == ["P12new"])
+        newer = {"P12aaaa": {"p_neo": 0.01, "status": "ok", "n_obs": 9,
+                             "log_lr": 0, "arc_h": 1, "obscode": "F51",
+                             "vmag": 20.0}}
+        db.save_ds42_scores(conn, newer, dict(prov, ds42_rev="deadbee"))
+        after = db.load_ds42_scores(conn)
+        check("a second write never overwrites the first",
+              after["P12aaaa"]["p_neo"] == 0.75
+              and after["P12aaaa"]["ds42_rev"] == "a4bc848")
+
+        # The point of the separate table.
+        conn.execute("INSERT INTO targets (desig) VALUES ('P12aaaa')")
+        conn.commit()
+        db.replace_targets(conn, [])
+        db.prune_cache(conn, [])
+        check("scores survive targets being rewritten and the cache pruned",
+              db.count_ds42_scores(conn) == 2)
+
+        check("an empty batch writes nothing",
+              db.save_ds42_scores(conn, {}, prov) == 0)
+        check("asking about nothing returns nothing",
+              db.unscored_desigs(conn, []) == []
+              and db.load_ds42_scores(conn, []) == {})
+        conn.close()
+    finally:
+        config.DB_PATH = prev_db
+
+
 def test_frame_speed_table():
     """The observatory's own speed table, as given by Luka.
 
@@ -2416,6 +2584,9 @@ def main():
                test_priority_bump_is_fully_gone,
                test_offsets_parse_with_the_fast_motion_flag,
                test_cache_schema_forces_one_refetch,
+               test_ds42_score_parsing,
+               test_ds42_never_breaks_an_update_cycle,
+               test_ds42_scores_are_stored_once_and_survive_pruning,
                test_frame_speed_table,
                test_plan_line_carries_the_frame_instruction,
                test_keepout_wedge,
