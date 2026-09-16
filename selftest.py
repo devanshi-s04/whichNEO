@@ -16,6 +16,7 @@ Run: python3 selftest.py
 import importlib
 import os
 import re
+import sqlite3
 import sys
 import time
 
@@ -464,6 +465,7 @@ def test_auth_protects_state_changes():
     but it has to keep working while Luka's team moves over, so it is tested
     as a first-class path rather than as a leftover."""
     import importlib
+    import tempfile
 
     import app as appmod
 
@@ -474,6 +476,13 @@ def test_auth_protects_state_changes():
 
     import auth
     prev_env = os.environ.get("WHICHNEO_AUTH")
+    # This test marks a target, and until it pointed somewhere else it marked
+    # one in whatever database it found -- which on epyc is the live one. It
+    # left a stray `XYZ` row in the observatory's observer_state every time
+    # anyone ran the suite there. A test must not write to the deployment it
+    # is being run on.
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
     os.environ["WHICHNEO_AUTH"] = "obs:secret"
     try:
         importlib.reload(auth)
@@ -494,6 +503,7 @@ def test_auth_protects_state_changes():
         check("reads remain open even with auth enabled",
               c.get("/status").status_code == 200)
     finally:
+        config.DB_PATH = prev_db
         if prev_env is None:
             os.environ.pop("WHICHNEO_AUTH", None)
         else:
@@ -501,17 +511,37 @@ def test_auth_protects_state_changes():
         importlib.reload(auth)
         importlib.reload(appmod)
 
-    check("shared credential is off when none is configured",
-          not auth.BASIC_ENABLED)
-    # This is the line that changed meaning when accounts arrived. It used to
-    # read `not auth.ENABLED` -- "no password file, so writes are open". A
-    # board on the public internet must not have that state at all: with no
-    # credential file and no account, a write is still refused.
-    check("writes stay protected with no shared credential at all",
-          auth.ENABLED)
-    check("anonymous write refused with no credential configured",
-          appmod.app.test_client().post(
-              "/mark/XYZ", data={"action": "hide"}).status_code == 401)
+    # "No credentials configured" has two sources -- the environment and
+    # data/auth -- and this has to neutralise both. Clearing only the
+    # environment passes on a laptop and fails on epyc, which is the one
+    # machine whose answer matters: it has had a data/auth since the board
+    # went public, so the check asserted something that was simply untrue
+    # there.
+    prev_dir = config.DATA_DIR
+    prev_db = config.DB_PATH
+    scratch = tempfile.mkdtemp()
+    config.DATA_DIR = scratch
+    config.DB_PATH = os.path.join(scratch, "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        check("shared credential is off when none is configured",
+              not auth.BASIC_ENABLED)
+        # This is the line that changed meaning when accounts arrived. It used
+        # to read `not auth.ENABLED` -- "no password file, so writes are
+        # open". A board on the public internet must not have that state at
+        # all: with no credential file and no account, a write is still
+        # refused.
+        check("writes stay protected with no shared credential at all",
+              auth.ENABLED)
+        check("anonymous write refused with no credential configured",
+              appmod.app.test_client().post(
+                  "/mark/XYZ", data={"action": "hide"}).status_code == 401)
+    finally:
+        config.DATA_DIR = prev_dir
+        config.DB_PATH = prev_db
+        importlib.reload(auth)
+        importlib.reload(appmod)
 
 
 def test_accounts():
@@ -1862,7 +1892,44 @@ def test_ephemeris_track_matches_row():
           abs(az - (row.az_mpc + 180.0) % 360.0) < 1e-9, (az, row.az_mpc))
 
 
+def _live_db_fingerprint():
+    """What the deployment's database looks like, for before/after comparison.
+
+    Returns None when there is no database yet -- a fresh clone, which is the
+    normal case off the observatory host.
+    """
+    import hashlib
+
+    path = config.DB_PATH
+    if not os.path.exists(path):
+        return None
+    conn = db.connect(path)
+    try:
+        counts = {}
+        for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "ORDER BY name"):
+            counts[name] = conn.execute(f"SELECT count(*) FROM '{name}'"
+                                        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT * FROM observer_state ORDER BY desig, user_id").fetchall()
+        digest = hashlib.sha256(
+            repr([tuple(r) for r in rows]).encode()).hexdigest()[:16]
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    return counts, digest
+
+
 def main():
+    # The suite runs on epyc, where config.DB_PATH is the observatory's live
+    # database. For years one test marked /mark/XYZ straight into it. Nothing
+    # caught that, because a stray row in observer_state is invisible: the
+    # board joins from `targets`, so a designation that was never on the
+    # NEOCP simply never renders. This is what catches it.
+    live_before = _live_db_fingerprint()
+
     for fn in (test_site, test_horizon_mask, test_analytic_matches_astropy,
                test_neocp_list_parse, test_neocp_info_column_collision,
                test_ephemeris_row, test_ephemeris_azimuth_convention,
@@ -1897,6 +1964,18 @@ def main():
                test_ephemeris_refetched_when_its_window_runs_out):
         print(f"\n{fn.__name__}:")
         fn()
+
+    print("\nno_test_touched_the_live_database:")
+    if live_before is None:
+        check("no deployment database here to protect", True,
+              "config.DB_PATH does not exist")
+    else:
+        after = _live_db_fingerprint()
+        check("the deployment's tables are unchanged",
+              after is not None and after[0] == live_before[0],
+              f"{live_before[0]} -> {after[0] if after else None}")
+        check("no observer's marks were added, changed or removed",
+              after is not None and after[1] == live_before[1])
 
     print()
     if FAILURES:
