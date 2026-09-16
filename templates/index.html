@@ -93,18 +93,28 @@
       and the plan file, and no marker is drawn, for as long as they are
       inside it. Nothing can override it.
     </p>
-    {% if strip %}
+    {% if replay_default %}
     <div class="replay">
       <div class="replay-row">
         <span class="replay-label">Replay</span>
-        <span class="replay-time" id="replayTime">live</span>
+        <span class="replay-time" id="replayTime">{{ 'live' if strip else '' }}</span>
       </div>
-      <input type="range" id="replaySlider" min="{{ strip.start_ts|int }}"
-             max="{{ strip.end_ts|int }}" step="60" value="{{ strip.end_ts|int }}">
+      {% if archived_nights %}
+      <select id="replayNight">
+        {% if strip %}<option value="">Tonight</option>{% endif %}
+        {% for n in archived_nights %}
+        <option value="{{ n.night }}"
+                {{ 'selected' if not strip and loop.first }}>{{ n.night }}</option>
+        {% endfor %}
+      </select>
+      {% endif %}
+      <input type="range" id="replaySlider" min="{{ replay_default.start_ts|int }}"
+             max="{{ replay_default.end_ts|int }}" step="60"
+             value="{{ replay_default.end_ts|int }}">
       <div class="replay-row">
-        <span class="dim">{{ strip.start }}</span>
-        <button type="button" class="ghost" id="replayLive">back to live</button>
-        <span class="dim">{{ strip.end }}</span>
+        <span class="dim" id="replayStart">{{ replay_default.start_label }}</span>
+        {% if strip %}<button type="button" class="ghost" id="replayLive">back to live</button>{% endif %}
+        <span class="dim" id="replayEnd">{{ replay_default.end_label }}</span>
       </div>
     </div>
     {% endif %}
@@ -313,6 +323,12 @@
 const POLL = {{ poll_interval }} * 1000;
 const TZ = {{ tzname|tojson }};
 const params = new URLSearchParams(window.location.search);
+const HAS_LIVE = {{ 'true' if strip else 'false' }};
+const ARCHIVE_BOUNDS = {{ archived_nights|tojson }};
+// replay_default already *is* {night:"", start_ts, end_ts, start_label,
+// end_label} whenever tonight has a window -- same shape as one entry of
+// ARCHIVE_BOUNDS, just for night="".
+const LIVE_BOUNDS = {{ (replay_default if strip else none)|tojson }};
 
 // Which plan entries the observer has opened. Kept across refreshes so a
 // poll never closes something being read mid-slew.
@@ -448,24 +464,35 @@ document.addEventListener('mouseout', ev => {
   if (el) linkHover(el.dataset.desig, false);
 });
 
-// Replaying the sky map. Scrubbing sets replayTs and takes the map out of
-// live polling -- the ephemeris tracks behind it already span the whole
-// night, so this reads the same data the live map does, just at an earlier
-// instant, rather than collecting anything new.
+// Replaying the sky map, live or archived. Touching either control takes
+// the map out of live polling -- replayNight === '' means tonight, anything
+// else names an archived night written by archive_night() at the last
+// rollover. Scrubbing just reads the tracks behind whichever night is
+// selected at an earlier instant; nothing new is collected either way.
 let replayTs = null;
+let replayNight = (ARCHIVE_BOUNDS.length && !HAS_LIVE) ? ARCHIVE_BOUNDS[0].night : '';
 const replaySlider = document.getElementById('replaySlider');
 const replayTimeEl = document.getElementById('replayTime');
 const replayLiveBtn = document.getElementById('replayLive');
+const replayNightSel = document.getElementById('replayNight');
+const replayStartEl = document.getElementById('replayStart');
+const replayEndEl = document.getElementById('replayEnd');
+
+function boundsFor(night) {
+  if (!night) return LIVE_BOUNDS;
+  return ARCHIVE_BOUNDS.find(n => n.night === night) || null;
+}
 
 async function loadSky(ts) {
   const qs = new URLSearchParams(params);
+  if (replayNight) qs.set('night', replayNight);
   if (ts !== null) qs.set('ts', ts);
   const resp = await fetch('/skymap.svg?' + qs.toString());
   const svg = await resp.text();
   const plot = document.getElementById('skyplot');
   if (plot) plot.innerHTML = svg;
   if (replayTimeEl) {
-    replayTimeEl.textContent = ts === null
+    replayTimeEl.textContent = (ts === null && !replayNight)
       ? 'live' : (resp.headers.get('X-Sky-Time') || '');
   }
 }
@@ -476,19 +503,48 @@ if (replaySlider) {
     loadSky(replayTs);
   });
 }
+if (replayNightSel) {
+  replayNightSel.addEventListener('change', () => {
+    replayNight = replayNightSel.value;
+    const b = boundsFor(replayNight);
+    if (b) {
+      replaySlider.min = Math.floor(b.start_ts);
+      replaySlider.max = Math.floor(b.end_ts);
+      replaySlider.value = replaySlider.max;
+      if (replayStartEl) replayStartEl.textContent = b.start_label;
+      if (replayEndEl) replayEndEl.textContent = b.end_label;
+    }
+    replayTs = Number(replaySlider.value);
+    loadSky(replayTs);
+  });
+}
 if (replayLiveBtn) {
   replayLiveBtn.addEventListener('click', () => {
     replayTs = null;
-    replaySlider.value = replaySlider.max;
+    replayNight = '';
+    if (replayNightSel) replayNightSel.value = '';
+    if (LIVE_BOUNDS) {
+      replaySlider.min = Math.floor(LIVE_BOUNDS.start_ts);
+      replaySlider.max = Math.floor(LIVE_BOUNDS.end_ts);
+      replaySlider.value = replaySlider.max;
+      if (replayStartEl) replayStartEl.textContent = LIVE_BOUNDS.start_label;
+      if (replayEndEl) replayEndEl.textContent = LIVE_BOUNDS.end_label;
+    }
     loadSky(null);
   });
 }
+
+// If tonight has nothing up yet, land on the most recent archived night
+// instead of an empty live map.
+if (!HAS_LIVE && replayNight) loadSky(Number(replaySlider ? replaySlider.value : 0));
+
+function skyIsLive() { return replayTs === null && !replayNight; }
 
 async function refresh() {
   try {
     const [rows, sky, st] = await Promise.all([
       fetch('/rows?' + params.toString()).then(r => r.text()),
-      replayTs === null ? fetch('/skymap.svg?' + params.toString()).then(r => r.text()) : null,
+      skyIsLive() ? fetch('/skymap.svg?' + params.toString()).then(r => r.text()) : null,
       fetch('/status').then(r => r.json())
     ]);
     document.getElementById('rows').innerHTML = rows;

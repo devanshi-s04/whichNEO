@@ -257,6 +257,42 @@ def sky_view(conn, rows, now=None):
     }
 
 
+def archived_sky_view(conn, archived, now=None):
+    """The all-sky map for a night that has already ended.
+
+    Same rendering pipeline as sky_view(), sourced from night_archive
+    instead of the live tables -- those get rewritten every cycle and
+    pruned as objects roll off NEOCP, so nothing about a past night
+    survives there once the next one starts.
+
+    Takes an already-loaded archive rather than a night label, because the
+    caller has to load it anyway to know the night's bounds, and the payload
+    is a JSON blob worth parsing once per request rather than twice.
+
+    Green means the same thing here as on the live board, which is why the
+    archive stores who observed each target rather than a single flag: to a
+    signed-in observer it means "you shot this", and to a signed-out visitor,
+    for whom there is no "you", it falls back to "somebody did".
+    """
+    if archived is None:
+        return None
+    now = now if now is not None else archived["end_ts"]
+    me = auth.current_user()
+    rows = []
+    for t in archived["targets"]:
+        observers = t.get("observers") or []
+        mine = (me["username"] in observers) if me else bool(t["observed"])
+        rows.append({"desig": t["desig"], "observed": mine,
+                     "vmag": t["vmag"], "score": t["score"]})
+    tracks = {t["desig"]: ephemeris.track(t["lines"]) for t in archived["targets"]}
+    marks = skymap.target_marks(rows, tracks, now)
+    try:
+        moon = observability.moon_state(now)
+    except Exception:
+        moon = None                       # never take the board down for this
+    return {"svg": skymap.render_svg(marks, moon, localt=localt), "used": now}
+
+
 def true_now(conn, desig, now=None):
     """Where the object genuinely is at this instant, or why it is not shown.
 
@@ -299,9 +335,30 @@ def index():
     try:
         rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
         upcoming = pick_upcoming(rows)
+        strip = night_strip(rows)
+        archived_nights = db.list_archived_nights(conn)
+        for n in archived_nights:
+            n["start_label"] = localt(n["start_ts"])
+            n["end_label"] = localt(n["end_ts"])
+
+        # Bounds the replay slider opens with. Tonight's own window when
+        # there is one; otherwise the most recently archived night, so the
+        # slider is still useful before tonight's targets are up, or before
+        # the first update cycle of a fresh night has run at all.
+        if strip:
+            replay_default = {"night": "", "start_ts": strip["start_ts"],
+                              "end_ts": strip["end_ts"],
+                              "start_label": strip["start"], "end_label": strip["end"]}
+        elif archived_nights:
+            latest = archived_nights[0]
+            replay_default = dict(latest)
+        else:
+            replay_default = None
+
         return render_template(
-            "index.html", rows=rows, strip=night_strip(rows),
+            "index.html", rows=rows, strip=strip,
             upcoming=upcoming, status=status(conn), sky=sky_view(conn, rows),
+            archived_nights=archived_nights, replay_default=replay_default,
             max_score=ranking.max_possible_score(),
             poll_interval=config.WEB_POLL_INTERVAL_S, **v)
     finally:
@@ -314,8 +371,14 @@ def index():
 _REPLAY_WINDOW_S = 366 * 24 * 3600
 
 
-def _replay_ts(raw):
+def _replay_ts(raw, window=None):
     """?ts= as a timestamp we can actually render, or None meaning live.
+
+    `window` is (start_ts, end_ts) for an archived night, which knows exactly
+    which instants it can draw. Without it the check is "within a year of
+    now", which is right for tonight and wrong for an archive: a night older
+    than that would have every ?ts= rejected and the slider would silently
+    snap to the end with nothing to explain why.
 
     A value float() accepts is not necessarily one datetime can represent.
     `?ts=99999999999999` parses fine and then raises out of localt() when the
@@ -334,7 +397,16 @@ def _replay_ts(raw):
         ts = float(raw)
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(ts) or abs(ts - time.time()) > _REPLAY_WINDOW_S:
+    if not math.isfinite(ts):
+        return None
+    if window is not None:
+        # An hour of slack each side: the slider's own end stops are the
+        # night's bounds, and rounding a step to the minute can land a
+        # fraction outside them.
+        lo, hi = window[0] - 3600, window[1] + 3600
+        if not (lo <= ts <= hi):
+            return None
+    elif abs(ts - time.time()) > _REPLAY_WINDOW_S:
         return None
     try:                       # the clock itself must accept it
         datetime.fromtimestamp(ts, _TZ)
@@ -349,17 +421,38 @@ def skymap_svg():
 
     An optional ?ts=<unix time> draws the map as it stood at that instant
     instead of live -- the replay slider under "Sky now" uses this to step
-    back through a night after it is over, reading the same cached ephemeris
-    tracks the live map already does. No new data collection required: those
-    tracks already span the whole night, not just the instant being shown.
+    back through a night, reading the same cached ephemeris tracks the live
+    map already does. No new data collection required: those tracks already
+    span the whole night, not just the instant being shown.
+
+    An optional ?night=<label> instead draws a night that has already ended,
+    from night_archive rather than the live tables -- see archive_night() in
+    db.py for why that archive exists at all: without it, a past night's
+    tracks are gone by the time anyone wants to look back at them.
     """
     v = _view_args()
-    ts = _replay_ts(request.args.get("ts"))
+    night = request.args.get("night") or None
     conn = get_conn()
     try:
-        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
-        used = ts if ts is not None else time.time()
-        return (sky_view(conn, rows, now=ts)["svg"], 200,
+        if night:
+            archived = db.load_archived_night(conn, night)
+            if archived is None:
+                return f"No archive for night {night}", 404
+            # An archived night knows its own bounds, so scrub against those
+            # rather than against "near enough to now" -- tighter for a recent
+            # night, and the only thing that keeps a year-old one scrubbable
+            # at all once it falls outside _REPLAY_WINDOW_S.
+            ts = _replay_ts(request.args.get("ts"),
+                            window=(archived["start_ts"], archived["end_ts"]))
+            view = archived_sky_view(conn, archived, now=ts)
+            used = view["used"]
+            svg = view["svg"]
+        else:
+            ts = _replay_ts(request.args.get("ts"))
+            rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
+            used = ts if ts is not None else time.time()
+            svg = sky_view(conn, rows, now=ts)["svg"]
+        return (svg, 200,
                 {"Content-Type": "image/svg+xml; charset=utf-8",
                  "Cache-Control": "no-store",
                  "X-Sky-Time": f"{localt(used)} {_tzabbr(used)}"})

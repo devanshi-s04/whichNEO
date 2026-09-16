@@ -141,6 +141,18 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 
+-- One row per night, written once at rollover (see archive_night). Ephemeris
+-- tracks are the only thing that would otherwise be lost: prune_cache drops
+-- an object's cache entry once it rolls off NEOCP, and unlike targets and
+-- observer_state there is no other record of where it actually was.
+CREATE TABLE IF NOT EXISTS night_archive (
+    night        TEXT PRIMARY KEY,
+    archived_utc TEXT,
+    start_ts     REAL,
+    end_ts       REAL,
+    payload      TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_targets_seq
     ON targets(observable DESC, max_alt_ts ASC);
 """
@@ -284,6 +296,88 @@ def load_gap_fill_lines(conn, desig):
     if not row:
         return None
     return json.loads(row["payload"]).get("gap_fill_lines") or None
+
+
+def archive_night(conn, night):
+    """Snapshot a just-ended night into night_archive, once.
+
+    Called from the update loop at the moment it notices the night label has
+    rolled over -- at that instant targets, observer_state and
+    ephemeris_cache still hold the OUTGOING night's last-known state, because
+    this cycle's replace_targets/prune_cache have not run yet. One cycle
+    later that state is gone: targets is rewritten wholesale, and any object
+    that has since resolved and left NEOCP is pruned from the cache with no
+    other record of where it actually was. This is the only chance to keep it.
+
+    Returns False (nothing to archive, or already archived) or True.
+    """
+    # GROUP BY, because observer_state is keyed by (desig, user_id) now. A
+    # plain join fans out to one row per target per observer who touched it,
+    # which put the same target in the archive twice -- carrying opposite
+    # `observed` values -- and drew it twice on the replayed map, once green
+    # and once amber. See test_archive_survives_per_account_state.
+    #
+    # Two fields rather than one, because the question has two answers: the
+    # night as the observatory saw it (did anyone shoot this) and the night as
+    # a given observer saw it (did *I*). Deciding that at render time keeps
+    # both; deciding it here would throw one away permanently.
+    rows = conn.execute("""
+        SELECT t.desig, t.score, t.vmag, t.window_start_ts, t.window_end_ts,
+               COALESCE(MAX(s.observed), 0) AS observed_any,
+               group_concat(CASE WHEN s.observed = 1
+                                 THEN COALESCE(u.username, 'shared') END)
+                   AS observers
+        FROM targets t
+        LEFT JOIN observer_state s ON s.desig = t.desig
+        LEFT JOIN users u ON u.id = s.user_id
+        WHERE t.observable = 1
+          AND t.window_start_ts IS NOT NULL AND t.window_end_ts IS NOT NULL
+        GROUP BY t.desig
+    """).fetchall()
+    if not rows:
+        return False
+
+    tracks = load_tracks(conn, [r["desig"] for r in rows])
+    start = min(r["window_start_ts"] for r in rows)
+    end = max(r["window_end_ts"] for r in rows)
+
+    payload = {
+        "targets": [
+            {"desig": r["desig"], "score": r["score"], "vmag": r["vmag"],
+             "observed": bool(r["observed_any"]),
+             "observers": (r["observers"] or "").split(",") if r["observers"]
+                          else [],
+             "lines": tracks.get(r["desig"], [])}
+            for r in rows
+        ],
+    }
+
+    with conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO night_archive "
+            "(night, archived_utc, start_ts, end_ts, payload) "
+            "VALUES (?,?,?,?,?)",
+            (night, utcnow(), start, end, json.dumps(payload)))
+    return cur.rowcount > 0
+
+
+def load_archived_night(conn, night):
+    """A previously archived night's targets/tracks/bounds, or None."""
+    row = conn.execute(
+        "SELECT start_ts, end_ts, payload FROM night_archive WHERE night=?",
+        (night,)).fetchone()
+    if not row:
+        return None
+    d = json.loads(row["payload"])
+    d["start_ts"] = row["start_ts"]
+    d["end_ts"] = row["end_ts"]
+    return d
+
+
+def list_archived_nights(conn):
+    """Archived nights, most recent first, as [{night, start_ts, end_ts}, ...]."""
+    return [dict(r) for r in conn.execute(
+        "SELECT night, start_ts, end_ts FROM night_archive ORDER BY night DESC")]
 
 
 def save_cache(conn, entries):

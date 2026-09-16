@@ -14,6 +14,7 @@ Run: python3 selftest.py
 """
 
 import importlib
+import json
 import os
 import re
 import sqlite3
@@ -1323,6 +1324,185 @@ def test_replay_ts_never_takes_the_map_down():
     check("beyond the window falls back to live",
           app._replay_ts(str(now + 2 * app._REPLAY_WINDOW_S)) is None)
 
+    # An archived night carries its own bounds. Without them a night older
+    # than _REPLAY_WINDOW_S would have every ?ts= rejected and the slider
+    # would silently snap to the end of the night with nothing to explain it.
+    old = now - 3 * app._REPLAY_WINDOW_S            # three years ago
+    window = (old, old + 8 * 3600)
+    mid = old + 4 * 3600
+    check("a year-old night is still scrubbable with its own window",
+          app._replay_ts(str(mid), window=window) is not None)
+    check("the same instant is refused without a window",
+          app._replay_ts(str(mid)) is None)
+    check("outside the archived night falls back",
+          app._replay_ts(str(old - 86400), window=window) is None)
+    check("the window does not weaken the crash guards",
+          all(app._replay_ts(b, window=window) is None
+              for b in ("nan", "inf", "banana", "99999999999999")))
+
+
+def test_night_archive_survives_per_account_state():
+    """The archive must hold one row per target, not one per observer.
+
+    observer_state is keyed by (desig, user_id) since accounts landed. The
+    plain join this replaced fanned out to a row per target per observer --
+    the same target archived twice, carrying opposite `observed` values, and
+    drawn twice on the replayed map, once green and once amber. Silent: no
+    error, just a wrong picture of a night nobody can re-observe.
+    """
+    import tempfile
+
+    import auth
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        ana = db.create_user(conn, "ana", auth.hash_password("x" * 12))
+        boris = db.create_user(conn, "boris", auth.hash_password("x" * 12))
+
+        conn.execute(
+            "INSERT INTO targets (desig, score, vmag, observable, "
+            "window_start_ts, window_end_ts) VALUES "
+            "('P12aaaa', 90, 20.1, 1, 1000, 2000),"     # ana only
+            "('P12bbbb', 80, 21.0, 1, 1100, 2100),"     # both
+            "('P12cccc', 70, 22.0, 1, 1200, 2200),"     # nobody
+            "('P12dddd', 60, 22.5, 0, 1300, 2300)")     # not observable
+        conn.commit()
+        db.set_state(conn, "P12aaaa", ana, observed=1)
+        db.set_state(conn, "P12aaaa", boris, observed=0)
+        db.set_state(conn, "P12bbbb", ana, observed=1)
+        db.set_state(conn, "P12bbbb", boris, observed=1)
+        db.set_state(conn, "P12dddd", ana, observed=1)
+
+        check("archiving reports it wrote", db.archive_night(conn, "2026-09-15"))
+        got = db.load_archived_night(conn, "2026-09-15")
+        desigs = [t["desig"] for t in got["targets"]]
+
+        check("one row per target, not per observer",
+              len(desigs) == len(set(desigs)) == 3, desigs)
+        check("a target two people marked appears once",
+              desigs.count("P12bbbb") == 1)
+        check("a non-observable target is not archived",
+              "P12dddd" not in desigs)
+
+        by = {t["desig"]: t for t in got["targets"]}
+        check("observed means somebody shot it",
+              by["P12aaaa"]["observed"] and by["P12bbbb"]["observed"])
+        check("a target nobody marked is not observed",
+              not by["P12cccc"]["observed"])
+        check("who observed it is kept",
+              sorted(by["P12bbbb"]["observers"]) == ["ana", "boris"]
+              and by["P12aaaa"]["observers"] == ["ana"], by)
+        check("boris marking it unobserved does not make him an observer",
+              "boris" not in by["P12aaaa"]["observers"])
+        check("nobody is recorded for an untouched target",
+              by["P12cccc"]["observers"] == [])
+
+        check("the night's bounds span its targets",
+              got["start_ts"] == 1000 and got["end_ts"] == 2200)
+        check("archiving twice is a no-op",
+              db.archive_night(conn, "2026-09-15") is False)
+        check("it is listed",
+              [n["night"] for n in db.list_archived_nights(conn)]
+              == ["2026-09-15"])
+        check("an unknown night is None",
+              db.load_archived_night(conn, "1999-01-01") is None)
+        conn.close()
+    finally:
+        config.DB_PATH = prev_db
+
+
+def test_archived_replay_endpoint():
+    """/skymap.svg?night= must serve the archive without disturbing live."""
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+
+    prev_db = config.DB_PATH
+    prev_env = os.environ.pop("WHICHNEO_AUTH", None)
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        ana = db.create_user(conn, "ana", auth.hash_password("x" * 12))
+        db.create_user(conn, "boris", auth.hash_password("x" * 12))
+
+        # Built through archive_night itself rather than hand-inserted, so
+        # this exercises the path the updater will actually take at rollover
+        # -- the one step LemonSneeze's test plan left unchecked.
+        eph_ts = ephemeris.Row(SAMPLE_EPH).ts
+        start, end = eph_ts - 3600, eph_ts + 3600
+        conn.execute(
+            "INSERT INTO targets (desig, score, vmag, observable, "
+            "window_start_ts, window_end_ts) VALUES (?,?,?,?,?,?)",
+            ("P12aaaa", 90, 20.1, 1, start, end))
+        conn.execute(
+            "INSERT INTO ephemeris_cache (desig, signature, fetched_utc, "
+            "payload) VALUES (?,?,?,?)",
+            ("P12aaaa", "sig", db.utcnow(),
+             json.dumps({"lines": [SAMPLE_EPH]})))
+        conn.commit()
+        db.set_state(conn, "P12aaaa", ana, observed=1)
+        check("the real archive path writes a night",
+              db.archive_night(conn, "2026-09-14"))
+        conn.close()
+
+        c = appmod.app.test_client()
+        r = c.get("/skymap.svg?night=2026-09-14")
+        check("an archived night renders",
+              r.status_code == 200 and b"<svg" in r.data, r.status_code)
+        check("it is served as SVG",
+              "image/svg" in r.headers.get("Content-Type", ""))
+        check("an unknown night is a clean 404, not a crash",
+              c.get("/skymap.svg?night=1999-01-01").status_code == 404)
+
+        # The guard that the conflict resolution had to preserve.
+        for bad in ("99999999999999", "nan", "inf", "banana"):
+            check("live ?ts=%-16s still not a 500" % bad,
+                  c.get("/skymap.svg?ts=" + bad).status_code == 200)
+            check("archived ?ts=%-16s still not a 500" % bad,
+                  c.get("/skymap.svg?night=2026-09-14&ts=" + bad
+                        ).status_code == 200)
+
+        mid = str((start + end) / 2)
+        check("scrubbing inside the archived night works",
+              c.get("/skymap.svg?night=2026-09-14&ts=" + mid).status_code == 200)
+
+        # Green means "you" when there is a you, "anyone" when there is not.
+        anon = appmod.app.test_client().get("/skymap.svg?night=2026-09-14")
+        with c.session_transaction() as s:
+            s["uid"] = ana
+        as_ana = c.get("/skymap.svg?night=2026-09-14")
+        cb = appmod.app.test_client()
+        with cb.session_transaction() as s:
+            conn = db.connect(config.DB_PATH)
+            s["uid"] = db.user_by_name(conn, "boris")["id"]
+            conn.close()
+        as_boris = cb.get("/skymap.svg?night=2026-09-14")
+
+        def done_colour(resp):
+            # The same green the live map uses for a done target; see
+            # test_done_target_is_green_on_the_sky_map.
+            return "#55b37e" in resp.data.decode()
+
+        check("ana, who observed it, sees it green", done_colour(as_ana))
+        check("boris, who did not, does not", not done_colour(as_boris))
+        check("a signed-out visitor sees what the observatory did",
+              done_colour(anon))
+    finally:
+        config.DB_PATH = prev_db
+        if prev_env is not None:
+            os.environ["WHICHNEO_AUTH"] = prev_env
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
 
 def test_skymap_orientation():
     """North up, east right, south down, west left.
@@ -2121,6 +2301,8 @@ def main():
                test_schema_migration_from_older_db,
                test_ranking_bounds, test_row_rejection_reasons,
                test_replay_ts_never_takes_the_map_down,
+               test_night_archive_survives_per_account_state,
+               test_archived_replay_endpoint,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
                test_priority_bump_is_fully_gone,
