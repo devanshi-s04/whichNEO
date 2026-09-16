@@ -769,6 +769,149 @@ def test_observer_state_migration_keeps_every_mark():
     conn.close()
 
 
+def test_password_reset_by_email():
+    """The reset flow, with the relay replaced by a list.
+
+    Nothing here touches the network. What it does check is the two things
+    that are invisible if they are wrong: that a used link stops working, and
+    that the form answers identically for an account that exists and one that
+    does not.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+    import mailer
+
+    prev_db = config.DB_PATH
+    prev_env = os.environ.pop("WHICHNEO_AUTH", None)
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    sent = []
+    real_send, real_available = mailer.send, mailer.available
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        # Replace the relay, not the routes: everything above smtplib is the
+        # code we actually ship.
+        appmod.mailer.send = lambda to, subj, body: sent.append((to, subj, body))
+        appmod.mailer.available = lambda: True
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        db.create_user(conn, "ana", auth.hash_password("first-password-1"),
+                       "ana@example.org")
+        db.create_user(conn, "boris", auth.hash_password("first-password-2"))
+        conn.close()
+
+        c = appmod.app.test_client()
+
+        r = c.post("/forgot", data={"who": "ana"})
+        check("asking by username sends one message",
+              r.status_code == 200 and len(sent) == 1)
+        check("it goes to the address on file", sent[0][0] == "ana@example.org")
+
+        sent.clear()
+        r2 = c.post("/forgot", data={"who": "ana@example.org"})
+        check("asking by email works too", len(sent) == 1)
+
+        # The three cases a stranger could use to enumerate accounts.
+        before = c.post("/forgot", data={"who": "ana"})
+        sent.clear()
+        nobody = c.post("/forgot", data={"who": "nosuchperson"})
+        no_email = c.post("/forgot", data={"who": "boris"})
+        check("an unknown name answers like a known one",
+              nobody.status_code == before.status_code
+              and nobody.data == before.data)
+        check("an account with no email answers the same way",
+              no_email.status_code == before.status_code
+              and no_email.data == before.data)
+        check("and neither actually sends anything", sent == [])
+
+        sent.clear()
+        c.post("/forgot", data={"who": "ana"})
+        body = sent[0][2]
+        token = re.search(r"/reset/(\S+)", body).group(1)
+        check("the link is absolute so it works from an inbox",
+              config.SITE_URL in body)
+        check("the account name is in the message", "ana" in body)
+
+        r = c.get(f"/reset/{token}")
+        check("a good link opens the form",
+              r.status_code == 200 and b"ana" in r.data)
+        check("a mangled link does not",
+              c.get(f"/reset/{token[:-4]}xxxx").status_code == 400)
+
+        r = c.post(f"/reset/{token}", data={"password": "short",
+                                            "confirm": "short"})
+        check("the new password still has to be long enough",
+              r.status_code == 400)
+        r = c.post(f"/reset/{token}", data={"password": "second-password-1",
+                                            "confirm": "mistyped"})
+        check("and still has to be typed twice", r.status_code == 400)
+
+        r = c.post(f"/reset/{token}", data={"password": "second-password-1",
+                                            "confirm": "second-password-1"})
+        check("a good reset signs you straight in", r.status_code == 302)
+
+        conn = db.connect(config.DB_PATH)
+        try:
+            stored = db.user_by_name(conn, "ana")["password_hash"]
+            ok, _ = auth.verify_password(stored, "second-password-1")
+            old, _ = auth.verify_password(stored, "first-password-1")
+            check("the new password works", ok)
+            check("the old one does not", not old)
+            # This is the single-use property, and it is free: the token
+            # carries a fingerprint of the password hash, which just changed.
+            check("the link cannot be used twice",
+                  auth.reset_token_user(conn, token) is None)
+
+            user = db.user_by_name(conn, "ana")
+            check("an expired link is refused",
+                  auth.reset_token_user(conn, auth.reset_token(user),
+                                        max_age=-1) is None)
+            check("a token signed with another key is refused",
+                  auth.reset_token_user(conn, "abc.def.ghi") is None)
+        finally:
+            conn.close()
+
+        check("used link is refused by the route too",
+              c.get(f"/reset/{token}").status_code == 400)
+
+        appmod.mailer.available = lambda: False
+        r = c.get("/forgot")
+        check("with no relay the page says so rather than lying",
+              r.status_code == 503 and b"cannot send email" in r.data)
+    finally:
+        mailer.send, mailer.available = real_send, real_available
+        config.DB_PATH = prev_db
+        if prev_env is not None:
+            os.environ["WHICHNEO_AUTH"] = prev_env
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+
+def test_mailer_builds_a_sane_message():
+    """The parts of a message that decide whether it is delivered or filed as
+    spam, checked without sending anything."""
+    import mailer
+
+    msg = mailer.build("someone@example.org", "WhichNEO password reset",
+                       "line one\nline two\n")
+    check("from is the relay identity", msg["From"] == config.SMTP_FROM)
+    check("recipient is set", msg["To"] == "someone@example.org")
+    check("subject survives", msg["Subject"] == "WhichNEO password reset")
+    check("has a Date", bool(msg["Date"]))
+    check("has a Message-ID on our own domain",
+          "@" in (msg["Message-ID"] or "")
+          and config.SMTP_FROM.split("@")[-1] in msg["Message-ID"])
+    check("marked auto-generated so vacation responders stay quiet",
+          msg["Auto-Submitted"] == "auto-generated")
+    check("body is intact", "line two" in msg.get_content())
+    check("STARTTLS is on for the configured relay", config.SMTP_STARTTLS)
+    check("port is the submission port", config.SMTP_PORT == 587)
+
+
 def test_login_throttle():
     """A public login form with no throttle is an invitation to guess, and
     argon2's deliberate cost makes each guess expensive for *us* -- enough
@@ -1730,6 +1873,8 @@ def main():
                test_auth_protects_state_changes,
                test_accounts, test_observer_state_is_per_account,
                test_observer_state_migration_keeps_every_mark,
+               test_password_reset_by_email,
+               test_mailer_builds_a_sane_message,
                test_login_throttle,
                test_secret_key_is_stable_and_private,
                test_schema_migration_from_older_db,

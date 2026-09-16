@@ -462,6 +462,26 @@ def user_by_name(conn, username):
     return dict(row) if row else None
 
 
+def user_by_name_or_email(conn, needle):
+    """Resolve whatever someone typed into the reset form.
+
+    Observers will type either, and making them guess which one the box wants
+    is a way to turn a forgotten password into two forgotten things.
+    """
+    needle = (needle or "").strip()
+    if not needle:
+        return None
+    return (user_by_name(conn, needle)
+            or (user_by_email(conn, needle) if "@" in needle else None))
+
+
+def user_by_email(conn, email):
+    row = conn.execute(
+        "SELECT * FROM users WHERE email = ? COLLATE NOCASE", (email,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def user_by_id(conn, uid):
     row = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
     return dict(row) if row else None

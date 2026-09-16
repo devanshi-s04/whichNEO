@@ -76,15 +76,48 @@ export WHICHNEO_HTTPS=1
 ls -l data/secret_key
 ```
 
-Administration, for when someone forgets a password (there is no mail relay
-on this host, so there is no reset email):
+Administration:
 
 ```bash
 python3 manage.py list
 python3 manage.py adduser luka --admin
 python3 manage.py passwd luka
 python3 manage.py deluser someone
+python3 manage.py mailtest you@example.org
 ```
+
+## 2d. Outgoing mail
+
+Used for one thing: the password-reset link at `/forgot`. The relay is the
+one at `infra.juriclab.org`; everything but the password is already in
+`config.py`.
+
+```bash
+printf '%s' 'the-password' > data/smtp_password
+chmod 600 data/smtp_password
+python3 manage.py mailtest you@example.org   # confirm before trusting it
+```
+
+or set `WHICHNEO_SMTP_PASSWORD` in the environment. **With no password
+configured the site runs exactly as before**, minus the reset link — `/forgot`
+says so plainly instead of pretending to send.
+
+Two things worth knowing when it appears not to work:
+
+- **The website never reports a send failure.** `/forgot` answers identically
+  for an address that exists, one that does not, and one whose message
+  bounced — otherwise the form becomes a way to find out which accounts exist,
+  which on a board with open sign-up is the one thing an attacker cannot learn
+  any other way. Failures go to the log; `manage.py mailtest` is how you see
+  the actual error.
+- **Only accounts with an email on file can reset this way.** Email is
+  optional at sign-up. For everyone else the recovery path is still
+  `manage.py passwd`.
+
+Reset links carry no stored secret: they are signed with `data/secret_key` and
+contain a fingerprint of the account's current password hash, so a link stops
+working the moment it is used and expires after an hour regardless. Replacing
+`data/secret_key` invalidates every outstanding link along with every session.
 
 ### The shared password still works, for now
 

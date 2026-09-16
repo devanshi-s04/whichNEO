@@ -275,5 +275,28 @@ REQUIRE_HTTPS = os.environ.get("WHICHNEO_HTTPS", "") not in ("", "0", "no")
 # create accounts with `python3 manage.py adduser <name>`.
 ALLOW_SIGNUP = True
 
+# Where the board answers from the outside. Password-reset links are absolute
+# URLs in an email, so they cannot be derived from the request the way every
+# other link on the site can -- a link built from a request to
+# http://epyc:12600 is useless in somebody's inbox.
+SITE_URL = os.environ.get("WHICHNEO_SITE_URL", "https://whichneo.juriclab.org")
+
+# --- Outgoing mail ------------------------------------------------------------
+# The relay at infra.juriclab.org. The password is NOT here: it comes from
+# WHICHNEO_SMTP_PASSWORD or data/smtp_password, both outside the repository.
+# With no password configured the site runs exactly as before, minus the
+# reset link.
+SMTP_HOST = os.environ.get("WHICHNEO_SMTP_HOST", "mail.infra.juriclab.org")
+SMTP_PORT = int(os.environ.get("WHICHNEO_SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("WHICHNEO_SMTP_USER", "whichneo@infra.juriclab.org")
+SMTP_FROM = os.environ.get("WHICHNEO_SMTP_FROM", "whichneo@infra.juriclab.org")
+SMTP_STARTTLS = True
+SMTP_TIMEOUT_S = 20
+
+# How long a password-reset link stays good. Long enough to survive a night
+# shift and a slow mail queue, short enough that a link left in an inbox is
+# not a standing key to the account.
+RESET_TOKEN_MAX_AGE_S = 3600
+
 UPDATE_INTERVAL_S = 300
 WEB_POLL_INTERVAL_S = 20

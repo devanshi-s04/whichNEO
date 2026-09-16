@@ -1,14 +1,10 @@
 """Account administration from the shell.
 
-There is no mail relay on this host, so there is no password-reset email and
-no "forgot password" link. That is a deliberate limit, not an oversight: the
-board serves one observatory and a handful of people, and the recovery path
-for a forgotten password is an admin running
-
-    python3 manage.py passwd <username>
-
-on epyc. The same goes for creating accounts when self-service sign-up is
-closed, and for handing out admin.
+The website has a reset-by-email link, but it only reaches accounts that have
+an email address on file, and it stays silent when the relay is down --
+deliberately, so that the form cannot be used to find out which accounts
+exist. So the shell stays the fallback for both: `passwd` for an account with
+no email, and `mailtest` for finding out why nothing arrived.
 
 Passwords are read from a prompt, never from argv -- an argument is visible in
 `ps` to every user on the machine and lands in shell history besides.
@@ -18,6 +14,7 @@ Passwords are read from a prompt, never from argv -- an argument is visible in
     python3 manage.py passwd <username>
     python3 manage.py admin <username> [--off]
     python3 manage.py deluser <username>
+    python3 manage.py mailtest <address>
 """
 
 import argparse
@@ -26,6 +23,7 @@ import sqlite3
 import sys
 
 import auth
+import config
 import db
 
 
@@ -118,6 +116,40 @@ def cmd_deluser(conn, args):
     return 0
 
 
+def cmd_mailtest(conn, args):
+    """Send one message and let the exception through.
+
+    The website deliberately swallows send failures -- an observer asking for
+    a reset must not learn from an error whether their address is on file.
+    That makes a broken relay invisible from the browser, so this is where it
+    becomes visible.
+    """
+    import mailer
+
+    if not mailer.available():
+        print("no SMTP credentials configured.\n"
+              "  export WHICHNEO_SMTP_PASSWORD='...'\n"
+              "  or: printf '%s' '...' > data/smtp_password && "
+              "chmod 600 data/smtp_password", file=sys.stderr)
+        return 1
+    print(f"relay    {config.SMTP_HOST}:{config.SMTP_PORT} "
+          f"({'STARTTLS' if config.SMTP_STARTTLS else 'plain'})")
+    print(f"as       {config.SMTP_USER}")
+    print(f"from     {config.SMTP_FROM}")
+    print(f"to       {args.address}")
+    try:
+        mid = mailer.send_now(
+            args.address, "WhichNEO relay test",
+            "This is a test message from the WhichNEO board at "
+            f"{config.SITE_URL}.\n\nIf you are reading it, outgoing mail "
+            "works and password resets will reach people.\n")
+    except Exception as e:
+        print(f"FAILED: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    print(f"sent     {mid}")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -138,6 +170,9 @@ def main(argv=None):
 
     a = sub.add_parser("deluser")
     a.add_argument("username")
+
+    a = sub.add_parser("mailtest")
+    a.add_argument("address")
 
     args = p.parse_args(argv)
     conn = db.connect()
