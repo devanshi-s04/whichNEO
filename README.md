@@ -162,9 +162,37 @@ which is what correctness requires, costs it 218 s and costs us about 2.
 | `db.py` | SQLite: targets, observer state, ephemeris cache. |
 | `update_neocp.py` | The 5-minute cycle, with per-stage timing. |
 | `app.py` | Flask website. |
+| `auth.py` | Accounts: argon2id passwords, sessions, CSRF. |
+| `mailer.py` | Outgoing mail. Password resets, nothing else. |
+| `manage.py` | Account administration from the shell. |
 
-Observer state (`observed` / `hidden` / manual priority) lives in its own table
-the updater never touches, so marking a target observed survives a refresh.
+Observer state (`observed` / `hidden`) lives in its own table the updater never
+touches, so marking a target observed survives a refresh.
+
+## Accounts
+
+Anyone can read the board. Changing it — mark done, hide — needs an account,
+and sign-up is self-service at `/register`.
+
+**Observer state is per account.** What you have marked done is your record of
+your night, not a fact about the target: two people working the same list do
+not overwrite each other, and one person clearing their queue does not clear
+anybody else's. The cost is that the same object could be integrated twice by
+two observers who cannot see each other, so every row also carries a `done by
+<name>` marker when another account has already shot it.
+
+The nightly plan file is built from `targets` alone and never consults
+observer state. The plan is the observatory's, not one observer's.
+
+Forgotten passwords reset by email at `/forgot`, for accounts that gave one.
+The link is signed rather than stored — it carries a fingerprint of the
+account's current password hash, so using it makes it useless — and the form
+answers identically whether or not the account exists, so it cannot be used to
+find out who has one. Without an email on file the recovery path is still
+`manage.py passwd` on epyc.
+
+See `deploy/EPYC.md` for the deployment details — the `WHICHNEO_HTTPS` flag,
+`data/secret_key`, `data/smtp_password`, and retiring the old shared password.
 
 ## Known formatting difference
 

@@ -1,13 +1,20 @@
 """SQLite storage.
 
-Three concerns, deliberately separated:
+Four concerns, deliberately separated:
 
   targets          rewritten wholesale by the updater every cycle
   observer_state   owned by the website, never touched by the updater --
-                   this is what makes "mark observed" survive a refresh
+                   this is what makes "mark observed" survive a refresh.
+                   Keyed by (desig, user_id): one row per observer per target
+  users            accounts. Reads are open; writes need one of these
   ephemeris_cache  raw MPC responses keyed by a signature of the object's
                    NEOCP row, so an ephemeris is re-requested only when new
                    observations actually change the solution
+
+The nightly plan file is deliberately built from `targets` alone and never
+consults observer_state. The plan is the observatory's, not one observer's --
+one person marking a target done must not silently drop it out of the file
+the telescope is driven from.
 """
 
 import json
@@ -87,13 +94,39 @@ CREATE TABLE IF NOT EXISTS targets (
     last_updated_utc     TEXT
 );
 
+-- Observer state is per account: what one observer has marked done is their
+-- own record of their own night, not a fact about the target. user_id 0 is
+-- the pre-accounts bucket -- rows migrated from the single-observer table,
+-- and writes made with the shared basic-auth credential, which names nobody.
+--
+-- The cost of this choice is real and is handled in load_targets(): two
+-- observers can each spend twenty minutes integrating the same object without
+-- either seeing the other do it. Every row therefore also carries a count of
+-- how many *other* accounts have marked it, so the duplication is visible
+-- even though the state is not shared.
 CREATE TABLE IF NOT EXISTS observer_state (
-    desig           TEXT PRIMARY KEY,
+    desig           TEXT NOT NULL,
+    user_id         INTEGER NOT NULL DEFAULT 0,
     observed        INTEGER DEFAULT 0,
     observed_at_utc TEXT,
     hidden          INTEGER DEFAULT 0,
     priority_bump   REAL DEFAULT 0,
-    note            TEXT
+    note            TEXT,
+    PRIMARY KEY (desig, user_id)
+);
+
+-- Accounts. Lives here rather than in its own file for the same reason
+-- observer_state does: db.init() only ever drops `targets`, so anything else
+-- in this database is safe across a schema migration, and one file stays one
+-- backup. Passwords are argon2id hashes; nothing here is reversible.
+CREATE TABLE IF NOT EXISTS users (
+    id             INTEGER PRIMARY KEY,
+    username       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    email          TEXT UNIQUE COLLATE NOCASE,
+    password_hash  TEXT NOT NULL,
+    created_utc    TEXT NOT NULL,
+    last_login_utc TEXT,
+    is_admin       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS ephemeris_cache (
@@ -106,6 +139,18 @@ CREATE TABLE IF NOT EXISTS ephemeris_cache (
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
+);
+
+-- One row per night, written once at rollover (see archive_night). Ephemeris
+-- tracks are the only thing that would otherwise be lost: prune_cache drops
+-- an object's cache entry once it rolls off NEOCP, and unlike targets and
+-- observer_state there is no other record of where it actually was.
+CREATE TABLE IF NOT EXISTS night_archive (
+    night        TEXT PRIMARY KEY,
+    archived_utc TEXT,
+    start_ts     REAL,
+    end_ts       REAL,
+    payload      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_targets_seq
@@ -156,7 +201,48 @@ def init(conn):
     if have and have != set(_COLS):
         conn.execute("DROP INDEX IF EXISTS idx_targets_seq")
         conn.execute("DROP TABLE targets")
+    _migrate_observer_state(conn)
     conn.executescript(SCHEMA)
+    conn.commit()
+
+
+def _migrate_observer_state(conn):
+    """Give the single-observer table a user_id, keeping every row.
+
+    `targets` can be dropped and rebuilt because the updater regenerates it.
+    observer_state cannot: it is the only record that a target was observed,
+    and there is nowhere to fetch it back from. So this rebuilds rather than
+    drops, and it runs before the schema, because CREATE TABLE IF NOT EXISTS
+    is a no-op against the old table and would leave it in place forever.
+
+    Migrated rows land on user_id 0 rather than on an account, because at
+    migration time there may not be one yet. create_user() adopts them when
+    the first account is created.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(observer_state)")}
+    if not cols or "user_id" in cols:
+        return
+    keep = [c for c in ("desig", "observed", "observed_at_utc", "hidden",
+                        "priority_bump", "note") if c in cols]
+    names = ",".join(keep)
+    conn.executescript("""
+        ALTER TABLE observer_state RENAME TO observer_state_pre_accounts;
+        CREATE TABLE observer_state (
+            desig           TEXT NOT NULL,
+            user_id         INTEGER NOT NULL DEFAULT 0,
+            observed        INTEGER DEFAULT 0,
+            observed_at_utc TEXT,
+            hidden          INTEGER DEFAULT 0,
+            priority_bump   REAL DEFAULT 0,
+            note            TEXT,
+            PRIMARY KEY (desig, user_id)
+        );
+    """)
+    conn.execute(f"INSERT INTO observer_state ({names}, user_id) "
+                 f"SELECT {names}, 0 FROM observer_state_pre_accounts")
+    # The old table is kept, not dropped. It is a few dozen rows, it is the
+    # only copy of state nothing can regenerate, and if this migration turns
+    # out to be wrong the rows are still there to re-read.
     conn.commit()
 
 
@@ -210,6 +296,88 @@ def load_gap_fill_lines(conn, desig):
     if not row:
         return None
     return json.loads(row["payload"]).get("gap_fill_lines") or None
+
+
+def archive_night(conn, night):
+    """Snapshot a just-ended night into night_archive, once.
+
+    Called from the update loop at the moment it notices the night label has
+    rolled over -- at that instant targets, observer_state and
+    ephemeris_cache still hold the OUTGOING night's last-known state, because
+    this cycle's replace_targets/prune_cache have not run yet. One cycle
+    later that state is gone: targets is rewritten wholesale, and any object
+    that has since resolved and left NEOCP is pruned from the cache with no
+    other record of where it actually was. This is the only chance to keep it.
+
+    Returns False (nothing to archive, or already archived) or True.
+    """
+    # GROUP BY, because observer_state is keyed by (desig, user_id) now. A
+    # plain join fans out to one row per target per observer who touched it,
+    # which put the same target in the archive twice -- carrying opposite
+    # `observed` values -- and drew it twice on the replayed map, once green
+    # and once amber. See test_archive_survives_per_account_state.
+    #
+    # Two fields rather than one, because the question has two answers: the
+    # night as the observatory saw it (did anyone shoot this) and the night as
+    # a given observer saw it (did *I*). Deciding that at render time keeps
+    # both; deciding it here would throw one away permanently.
+    rows = conn.execute("""
+        SELECT t.desig, t.score, t.vmag, t.window_start_ts, t.window_end_ts,
+               COALESCE(MAX(s.observed), 0) AS observed_any,
+               group_concat(CASE WHEN s.observed = 1
+                                 THEN COALESCE(u.username, 'shared') END)
+                   AS observers
+        FROM targets t
+        LEFT JOIN observer_state s ON s.desig = t.desig
+        LEFT JOIN users u ON u.id = s.user_id
+        WHERE t.observable = 1
+          AND t.window_start_ts IS NOT NULL AND t.window_end_ts IS NOT NULL
+        GROUP BY t.desig
+    """).fetchall()
+    if not rows:
+        return False
+
+    tracks = load_tracks(conn, [r["desig"] for r in rows])
+    start = min(r["window_start_ts"] for r in rows)
+    end = max(r["window_end_ts"] for r in rows)
+
+    payload = {
+        "targets": [
+            {"desig": r["desig"], "score": r["score"], "vmag": r["vmag"],
+             "observed": bool(r["observed_any"]),
+             "observers": (r["observers"] or "").split(",") if r["observers"]
+                          else [],
+             "lines": tracks.get(r["desig"], [])}
+            for r in rows
+        ],
+    }
+
+    with conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO night_archive "
+            "(night, archived_utc, start_ts, end_ts, payload) "
+            "VALUES (?,?,?,?,?)",
+            (night, utcnow(), start, end, json.dumps(payload)))
+    return cur.rowcount > 0
+
+
+def load_archived_night(conn, night):
+    """A previously archived night's targets/tracks/bounds, or None."""
+    row = conn.execute(
+        "SELECT start_ts, end_ts, payload FROM night_archive WHERE night=?",
+        (night,)).fetchone()
+    if not row:
+        return None
+    d = json.loads(row["payload"])
+    d["start_ts"] = row["start_ts"]
+    d["end_ts"] = row["end_ts"]
+    return d
+
+
+def list_archived_nights(conn):
+    """Archived nights, most recent first, as [{night, start_ts, end_ts}, ...]."""
+    return [dict(r) for r in conn.execute(
+        "SELECT night, start_ts, end_ts FROM night_archive ORDER BY night DESC")]
 
 
 def save_cache(conn, entries):
@@ -274,19 +442,39 @@ def replace_targets(conn, rows):
 
 
 def load_targets(conn, include_hidden=False, include_observed=False,
-                 include_discarded=True):
+                 include_discarded=True, user_id=None):
+    """Targets with the viewing account's own observer state attached.
+
+    `user_id` None is a signed-out visitor: they have no state of their own,
+    so every mark on the board counts as somebody else's. That is deliberate --
+    a reader who cannot change the board should still be able to see what has
+    already been done tonight.
+
+    `others_observed` and `others_names` are the escape hatch for per-account
+    state. Without them the first observer to mark a target done makes it
+    disappear only from their own list, and the second observer re-shoots it.
+    """
     sql = """
         SELECT t.*,
                COALESCE(s.observed, 0)      AS observed,
                s.observed_at_utc            AS observed_at_utc,
                COALESCE(s.hidden, 0)        AS hidden,
                COALESCE(s.priority_bump, 0) AS priority_bump,
-               s.note                       AS note
+               s.note                       AS note,
+               (SELECT count(*) FROM observer_state o
+                 WHERE o.desig = t.desig AND o.observed = 1
+                   AND o.user_id IS NOT ?)  AS others_observed,
+               (SELECT group_concat(COALESCE(u.username, 'shared'))
+                  FROM observer_state o
+                  LEFT JOIN users u ON u.id = o.user_id
+                 WHERE o.desig = t.desig AND o.observed = 1
+                   AND o.user_id IS NOT ?)  AS others_names
         FROM targets t
-        LEFT JOIN observer_state s ON s.desig = t.desig
+        LEFT JOIN observer_state s
+               ON s.desig = t.desig AND s.user_id IS ?
     """
     rows = []
-    for r in conn.execute(sql):
+    for r in conn.execute(sql, (user_id, user_id, user_id)):
         d = dict(r)
         d["discard_reasons"] = json.loads(d["discard_reasons"] or "[]")
         d["mask_flags"] = json.loads(d["mask_flags"] or "[]")
@@ -306,7 +494,13 @@ def load_targets(conn, include_hidden=False, include_observed=False,
     return rows
 
 
-def set_state(conn, desig, **fields):
+def set_state(conn, desig, user_id=0, **fields):
+    """Record one account's view of one target.
+
+    user_id 0 is the shared basic-auth credential, which names nobody. It is
+    the default so that a caller who forgets to pass an account writes to the
+    anonymous bucket rather than silently onto some real observer's record.
+    """
     allowed = {"observed", "observed_at_utc", "hidden", "priority_bump", "note"}
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:
@@ -316,9 +510,91 @@ def set_state(conn, desig, **fields):
     updates = ",".join(f"{k}=excluded.{k}" for k in fields)
     with conn:
         conn.execute(
-            f"INSERT INTO observer_state (desig,{cols}) VALUES (?,{placeholders}) "
-            f"ON CONFLICT(desig) DO UPDATE SET {updates}",
-            (desig, *fields.values()))
+            f"INSERT INTO observer_state (desig,user_id,{cols}) "
+            f"VALUES (?,?,{placeholders}) "
+            f"ON CONFLICT(desig,user_id) DO UPDATE SET {updates}",
+            (desig, user_id, *fields.values()))
+
+
+# --- accounts ---------------------------------------------------------------
+
+def create_user(conn, username, password_hash, email=None, is_admin=0):
+    """Insert an account. Raises sqlite3.IntegrityError if the name is taken.
+
+    The uniqueness check is the UNIQUE COLLATE NOCASE constraint, not a
+    prior SELECT: two registrations racing between the check and the insert
+    would both pass a lookup and one would still have to fail here, so this
+    is the only place that can decide it.
+
+    `email` is stored as NULL when blank rather than as "", because SQLite's
+    UNIQUE lets any number of NULLs coexist but only one empty string -- the
+    second account without an email would otherwise collide with the first.
+    """
+    first = count_users(conn) == 0
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO users (username, email, password_hash, created_utc, "
+            "is_admin) VALUES (?,?,?,?,?)",
+            (username, email or None, password_hash, utcnow(),
+             1 if is_admin else 0))
+        uid = cur.lastrowid
+        if first:
+            # The board ran for a season before it had accounts, and those
+            # marks belong to whoever was making them -- which is whoever
+            # registers first. Left on user_id 0 they would show up as
+            # "already done by someone else" to every account forever, which
+            # is true but useless.
+            conn.execute("UPDATE observer_state SET user_id = ? "
+                         "WHERE user_id = 0", (uid,))
+    return uid
+
+
+def user_by_name(conn, username):
+    row = conn.execute(
+        "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
+        (username,)).fetchone()
+    return dict(row) if row else None
+
+
+def user_by_name_or_email(conn, needle):
+    """Resolve whatever someone typed into the reset form.
+
+    Observers will type either, and making them guess which one the box wants
+    is a way to turn a forgotten password into two forgotten things.
+    """
+    needle = (needle or "").strip()
+    if not needle:
+        return None
+    return (user_by_name(conn, needle)
+            or (user_by_email(conn, needle) if "@" in needle else None))
+
+
+def user_by_email(conn, email):
+    row = conn.execute(
+        "SELECT * FROM users WHERE email = ? COLLATE NOCASE", (email,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def user_by_id(conn, uid):
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+    return dict(row) if row else None
+
+
+def touch_login(conn, uid):
+    with conn:
+        conn.execute("UPDATE users SET last_login_utc = ? WHERE id = ?",
+                     (utcnow(), uid))
+
+
+def update_password(conn, uid, password_hash):
+    with conn:
+        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?",
+                     (password_hash, uid))
+
+
+def count_users(conn):
+    return conn.execute("SELECT count(*) FROM users").fetchone()[0]
 
 
 def set_meta(conn, key, value):
