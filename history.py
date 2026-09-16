@@ -11,11 +11,20 @@ import re
 import sqlite3
 from datetime import datetime
 
-from neocp_history import DB_PATH
+from neocp_history import DB_PATH, ensure_db
 
 
 def connect():
-    conn = sqlite3.connect(DB_PATH)
+    """A read connection, with the schema guaranteed to exist.
+
+    sqlite3.connect() happily creates an empty file, so before this called
+    ensure_db() the dashboard raised "no such table: objects" on any host
+    where the updater had not yet run -- which is every host on the day this
+    is deployed, and exactly when someone clicks the new History link to see
+    what it does. Creating the tables is idempotent and costs a handful of
+    no-op statements; a 500 on first look costs the feature's credibility.
+    """
+    conn = ensure_db()
     conn.row_factory = sqlite3.Row
     return conn
 

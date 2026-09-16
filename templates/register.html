@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create an account &mdash; WhichNEO</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+<div class="top">
+  <div class="brand">
+    <h1>Which<b>NEO</b></h1>
+    <div class="where">L01 &middot; TI&#268;AN STATION, VI&#352;NJAN</div>
+  </div>
+</div>
+
+<div class="authbox">
+  <h2>Create an account</h2>
+  <p class="cap">Sign-up is open. Your username is what appears against the
+    targets you mark, so pick something the rest of the team will recognise.</p>
+
+  {% if error %}<p class="autherr">{{ error }}</p>{% endif %}
+
+  <form method="post" action="{{ url_for('register') }}">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label for="username">Username</label>
+    <input id="username" name="username" value="{{ username }}"
+           autocomplete="username" autocapitalize="none" autofocus required>
+    <p class="hint">2&ndash;32 characters: letters, digits, dot, dash or
+      underscore.</p>
+
+    <label for="email">Email
+      <span class="dim">(optional, but worth giving)</span></label>
+    <input id="email" name="email" type="email" value="{{ email }}"
+           autocomplete="email">
+    <p class="hint">The only thing it is used for is resetting your password.
+      Leave it blank and that route is closed to you &mdash; a forgotten
+      password then means asking an admin to run
+      <code>manage.py passwd</code> on epyc. No other mail is ever sent.</p>
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password"
+           autocomplete="new-password" required>
+    <p class="hint">At least {{ min_password }} characters. Stored
+      as an argon2id hash; nobody, including us, can read it back.</p>
+
+    <label for="confirm">Repeat password</label>
+    <input id="confirm" name="confirm" type="password"
+           autocomplete="new-password" required>
+
+    <button class="primary" type="submit">Create account</button>
+  </form>
+
+  <p class="cap alt">Already have one?
+    <a href="{{ url_for('login', next=next) }}">Sign in</a>.</p>
+</div>
+
+</div>
+</body>
+</html>

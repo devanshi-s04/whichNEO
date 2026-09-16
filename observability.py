@@ -157,6 +157,26 @@ def moon_state(unix_ts=None):
             "illum": moon_illumination(t, loc), "ts": float(t.unix)}
 
 
+def moon_altitudes(unix_ts_list):
+    """Moon altitude at each of several instants, in one vectorised call.
+
+    Used to draw a gap-free Moon curve on the altitude plot: the object's
+    own ephemeris can have a real hole in it where MPC's floor cuts it off,
+    but the Moon needs no orbit fit -- its position is exactly knowable for
+    any instant -- so calling this once for a whole night's worth of sample
+    times is both correct and cheap, unlike calling moon_state() in a loop
+    (one Time object and one body transform per instant instead of one for
+    the whole batch).
+    """
+    if not unix_ts_list:
+        return []
+    loc = site()
+    t = Time(np.asarray(unix_ts_list, dtype=float), format="unix")
+    aa = get_body("moon", t, loc).transform_to(AltAz(obstime=t, location=loc))
+    alts = np.atleast_1d(aa.alt.deg)
+    return [(float(ts), float(alt)) for ts, alt in zip(unix_ts_list, alts)]
+
+
 def angular_separation(alt1, az1, alt2, az2):
     """Great-circle separation between two horizon positions, in degrees.
 

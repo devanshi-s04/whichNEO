@@ -36,6 +36,7 @@ update_neocp.py --loop, or the list is back to being fetched twice.
 import argparse
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -78,7 +79,24 @@ CREATE TABLE IF NOT EXISTS objects (
     first_seen_ts  TEXT NOT NULL,
     last_seen_ts   TEXT NOT NULL,
     status         TEXT NOT NULL DEFAULT 'pending',
-    resolved_at    TEXT
+    resolved_at    TEXT,
+    -- What the object turned out to BE, not merely that it turned out to be
+    -- something. "confirmed" alone cannot answer the question ds42 is asked:
+    -- a main-belt asteroid that lands on NEOCP is confirmed too. The
+    -- designation is what lets us look up an orbit later and decide; the
+    -- MPEC is the announcement, which is a related but different fact.
+    --
+    -- is_neo stays NULL until an orbit source is settled -- see ds42.md.
+    -- NULL means "not determined", not "no".
+    linked_desig   TEXT,
+    mpec           TEXT,
+    is_neo         INTEGER,
+    perihelion_au  REAL,
+    -- 1 for a row created by backfill rather than observed on the board.
+    -- Its first_seen/last_seen say when we learned of the object, not when
+    -- it was actually on NEOCP, so any analysis of residence time has to
+    -- exclude these.
+    retrospective  INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -98,31 +116,75 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+_ADDED_COLUMNS = [
+    ("linked_desig", "TEXT"),
+    ("mpec", "TEXT"),
+    ("is_neo", "INTEGER"),
+    ("perihelion_au", "REAL"),
+    ("retrospective", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
 def ensure_db():
     con = sqlite3.connect(DB_PATH)
+    # WAL for the same reason targets.db uses it: the updater writes a row per
+    # object every five minutes while the dashboard is being read, and the
+    # default rollback journal makes those two block each other. It also
+    # matters for /history/download.db, which reads the file while a write
+    # may be in flight.
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
     con.executescript(SCHEMA)
+    # CREATE TABLE IF NOT EXISTS does nothing to a table that already exists,
+    # so a database written before these columns existed would silently never
+    # gain them.
+    have = {r[1] for r in con.execute("PRAGMA table_info(objects)")}
+    for name, decl in _ADDED_COLUMNS:
+        if name not in have:
+            con.execute(f"ALTER TABLE objects ADD COLUMN {name} {decl}")
     con.commit()
     return con
 
 
-def fetch_prevdes_entries():
-    """Parse the previous-NEOCP-objects archive into {desig: outcome}.
+# A permanent minor-planet designation: four-digit year, space, two letters,
+# optional order number -- "2026 RR39", "2026 LH3". NEOCP tracklet ids never
+# look like this: they are unspaced alphanumerics such as P22pRQ8, ZTF10GC,
+# 6JD1C21. The distinction matters because an archive entry can be either
+# "2026 RR39 = 6JD1C21" (a tracklet that became a designated object) or
+# "ZTF10GC = SK000cT" (two tracklets of the same object merged), and only the
+# first tells us what the thing actually is.
+_PERMANENT_RE = re.compile(r"^\d{4} [A-Z]{2}\d*$")
 
-    outcome is "confirmed" (linked to any other identifier) or one of the
-    negative status keys above. The archive is newest-first and MPC
-    sometimes revises an earlier verdict, so the first (i.e. most recent)
-    entry for a given desig wins.
+
+def parse_prevdes(html):
+    """{desig: {status, linked_desig, mpec}} from the archive page.
+
+    Split from the fetch so it can be tested against a saved page without the
+    network.
+
+    status is "confirmed" (linked to any other identifier) or one of the
+    negative keys above. linked_desig is the permanent designation where the
+    entry gives one -- the field that makes this archive usable as ground
+    truth rather than merely as a record that something resolved, since
+    "confirmed" is equally true of a main-belt asteroid. mpec is the MPEC
+    reference where MPC announced one.
+
+    The archive is newest-first and MPC sometimes revises an earlier verdict,
+    so the first entry for a given desig wins.
     """
-    r = requests.get(PREVDES_URL, timeout=config.NEOCP_TIMEOUT_S, headers=_UA)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "lxml")
+    soup = BeautifulSoup(html, "lxml")
     anchor = soup.find("a", attrs={"name": "prev"})
     ul = anchor.find_next("ul") if anchor else None
     if ul is None:
         return {}
 
-    import re
     out = {}
+
+    def record(desig, status, linked=None, mpec=None):
+        if desig and desig not in out:
+            out[desig] = {"status": status, "linked_desig": linked,
+                          "mpec": mpec}
+
     for li in ul.find_all("li", recursive=False):
         # No separator: a <sub> tag (e.g. "RZ<sub>34</sub>") must concatenate
         # directly onto "RZ34" with no inserted space.
@@ -130,10 +192,21 @@ def fetch_prevdes_entries():
         if "(" not in text:
             continue
         body = text.split("(", 1)[0].strip()
+        link = li.find("a", href=re.compile(r"/mpec/"))
+        mpec = re.sub(r"\s+", " ", link.get_text()).strip() if link else None
+
         if " = " in body:
             left, right = (t.strip() for t in body.split(" = ", 1))
-            out.setdefault(left, "confirmed")
-            out.setdefault(right, "confirmed")
+            # Whichever side is a permanent designation identifies the object;
+            # the other side is the tracklet we knew it by. Either may be the
+            # permanent one, and in a tracklet merge neither is.
+            perm = next((s for s in (left, right) if _PERMANENT_RE.match(s)),
+                        None)
+            for side in (left, right):
+                if side != perm:
+                    record(side, "confirmed", perm, mpec)
+            if perm:
+                record(perm, "confirmed", perm, mpec)
         else:
             parts = body.split(None, 1)
             if len(parts) != 2:
@@ -141,8 +214,15 @@ def fetch_prevdes_entries():
             desig, phrase = parts
             outcome = _STATUS_MAP.get(phrase.strip())
             if outcome:
-                out.setdefault(desig, outcome)
+                record(desig, outcome)
     return out
+
+
+def fetch_prevdes_entries():
+    """parse_prevdes() applied to a freshly fetched archive page."""
+    r = requests.get(PREVDES_URL, timeout=config.NEOCP_TIMEOUT_S, headers=_UA)
+    r.raise_for_status()
+    return parse_prevdes(r.text)
 
 
 def record_snapshot(con, rows, now):
@@ -178,17 +258,34 @@ def resolve_pending(con, now):
                con.execute("SELECT desig FROM objects WHERE status='pending'")]
     if not pending:
         return 0
-    resolutions = fetch_prevdes_entries()
-    n_resolved = 0
-    for d in pending:
-        outcome = resolutions.get(d)
-        if outcome:
-            con.execute(
-                "UPDATE objects SET status=?, resolved_at=? WHERE desig=?",
-                (outcome, now, d))
-            n_resolved += 1
+    return apply_resolutions(con, fetch_prevdes_entries(), now, pending)
+
+
+def apply_resolutions(con, resolutions, now, desigs=None):
+    """Write parsed archive outcomes onto `objects`. Split from the fetch so
+    a backfill can replay the same archive over objects recorded before this
+    ran, and so it can be tested without the network.
+
+    Only ever fills in: an object already resolved keeps the verdict and the
+    timestamp it was first given, because resolved_at means "when we learned
+    this", and rewriting it on every subsequent pass would destroy that.
+    """
+    if desigs is None:
+        desigs = [row[0] for row in
+                  con.execute("SELECT desig FROM objects WHERE status='pending'")]
+    n = 0
+    for d in desigs:
+        entry = resolutions.get(d)
+        if not entry:
+            continue
+        con.execute(
+            "UPDATE objects SET status=?, resolved_at=?, linked_desig=?, "
+            "mpec=? WHERE desig=? AND status='pending'",
+            (entry["status"], now, entry.get("linked_desig"),
+             entry.get("mpec"), d))
+        n += 1
     con.commit()
-    return n_resolved
+    return n
 
 
 def record_cycle(con, rows, now=None):
@@ -206,6 +303,31 @@ def record_cycle(con, rows, now=None):
     # for whether anything actually changed.
     organization_stats.write_csv(con)
     return len(rows), n_resolved
+
+
+def backfill_from_scores(con, score_desigs, now=None):
+    """Record objects we have already scored but never polled, then resolve
+    every pending object against the archive in one fetch.
+
+    ds42 has been scoring objects since before this history existed, and the
+    archive still lists outcomes going back weeks -- so those labels can be
+    recovered rather than waited for. Objects that have already left NEOCP
+    are inserted with first_seen = last_seen = now, which is honestly wrong
+    as a timestamp and is why `retrospective` marks them: they say when we
+    learned about the object, not when it was on the board.
+
+    One fetch, however many objects. Returns (inserted, resolved).
+    """
+    now = now or _now()
+    known = {r[0] for r in con.execute("SELECT desig FROM objects")}
+    fresh = [d for d in score_desigs if d and d not in known]
+    for d in fresh:
+        con.execute(
+            "INSERT INTO objects (desig, first_seen_ts, last_seen_ts, status, "
+            "retrospective) VALUES (?,?,?,'pending',1)", (d, now, now))
+    con.commit()
+    resolved = apply_resolutions(con, fetch_prevdes_entries(), now)
+    return len(fresh), resolved
 
 
 def poll_once():

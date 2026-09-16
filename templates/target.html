@@ -184,10 +184,16 @@
 <div class="moonplot">{{ moon_svg|safe }}</div>
 <p class="note">
   In the staralt style: the object's altitude (solid) and the Moon's altitude
-  (dashed), across every ephemeris row MPC sent for the night. The shaded band
-  is the window <code>pipeline.py</code> judged actually usable; the red dashed
-  line is the {{ config.MPC_SERVER_MIN_ALT|int }}&deg; floor below which MPC
-  never sends a row at all, so nothing can appear beneath it.
+  (dashed), across dusk to dawn. The shaded band is the window
+  <code>pipeline.py</code> judged actually usable; the red dashed line is the
+  {{ config.MPC_SERVER_MIN_ALT|int }}&deg; floor below which MPC's normal
+  fetch never sends a row at all.
+  <br><br>
+  <strong>Any remaining "no data" span is a real hole</strong>, not a bug: it
+  means neither MPC's normal ephemeris nor the wider, floor-free fetch scoped
+  to this plot returned a position for that stretch. The Moon's own curve is
+  computed independently (it needs no orbit fit, unlike the object) and so
+  stays gap-free even across a hole in the object's curve.
   Clock times are {{ tzname }}, local to the observatory &mdash; hover any
   point on the object's curve for UT and its exact separation from the Moon.
 </p>

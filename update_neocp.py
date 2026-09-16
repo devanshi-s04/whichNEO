@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import config
 import db
+import ds42score
 import ephemeris
 import neocp
 import neocp_history
@@ -113,6 +114,64 @@ def needs_refetch(entry, target, now):
         config.EPHEMERIS_REFETCH_BACKOFF_S
 
 
+def _score_new_objects(conn, cache):
+    """Score, with ds42, every cached object that has astrometry and no score.
+
+    One subprocess for the whole batch, never one per object: the model load
+    is 1.5 s of the ~4.8 s it takes to score a full night.
+
+    Entirely best effort. Wrapped so that nothing here -- a missing install, a
+    broken model, a timeout -- can fail an update cycle whose actual job is
+    telling an observer where to point a telescope.
+    """
+    if not ds42score.available():
+        return
+    try:
+        with_records = {d: (payload.get("obs_records") or [])
+                        for d, (_sig, payload) in cache.items()
+                        if payload.get("obs_records")}
+        todo = db.unscored_desigs(conn, list(with_records))
+        if not todo:
+            return
+        batch = {d: with_records[d] for d in todo}
+        scores = ds42score.score_records(batch)
+        if not scores:
+            return
+        written = db.save_ds42_scores(conn, scores, ds42score.provenance())
+        ok = sum(1 for s in scores.values() if s.get("status") == "ok")
+        logging.info("ds42 scored %d new object(s), %d ok, %d stored",
+                     len(scores), ok, written)
+    except Exception:
+        logging.exception("ds42 scoring step failed; continuing")
+
+
+def _backfill_history_once(conn, hist_conn):
+    """Bring objects ds42 has already scored into the history, once.
+
+    ds42 began scoring before this history existed, and MPC's archive still
+    lists outcomes going back weeks -- so those labels can be recovered
+    instead of waited for. Guarded by a meta flag rather than a check for
+    emptiness: the history legitimately becomes non-empty on the first normal
+    cycle, and re-running the backfill every cycle would mean re-fetching the
+    archive forever.
+    """
+    if hist_conn is None or db.get_meta(conn, "ds42_history_backfilled"):
+        return
+    try:
+        scored = [r[0] for r in conn.execute("SELECT desig FROM ds42_scores")]
+        if not scored:
+            return
+        inserted, resolved = neocp_history.backfill_from_scores(hist_conn,
+                                                                scored)
+        db.set_meta(conn, "ds42_history_backfilled", db.utcnow())
+        logging.info("history backfill: %d object(s) added, %d resolved",
+                     inserted, resolved)
+    except Exception:
+        # Left unflagged so the next cycle retries -- this is a one-off whose
+        # only cost is a single archive fetch.
+        logging.exception("history backfill failed; will retry next cycle")
+
+
 def run_update(conn, hist_conn=None, source=None):
     timings = {}
     t0 = time.perf_counter()
@@ -121,6 +180,28 @@ def run_update(conn, hist_conn=None, source=None):
         nonlocal t0
         timings[stage] = round((time.perf_counter() - t0) * 1000, 1)
         t0 = time.perf_counter()
+
+    # Archive the outgoing night the moment the label rolls over, before
+    # anything below overwrites it. targets/observer_state/ephemeris_cache
+    # still hold last cycle's (i.e. the night that just ended) state at this
+    # point -- this cycle's replace_targets/prune_cache haven't run yet, and
+    # after they do there is no other record of where a resolved-and-removed
+    # object actually was.
+    outgoing_night = db.get_meta(conn, "night")
+    incoming_night = pipeline.night_label(time.time())
+    if outgoing_night and outgoing_night != incoming_night:
+        try:
+            db.archive_night(conn, outgoing_night)
+        except Exception:
+            # Logged and swallowed: a failed archive costs a night of replay,
+            # and taking the updater down over it would cost the board. But it
+            # is silent by the same token, so the first real rollover after
+            # this ships is worth watching in the log rather than assuming.
+            logging.exception("failed to archive night %s", outgoing_night)
+    # Billed as its own stage rather than folded into fetch_list: archiving
+    # serialises every observable target's whole track, and hiding that inside
+    # a network timing is how a slow one becomes impossible to spot.
+    mark("archive")
 
     raw = open(source).read() if source else neocp.fetch_neocp()
     targets = neocp.parse_neocp(raw)
@@ -156,9 +237,9 @@ def run_update(conn, hist_conn=None, source=None):
     fresh = ephemeris.fetch_many(t["desig"] for t in stale)
     mark("fetch_ephemerides")
 
-    # Auxiliary pages, only for objects we just refetched. Two more requests
-    # each, so they run through the same bounded pool -- done sequentially a
-    # cold start spends over a minute here.
+    # Auxiliary pages, only for objects we just refetched. Three more
+    # requests each, so they run through the same bounded pool -- done
+    # sequentially a cold start spends over a minute here.
     def _aux(t):
         e = fresh.get(t["desig"])
         if e is None:
@@ -166,11 +247,18 @@ def run_update(conn, hist_conn=None, source=None):
         # One fetch serves both: the spread feeds the filter cascade, the
         # points let the detail page draw the uncertainty map itself.
         pts = ephemeris.offsets(e.offsets_url)
-        # One fetch of the astrometry serves both the already-observed check
-        # and the discovering observatory.
+        # One fetch of the astrometry serves the already-observed check, the
+        # discovering observatory, and -- since the records were being parsed
+        # and thrown away anyway -- the records themselves, which are what
+        # ds42 scores and the only copy we will ever have of them.
         obs = ephemeris.observations(e.observations_url) or {}
+        # No altitude floor, scoped only to filling holes in the altitude
+        # plot -- see fetch_gap_fill's own docstring for why this is safe
+        # to loosen here without touching the normal fetch above.
+        gap_fill = ephemeris.fetch_gap_fill(t["desig"])
         return t["desig"], (ephemeris.signature(t), {
             "lines": [r.line for r in e.rows],
+            "gap_fill_lines": [r.line for r in gap_fill.rows],
             # When this was fetched, and how far forward it reaches. Together
             # these are what let is_stale() notice an ephemeris that has run
             # out of night without waiting for new astrometry to arrive.
@@ -185,6 +273,10 @@ def run_update(conn, hist_conn=None, source=None):
             "observed_from_site": obs.get("observed_from_site"),
             "discovery_code": obs.get("discovery_code"),
             "obs_codes": obs.get("codes"),
+            # The raw 80-column astrometry. Kept because it is unrecoverable
+            # once MPC drops the object from NEOCP, and because it is ds42's
+            # input. ~0.8 KB per object, ~62 KB a night. See ds42.md.
+            "obs_records": obs.get("records"),
             "error": e.error,
         })
 
@@ -199,6 +291,12 @@ def run_update(conn, hist_conn=None, source=None):
     if new_cache:
         db.save_cache(conn, new_cache)
     cache.update(new_cache)
+
+    _score_new_objects(conn, cache)
+    # After scoring, so the first run already has this cycle's new scores to
+    # backfill rather than leaving them for the next one.
+    _backfill_history_once(conn, hist_conn)
+    mark("ds42")
 
     for t in targets:
         if t["cheap_reject"]:

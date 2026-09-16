@@ -58,6 +58,26 @@ body {
   margin-top: 3px; font-family: var(--mono); font-size: 11px;
   color: var(--faint); letter-spacing: .01em;
 }
+.plan-btn {
+  display: inline-flex; align-items: center; flex: 0 0 auto;
+  padding: 9px 18px; border-radius: 7px; margin-bottom: 2px;
+  background: var(--no); color: #fff; font-family: var(--ui);
+  font-weight: 500; font-size: 12px;
+  letter-spacing: .01em; text-decoration: none; border: 1px solid rgba(0,0,0,.2);
+  box-shadow: 0 1px 0 rgba(0,0,0,.15);
+}
+.plan-btn:hover { background: #b8544a; }
+/* The board's other exit. Same shape as Plan file so the two read as a pair
+   of destinations, but outlined rather than filled: the plan is the thing an
+   observer acts on tonight, and this is the archive they consult. */
+.nav-btn {
+  display: inline-flex; align-items: center; flex: 0 0 auto;
+  padding: 9px 18px; border-radius: 7px; margin-bottom: 2px;
+  background: var(--raised); color: var(--muted); font-family: var(--ui);
+  font-weight: 500; font-size: 12px;
+  letter-spacing: .01em; text-decoration: none; border: 1px solid var(--line);
+}
+.nav-btn:hover { color: var(--ink); border-color: var(--faint); }
 .live { display: flex; gap: 26px; align-items: flex-end; flex-wrap: wrap; }
 .stat .k {
   font-size: 9.5px; letter-spacing: .13em; text-transform: uppercase;
@@ -92,6 +112,24 @@ body {
 }
 .skyside .cap { font-size: 12px; color: var(--faint); margin: 0 0 13px; }
 .skyside .cap strong { color: var(--ink); font-weight: 600; }
+
+.replay { margin-top: 14px; padding-top: 13px; border-top: 1px solid var(--line); }
+.replay-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 6px;
+}
+.replay-label {
+  font-size: 10px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--faint); font-weight: 700;
+}
+.replay-time {
+  font-family: var(--mono); font-size: 11.5px; color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+.replay input[type="range"] {
+  width: 100%; margin: 2px 0 8px; accent-color: var(--amber);
+}
+.replay .ghost { font-size: 10.5px; padding: 2px 8px; }
 
 .legend { width: 100%; margin: 0 0 13px; }
 .legend td { padding: 3px 0; vertical-align: middle; }
@@ -136,6 +174,11 @@ body {
   text-transform: uppercase; color: var(--muted); font-weight: 700;
 }
 .strip .cap { font-size: 12px; color: var(--faint); margin: 0 0 13px; }
+.strip-toggle {
+  display: block; margin: 9px 0 0; padding: 0; border: none; background: none;
+  font: inherit; font-size: 12px; color: var(--faint); cursor: pointer;
+}
+.strip-toggle:hover { color: var(--amber); text-decoration: underline; }
 
 .axis {
   position: relative; height: 15px; margin-left: 104px;
@@ -150,6 +193,10 @@ body {
 .lane {
   display: flex; align-items: center; height: 21px;
 }
+/* Author CSS wins ties against the browser's own [hidden] rule at equal
+   specificity, so an unconditional `display` here would silently defeat
+   `hidden` on the collapsed lanes -- see the same fix on .dirbtn. */
+.lane[hidden] { display: none; }
 .lane .who {
   width: 104px; flex: 0 0 104px; padding-right: 12px;
   font-family: var(--mono); font-size: 11.5px; text-align: right;
@@ -242,20 +289,15 @@ body {
 }
 .chip:hover { color: var(--ink); border-color: var(--faint); }
 .chip.on { color: var(--amber); border-color: rgba(240,166,60,.4); }
-.dirbtn {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; border-radius: 50%;
-  border: 1px solid var(--line); background: var(--raised); color: var(--amber);
-  text-decoration: none; transition: transform .15s ease;
-}
-.dirbtn:hover { border-color: rgba(240,166,60,.4); }
-.dirbtn.flip { transform: rotate(180deg); }
-/* A class alone can't beat the browser's own [hidden] rule here: author CSS
-   wins ties against the user-agent stylesheet, so an unconditional `display`
-   on the same element silently defeats `hidden` unless it's overridden back. */
-.dirbtn[hidden] { display: none; }
+/* The plan-sync button is a <button> wearing .chip, which an <a> does not
+   need: a button brings its own font and cursor from the user agent. */
+button.chip { font-family: inherit; cursor: pointer; appearance: none; }
+button.chip:disabled { cursor: default; opacity: .5; }
+button.chip:disabled:hover { color: var(--muted); border-color: var(--line); }
+.syncstatus { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.syncstatus.bad { color: var(--no); }
 
-/* ---------- filters dropdown ---------- */
+/* ---------- range filters dropdown ---------- */
 .filters-dd { position: relative; }
 .filters-dd > summary {
   list-style: none; cursor: pointer; user-select: none;
@@ -268,21 +310,31 @@ body {
 .filters-dd[open] > summary { color: var(--amber); border-color: rgba(240,166,60,.4); }
 .filters-panel {
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 10;
-  min-width: 250px; background: var(--raised); border: 1px solid var(--line);
+  min-width: 230px; background: var(--raised); border: 1px solid var(--line);
   border-radius: var(--r); padding: 6px; box-shadow: 0 10px 28px rgba(0,0,0,.45);
 }
 .filter-row {
   display: flex; align-items: center; gap: 8px; padding: 6px 7px; border-radius: 5px;
 }
 .filter-row:hover { background: rgba(255,255,255,.035); }
-.filter-row label {
-  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
-  font-size: 12.5px; color: var(--ink); cursor: pointer;
+.filter-label { flex: 1; min-width: 0; font-size: 12.5px; color: var(--ink); }
+.range-input {
+  flex: 0 0 auto; width: 60px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 5px; color: var(--ink); font-family: var(--mono);
+  font-size: 11.5px; padding: 3px 6px; font-variant-numeric: tabular-nums;
 }
-.filter-row input[type="checkbox"] { accent-color: var(--amber); }
-.filter-row .dirbtn { flex: 0 0 auto; width: 21px; height: 21px; }
-.filter-row .dirbtn svg { width: 11px; height: 11px; }
-.filter-row .dim { flex: 0 0 auto; font-size: 10.5px; white-space: nowrap; }
+.range-input:focus { outline: none; border-color: rgba(240,166,60,.5); }
+.filter-warn {
+  margin: -2px 7px 6px; padding: 5px 8px; border-radius: 5px;
+  font-size: 11px; line-height: 1.4; color: var(--warn);
+  background: rgba(217,164,65,.09); border: 1px solid rgba(217,164,65,.3);
+}
+.range-input.active { border-color: rgba(240,166,60,.5); color: var(--amber); }
+/* Chrome/Safari spinner arrows read as clutter at this size; a plain number
+   field with a min/max label either side already communicates "type here". */
+.range-input::-webkit-outer-spin-button,
+.range-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.range-input[type="number"] { -moz-appearance: textfield; }
 .rules { margin-left: auto; font-size: 11.5px; color: var(--faint); }
 .rules code { font-family: var(--mono); color: var(--muted); }
 button.chip { font-family: inherit; cursor: pointer; appearance: none; }
@@ -338,12 +390,13 @@ table.grid thead th {
   padding: 9px 10px; border-bottom: 1px solid var(--line); white-space: nowrap;
 }
 table.grid thead th.l { text-align: left; }
-table.grid thead th.sorted { color: var(--ink); }
-table.grid thead th.sortable { cursor: pointer; user-select: none; }
-table.grid thead th.sortable:hover { color: var(--ink); }
-table.grid thead .sortlink { color: inherit; text-decoration: none; }
-table.grid thead .sortlink:hover { color: var(--ink); text-decoration: underline; }
-table.grid thead .arrow { margin-left: 3px; font-size: 8px; }
+table.grid thead th.sorted { color: var(--amber); }
+table.grid thead .sortth {
+  color: inherit; text-decoration: none; cursor: pointer;
+}
+table.grid thead .sortth:hover { color: var(--ink); }
+table.grid thead th.sorted .sortth:hover { color: var(--amber); }
+table.grid thead .arrow { margin-left: 4px; font-size: 8px; color: var(--amber); }
 table.grid tbody td {
   padding: 7px 10px; text-align: right; white-space: nowrap;
   border-bottom: 1px solid var(--hair);
@@ -392,6 +445,13 @@ td.expo { color: var(--amber); }
 .pill.new { color: var(--cyan); border-color: rgba(95,201,212,.4); }
 .pill.xc { color: var(--warn); border-color: rgba(217,164,65,.45); }
 .pill.ob { color: var(--faint); border-color: var(--line); }
+/* Somebody else's mark, not yours. Green, because it means the same thing a
+   green row means -- this has been shot -- but hollow, because it has not
+   been shot by you and the target is still on your list. */
+.pill.byother {
+  color: var(--go); border-color: rgba(85,179,126,.45);
+  background: none; cursor: help; font-weight: 500;
+}
 /* Poor sky, not blocked sky. Amber, never red: nothing was removed. */
 .pill.sky { color: var(--warn); border-color: rgba(217,164,65,.45); background: rgba(217,164,65,.07); }
 .warn { color: var(--warn); }
@@ -533,3 +593,69 @@ h2.sect {
 td.disc { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 td.disc span[title] { cursor: help; border-bottom: 1px dotted var(--line2); }
 tr.gone td.disc { color: var(--faint); }
+
+/* ---------- accounts ----------
+   Reads are open; writes are not. The chip in the header is the only place
+   that state is visible, so it sits in the same row as the night's numbers
+   rather than in a menu an observer has to go looking for. */
+.stat.who .v { font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.stat.who form.inline { display: inline; margin: 0; }
+a.ghost.btn {
+  background: var(--raised); color: var(--muted); border: 1px solid var(--line);
+  border-radius: 5px; padding: 2px 9px; text-decoration: none;
+  font-family: var(--ui); font-size: 11px; font-weight: 500;
+}
+a.ghost.btn:hover { color: var(--cyan); border-color: rgba(95,201,212,.4); }
+
+.authbox {
+  max-width: 380px; margin: 34px auto 0;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 26px 26px 22px;
+}
+.authbox h2 { margin: 0 0 8px; font-size: 17px; font-weight: 600; }
+.authbox .cap { color: var(--muted); font-size: 12px; margin: 0 0 16px; }
+.authbox .cap.alt { margin: 14px 0 0; }
+.authbox a { color: var(--cyan); }
+.authbox label {
+  display: block; margin: 14px 0 5px;
+  font-size: 9.5px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--faint); font-weight: 600;
+}
+.authbox label .dim { letter-spacing: 0; text-transform: none; }
+.authbox input[type=text], .authbox input[type=password],
+.authbox input[type=email], .authbox input:not([type]) {
+  width: 100%; background: var(--ground); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 5px;
+  padding: 8px 10px; font-family: var(--mono); font-size: 13px;
+}
+.authbox input:focus {
+  outline: none; border-color: var(--amber);
+  box-shadow: 0 0 0 2px var(--amber-d);
+}
+.authbox .hint { margin: 5px 0 0; font-size: 11px; color: var(--faint); }
+.authbox button.primary {
+  margin-top: 20px; width: 100%; cursor: pointer;
+  background: var(--amber); color: #15100a; border: 0;
+  border-radius: 5px; padding: 9px 12px;
+  font-family: var(--ui); font-size: 13px; font-weight: 600;
+}
+.authbox button.primary:hover { filter: brightness(1.08); }
+/* An error here is a dead end until it is read, so it is stated rather than
+   tinted: the border alone is easy to miss on a dome screen at low brightness. */
+.autherr {
+  margin: 0 0 4px; padding: 8px 10px; border-radius: 5px;
+  background: rgba(207,97,84,.12); border: 1px solid rgba(207,97,84,.45);
+  color: var(--no); font-size: 12px;
+}
+
+/* ---------- ds42 ----------
+   A posterior, not a rank. Tabular figures so the decimal points line up
+   down the column, which is how a reader spots the 0.06 sitting next to a
+   digest2 of 77. Deliberately uncoloured: whether a low p_neo should
+   discourage observing is exactly the question this column exists to
+   investigate, and the board should not answer it by implication. */
+td.ds42 {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+td.ds42 span[title] { cursor: help; }

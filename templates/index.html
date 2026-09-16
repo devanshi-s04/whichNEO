@@ -14,6 +14,21 @@
     <h1>Which<b>NEO</b></h1>
     <div class="where">L01 &middot; TI&#268;AN STATION, VI&#352;NJAN &middot; 45.2909&deg;N 13.74930&deg;E 381 m &middot; 1.0-m f/2.9</div>
   </div>
+  {# The plan file, and the control that keeps a copy of it current on this
+     computer. They sit together because they are the same thing seen two
+     ways -- read it here, or have it written to disk beside the telescope.
+     The sync control moved here with the plan link itself: it used to sit
+     beside the plan chip in the toolbar below, which is no longer there. #}
+  <a class="plan-btn" href="{{ url_for('plan_text') }}" target="_blank" rel="noopener">Plan file</a>
+  <button type="button" id="planSyncBtn" class="chip"
+          title="Keep a local .txt file on this computer in sync with the plan file, updated on every refresh">sync to file</button>
+  <span id="planSyncStatus" class="syncstatus"></span>
+  {# Promoted out of the toolbar chips, where it sat next to a plan-file link
+     that has since moved up here. It leads to a different page rather than
+     changing this one, which is what the other chips do -- so it belongs
+     beside Plan file, the board's other exit, not among the filters. #}
+  <a class="nav-btn" href="{{ url_for('history_view') }}"
+     title="Every NEOCP object this board has polled, what its digest2 score and magnitude did over time, and how it eventually resolved">History</a>
   <div class="live">
     <div class="stat"><div class="k">Night</div>
       <div class="v">{{ status.night }}</div></div>
@@ -27,6 +42,22 @@
     <div class="stat"><div class="k">Cross-check</div>
       <div class="v bad">{{ status.mismatches }}</div></div>
     {% endif %}
+    {# Who is marking targets. Anyone may read the board; changing it needs an
+       account, so this is the one control that has to be visible from every
+       page an observer works from. #}
+    <div class="stat who">
+      <div class="k">Observer</div>
+      <div class="v">
+        {% if current_user %}
+          {{ current_user.username }}
+          <form method="post" action="{{ url_for('logout') }}" class="inline">
+            <button class="ghost">sign out</button>
+          </form>
+        {% else %}
+          <a class="ghost btn" href="{{ url_for('login') }}">sign in</a>
+        {% endif %}
+      </div>
+    </div>
   </div>
 </div>
 
@@ -77,6 +108,31 @@
       and the plan file, and no marker is drawn, for as long as they are
       inside it. Nothing can override it.
     </p>
+    {% if replay_default %}
+    <div class="replay">
+      <div class="replay-row">
+        <span class="replay-label">Replay</span>
+        <span class="replay-time" id="replayTime">{{ 'live' if strip else '' }}</span>
+      </div>
+      {% if archived_nights %}
+      <select id="replayNight">
+        {% if strip %}<option value="">Tonight</option>{% endif %}
+        {% for n in archived_nights %}
+        <option value="{{ n.night }}"
+                {{ 'selected' if not strip and loop.first }}>{{ n.night }}</option>
+        {% endfor %}
+      </select>
+      {% endif %}
+      <input type="range" id="replaySlider" min="{{ replay_default.start_ts|int }}"
+             max="{{ replay_default.end_ts|int }}" step="60"
+             value="{{ replay_default.end_ts|int }}">
+      <div class="replay-row">
+        <span class="dim" id="replayStart">{{ replay_default.start_label }}</span>
+        {% if strip %}<button type="button" class="ghost" id="replayLive">back to live</button>{% endif %}
+        <span class="dim" id="replayEnd">{{ replay_default.end_label }}</span>
+      </div>
+    </div>
+    {% endif %}
   </div>
 </section>
 {% endif %}
@@ -96,7 +152,7 @@
       <div class="nowline" style="left:calc(104px + (100% - 104px) * {{ strip.now_pct }} / 100)"></div>
     {% endif %}
     {% for l in strip.lanes %}
-    <div class="lane">
+    <div class="lane{{ ' lane-extra' if l.extra }}" {{ 'hidden' if l.extra }}>
       <div class="who">{{ l.desig }}</div>
       <div class="track">
         <div class="bar{{ ' done' if l.observed }}" style="left:{{ l.left }}%;width:{{ l.width }}%"
@@ -108,7 +164,11 @@
     </div>
     {% endfor %}
   </div>
-  {% if strip.hidden %}<p class="cap" style="margin:9px 0 0">&hellip;and {{ strip.hidden }} more below.</p>{% endif %}
+  {% if strip.hidden %}
+  <button type="button" class="cap strip-toggle" id="stripToggle">
+    &hellip;and {{ strip.hidden }} more below &mdash; show all
+  </button>
+  {% endif %}
 </section>
 {% endif %}
 
@@ -136,19 +196,16 @@
 </section>
 {% endif %}
 
-{% macro dir_button(key, is_on, is_asc) %}
-<button type="button" id="sortDir-{{ key }}" data-col="{{ key }}"
-        class="dirbtn{{ ' flip' if is_on and not is_asc }}"
-        title="Flip sort direction" {{ 'hidden' if not is_on }}>
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"
-    stroke-linecap="round" stroke-linejoin="round">
-    <path d="M17 2l4 4-4 4"/><path d="M21 6H8a4 4 0 0 0-4 4"/>
-    <path d="M7 22l-4-4 4-4"/><path d="M3 18h13a4 4 0 0 0 4-4"/>
-  </svg>
-</button>
+{% macro sort_th(key, label, cls='', title='') %}
+{% set active_cols = ranking.parse_mode_columns(mode) %}
+{% set is_on = key in active_cols %}
+{% set is_asc = active_cols.get(key, True) %}
+<th class="{{ cls }}{{ ' sorted' if is_on }}"{% if title %} title="{{ title }}"{% endif %}>
+  <a href="{{ url_for('index', sort=ranking.mode_after_click(mode, key)) }}" class="sortth" data-col="{{ key }}">{{ label
+  }}<span class="arrow" {{ 'hidden' if not is_on }}>{{ ('&#9650;' if is_asc else '&#9660;')|safe }}</span></a>
+</th>
 {% endmacro %}
 
-{% set active_cols = ranking.parse_mode_columns(mode) %}
 <div class="bar-row">
   <div class="seg">
     <a href="{{ url_for('index', sort='chronological') }}" data-sort="chronological"
@@ -156,28 +213,33 @@
     <a href="{{ url_for('index', sort='score') }}" data-sort="score"
        class="{{ 'on' if mode == 'score' }}">By value</a>
   </div>
-  <details class="filters-dd" id="filtersDd">
-    <summary id="filtersSummary">Filters{% if active_cols %} ({{ active_cols|length }}){% endif %}</summary>
+  <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=(0 if show_hidden else 1)) }}">hidden</a>
+  <details class="filters-dd" id="rangeDd">
+    <summary id="rangeSummary">Range filters{% if range_filters %} ({{ range_filters|length }}){% endif %}</summary>
     <div class="filters-panel">
       {% for key, meta in ranking.SORTABLE_COLUMNS.items() %}
-      {% set is_on = key in active_cols %}
-      {% set is_asc = active_cols.get(key, True) %}
-      <div class="filter-row">
-        <label>
-          <input type="checkbox" class="filter-check" id="filterCheck-{{ key }}"
-                 data-col="{{ key }}" {{ 'checked' if is_on }}>
-          {{ meta.label }}
-        </label>
-        {{ dir_button(key, is_on, is_asc) }}
-        <span id="sortLabel-{{ key }}" class="dim" data-low="{{ meta.low }}" data-high="{{ meta.high }}"
-              {{ 'hidden' if not is_on }}>{{ meta.low if is_asc else meta.high }}</span>
+      {% set range = range_filters.get(key) %}
+      <div class="filter-item">
+        <div class="filter-row">
+          <span class="filter-label">{{ meta.label }}</span>
+          <input type="number" step="any" class="range-input{{ ' active' if range and range[0] is not none }}"
+                 id="rangeMin-{{ key }}" data-col="{{ key }}" data-bound="min" placeholder="min"
+                 value="{{ '%g'|format(range[0]) if range and range[0] is not none else '' }}">
+          <span class="dim">&ndash;</span>
+          <input type="number" step="any" class="range-input{{ ' active' if range and range[1] is not none }}"
+                 id="rangeMax-{{ key }}" data-col="{{ key }}" data-bound="max" placeholder="max"
+                 value="{{ '%g'|format(range[1]) if range and range[1] is not none else '' }}">
+        </div>
+        {% if key == 'alt' %}
+        {% set below_floor = range and ((range[0] is not none and range[0] < config.MIN_ALT) or (range[1] is not none and range[1] < config.MIN_ALT)) %}
+        <div class="filter-warn" id="warn-alt" {{ 'hidden' if not below_floor }}>
+          Below {{ config.MIN_ALT|int }}&deg; cannot be observed from here
+        </div>
+        {% endif %}
       </div>
       {% endfor %}
     </div>
   </details>
-  <a class="chip {{ 'on' if show_hidden }}" href="{{ url_for('index', sort=mode, hidden=1) }}">hidden</a>
-  <a class="chip" href="{{ url_for('plan_text') }}">plan file</a>
-  <a class="chip" href="{{ url_for('history_view') }}">history</a>
   <span class="rules">
     score&nbsp;&ge;&nbsp;{{ config.MIN_SCORE }} &middot; V&nbsp;&le;&nbsp;{{ config.MAX_MAG }} &middot;
     motion&nbsp;&ge;&nbsp;{{ config.MIN_MOTION }}&Prime;/min &middot; moon&nbsp;&ge;&nbsp;{{ config.MOON_SEP_MIN }}&deg; &middot;
@@ -191,12 +253,21 @@
       <th class="l">#</th><th>Peak</th><th class="l">Target</th>
       <th class="l" title="Observatory code of the discovery observation">Disc. obs</th>
       <th class="l">MPC</th>
-      <th>Score</th><th>V</th>
-      <th title="Frames x seconds, from the observatory's speed table at each target's best altitude">Shoot</th>
-      <th>&Prime;/min</th>
-      <th title="Altitude at the next usable moment, which is now while the target is up">Alt</th>
-      <th title="Azimuth at the next usable moment. Compass bearing from north; the sky map above shows the same position">Az</th>
-      <th>Moon</th><th>Unseen</th><th>q / e</th>
+      {{ sort_th('digest2', 'Score') }}
+      {# The tooltip is the column. ds42 scores the DISCOVERY TRACKLET, so
+         unlike the digest2 score beside it this number does not move as
+         follow-up comes in -- measured over two nights, every object seen on
+         both scored identically. Without saying so, a frozen number next to a
+         moving one reads as a bug. See ds42.md. #}
+      {{ sort_th('ds42', 'ds42', title="Probability this is an NEO, from ds42. Scored from the DISCOVERY TRACKLET only, so unlike the digest2 score it does not change as follow-up observations arrive. A dash means ds42 could not compute a posterior; hover it for why.") }}
+      {{ sort_th('mag', 'V') }}
+      {{ sort_th('exposure_min', 'Shoot', title="Frames x seconds, from the observatory's speed table at each target's best altitude") }}
+      {{ sort_th('motion', '&Prime;/min'|safe) }}
+      {{ sort_th('alt', 'Alt', title='Altitude at the next usable moment, which is now while the target is up') }}
+      {{ sort_th('az', 'Az', title='Azimuth at the next usable moment. Compass bearing from north; the sky map above shows the same position') }}
+      {{ sort_th('moon', 'Moon') }}
+      {{ sort_th('unseen', 'Unseen') }}
+      {{ sort_th('q', 'q / e') }}
       <th>Value</th><th class="l">Status</th><th></th>
     </tr></thead>
     <tbody id="rows">{% include "_rows.html" %}</tbody>
@@ -283,6 +354,148 @@
 const POLL = {{ poll_interval }} * 1000;
 const TZ = {{ tzname|tojson }};
 const params = new URLSearchParams(window.location.search);
+const HAS_LIVE = {{ 'true' if strip else 'false' }};
+const ARCHIVE_BOUNDS = {{ archived_nights|tojson }};
+// replay_default already *is* {night:"", start_ts, end_ts, start_label,
+// end_label} whenever tonight has a window -- same shape as one entry of
+// ARCHIVE_BOUNDS, just for night="".
+const LIVE_BOUNDS = {{ (replay_default if strip else none)|tojson }};
+
+// Keeps a .txt file on THIS computer (not the server -- see planHandle
+// below) in sync with the plan file, rewritten every refresh() tick. Plain
+// <a href> downloads can't do this: each one is a brand new file, never an
+// update to the same one. The File System Access API can write the same
+// file repeatedly, but only Chromium browsers implement it, and only after
+// the user has granted access to a specific file -- there is no way to
+// start writing to an arbitrary path unasked. The handle it hands back is
+// IndexedDB-storable, so that grant survives a reload; the browser still
+// requires a fresh user gesture to actually reuse it once permission has
+// gone back to "ask again" (e.g. after the tab was closed), which is what
+// the "resume sync" state below is for.
+let planHandle = null;
+let planLastWritten = null;
+const planSyncBtn = document.getElementById('planSyncBtn');
+const planSyncStatus = document.getElementById('planSyncStatus');
+
+function idbTxn(mode) {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('whichneo-plan-sync', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('handles');
+    req.onsuccess = () => resolve(req.result.transaction('handles', mode).objectStore('handles'));
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  const store = await idbTxn('readonly');
+  return new Promise((resolve, reject) => {
+    const r = store.get(key);
+    r.onsuccess = () => resolve(r.result || null);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function idbSet(key, value) {
+  const store = await idbTxn('readwrite');
+  return new Promise((resolve, reject) => {
+    const r = store.put(value, key);
+    r.onsuccess = () => resolve();
+    r.onerror = () => reject(r.error);
+  });
+}
+
+function setPlanSyncLabel(text, on) {
+  if (!planSyncBtn) return;
+  planSyncBtn.textContent = text;
+  planSyncBtn.classList.toggle('on', !!on);
+}
+
+function timeNow() {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function setSyncStatus(text, isError) {
+  if (!planSyncStatus) return;
+  planSyncStatus.textContent = text;
+  planSyncStatus.classList.toggle('bad', !!isError);
+}
+
+async function writePlanTo(handle, text) {
+  const writable = await handle.createWritable();
+  await writable.write(text);
+  await writable.close();
+}
+
+// Shared by every path that has a live handle -- the initial connect, a
+// resumed session, restoring a still-granted permission on page load, and
+// every later refresh() tick. One place to keep the "synced HH:MM:SS" /
+// "sync failed" status honest no matter which of those triggered it.
+async function syncPlanNow() {
+  if (!planHandle) return;
+  try {
+    const text = await fetch('/plan').then(r => r.ok ? r.text() : null);
+    if (text === null) return;
+    if (text !== planLastWritten) {
+      await writePlanTo(planHandle, text);
+      planLastWritten = text;
+    }
+    setSyncStatus('synced ' + timeNow(), false);
+  } catch (e) {
+    // Permission revoked, or the file/its folder went away -- don't keep
+    // failing silently every poll; make it visibly need reconnecting.
+    planHandle = null;
+    setPlanSyncLabel('resume sync', false);
+    setSyncStatus('sync failed — click to resume', true);
+  }
+}
+
+async function connectPlanFile() {
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: 'whichneo-plan.txt',
+      types: [{ description: 'Text file', accept: { 'text/plain': ['.txt'] } }],
+    });
+    planHandle = handle;
+    await idbSet('planHandle', handle);
+    setPlanSyncLabel('synced to file', true);
+    await syncPlanNow();
+  } catch (e) {
+    if (e.name !== 'AbortError') console.error('plan sync setup failed', e);
+  }
+}
+
+async function resumePlanSync() {
+  try {
+    const handle = await idbGet('planHandle');
+    if (!handle) return connectPlanFile();
+    if (await handle.requestPermission({ mode: 'readwrite' }) === 'granted') {
+      planHandle = handle;
+      setPlanSyncLabel('synced to file', true);
+      await syncPlanNow();
+    }
+  } catch (e) { console.error('resuming plan sync failed', e); }
+}
+
+async function initPlanSync() {
+  if (!planSyncBtn) return;
+  if (!window.showSaveFilePicker) {
+    setPlanSyncLabel('sync to file (needs Chrome/Edge)', false);
+    planSyncBtn.disabled = true;
+    return;
+  }
+  planSyncBtn.addEventListener('click', () => {
+    if (planHandle) return;   // already connected
+    planSyncBtn.textContent.startsWith('resume') ? resumePlanSync() : connectPlanFile();
+  });
+  const handle = await idbGet('planHandle').catch(() => null);
+  if (!handle) return;
+  if (await handle.queryPermission({ mode: 'readwrite' }).catch(() => 'denied') === 'granted') {
+    planHandle = handle;
+    setPlanSyncLabel('synced to file', true);
+    await syncPlanNow();
+  } else {
+    setPlanSyncLabel('resume sync', false);
+  }
+}
+initPlanSync();
 
 // Which plan entries the observer has opened. Kept across refreshes so a
 // poll never closes something being read mid-slew.
@@ -294,31 +507,37 @@ function applyOpenPlans() {
   });
 }
 
-// Sort-bar links/checkboxes drive the table order without a full page
-// reload -- just refetch /rows. A full navigation here would re-render the
-// whole page (night strip, upcoming cards, everything) for a change that
-// only affects table order, which is both slow and resets scroll position,
-// making the page visibly jump.
-const SORT_COLUMNS = {{ ranking.SORTABLE_COLUMNS.keys()|list|tojson }};
-
-// Ordered column -> ascending map. Order is insertion order (the sequence
-// columns were checked in), which is also the compound sort's tie-break
-// priority: the first entry sorts first, later ones only matter among rows
-// still tied on everything before them. Seeded from what the page loaded
-// with, so a refresh or a shared link reproduces the same combination.
-const activeCols = new Map(Object.entries({{ active_cols|tojson }}));
-
-function currentMode() {
-  if (activeCols.size === 0) return 'chronological';
-  return Array.from(activeCols, ([k, asc]) => k + '_' + (asc ? 'asc' : 'desc')).join(',');
+// Sort links (Sequence/By value, and now every column header) carry the new
+// mode in their own href's ?sort=, so clicking them is handled without a
+// full page reload -- just refetch /rows. A full navigation here would
+// re-render the whole page (night strip, upcoming cards, everything) for a
+// change that only affects table order, which is both slow and resets
+// scroll position, making the page visibly jump.
+// Mirrors ranking.parse_mode_columns() / ranking.mode_after_click() so the
+// no-reload path can compute the same thing the server would have rendered,
+// without a round trip. Map preserves insertion order like the Python dict
+// does, which is what makes several active columns combine into one
+// compound sort in click order.
+function parseModeColumns(mode) {
+  const active = new Map();
+  if (!mode || mode === 'chronological' || mode === 'score') return active;
+  mode.split(',').forEach(token => {
+    const m = /^([a-z0-9_]+)_(asc|desc)$/.exec(token);
+    if (m) active.set(m[1], m[2] === 'asc');
+  });
+  return active;
 }
 
-function updateSortBar() {
-  // Read back from params (already updated by whichever caller changed the
-  // sort) rather than recomputing from activeCols, so this reflects the
-  // Sequence/By value modes too -- those aren't part of the column
-  // combination at all.
-  const mode = params.get('sort') || 'chronological';
+function modeAfterClick(mode, key) {
+  const active = parseModeColumns(mode);
+  if (!active.has(key)) active.set(key, true);
+  else if (active.get(key)) active.set(key, false);
+  else active.delete(key);
+  if (active.size === 0) return 'chronological';
+  return Array.from(active, ([k, asc]) => k + '_' + (asc ? 'asc' : 'desc')).join(',');
+}
+
+function updateSortBar(mode) {
   document.querySelectorAll('.seg a[data-sort]').forEach(a => {
     a.classList.toggle('on', a.dataset.sort === mode);
   });
@@ -326,59 +545,84 @@ function updateSortBar() {
   document.querySelector('.seg a[data-sort="chronological"]').href = withSort('chronological');
   document.querySelector('.seg a[data-sort="score"]').href = withSort('score');
 
-  const summary = document.getElementById('filtersSummary');
-  summary.textContent = activeCols.size ? `Filters (${activeCols.size})` : 'Filters';
+  const active = parseModeColumns(mode);
 
-  SORT_COLUMNS.forEach(key => {
-    const active = activeCols.has(key);
-    document.getElementById('filterCheck-' + key).checked = active;
-    const dirBtn = document.getElementById('sortDir-' + key);
-    const label = document.getElementById('sortLabel-' + key);
-    dirBtn.hidden = !active;
-    label.hidden = !active;
-    if (active) {
-      const asc = activeCols.get(key);
-      dirBtn.classList.toggle('flip', !asc);
-      label.textContent = asc ? label.dataset.low : label.dataset.high;
-    }
+  document.querySelectorAll('.sortth').forEach(a => {
+    const key = a.dataset.col;
+    const isOn = active.has(key);
+    a.closest('th').classList.toggle('sorted', isOn);
+    const arrow = a.querySelector('.arrow');
+    arrow.hidden = !isOn;
+    if (isOn) arrow.textContent = active.get(key) ? '▲' : '▼';
+    a.href = withSort(modeAfterClick(mode, key));
   });
 }
 
-function applySort() {
-  params.set('sort', currentMode());
+// Typed min/max bounds per column, e.g. "mag:18:21,alt:15:" (an empty side
+// is an open bound, not zero). Rebuilt from the actual inputs on every
+// keystroke rather than tracked separately, so there's exactly one source
+// of truth and nothing to fall out of sync. Independent of the sort links
+// above -- a range can narrow the table regardless of what it's sorted by.
+function applyRangeFilters() {
+  const tokens = [];
+  document.querySelectorAll('.range-input[data-bound="min"]').forEach(minInput => {
+    const key = minInput.dataset.col;
+    const maxInput = document.getElementById('rangeMax-' + key);
+    const lo = minInput.value.trim(), hi = maxInput.value.trim();
+    minInput.classList.toggle('active', lo !== '');
+    maxInput.classList.toggle('active', hi !== '');
+    if (lo !== '' || hi !== '') tokens.push(key + ':' + lo + ':' + hi);
+  });
+  if (tokens.length) params.set('range', tokens.join(',')); else params.delete('range');
   history.replaceState(null, '', location.pathname + '?' + params);
-  updateSortBar();
+  document.getElementById('rangeSummary').textContent =
+    tokens.length ? `Range filters (${tokens.length})` : 'Range filters';
   refresh();
 }
 
-document.querySelectorAll('.filter-check').forEach(cb => {
-  cb.addEventListener('change', () => {
-    const key = cb.dataset.col;
-    if (cb.checked) {
-      if (!activeCols.has(key)) activeCols.set(key, true);   // default: ascending
-    } else {
-      activeCols.delete(key);
-    }
-    applySort();
+// The horizon floor is a physical limit (pipeline.row_rejections), not a
+// preference -- no target can ever have an altitude below it, so warn
+// immediately rather than let someone wait on an empty table wondering why.
+const MIN_ALT_DEG = {{ config.MIN_ALT }};
+function checkAltWarning() {
+  const warn = document.getElementById('warn-alt');
+  if (!warn) return;
+  const lo = document.getElementById('rangeMin-alt').value.trim();
+  const hi = document.getElementById('rangeMax-alt').value.trim();
+  const below = (lo !== '' && parseFloat(lo) < MIN_ALT_DEG) ||
+                (hi !== '' && parseFloat(hi) < MIN_ALT_DEG);
+  warn.hidden = !below;
+}
+
+// Debounced so a range doesn't refetch on every keystroke while typing a
+// number -- only once you pause, same as the eventual page feels for a poll.
+let rangeDebounce;
+document.querySelectorAll('.range-input').forEach(input => {
+  input.addEventListener('input', () => {
+    checkAltWarning();
+    clearTimeout(rangeDebounce);
+    rangeDebounce = setTimeout(applyRangeFilters, 400);
   });
 });
 
 document.addEventListener('click', ev => {
-  const dirBtn = ev.target.closest('.dirbtn[data-col]');
-  if (dirBtn) {
-    const key = dirBtn.dataset.col;
-    if (activeCols.has(key)) activeCols.set(key, !activeCols.get(key));
-    applySort();
+  const stripToggle = ev.target.closest('#stripToggle');
+  if (stripToggle) {
+    const extra = document.querySelectorAll('.lane-extra');
+    const expanding = extra.length && extra[0].hidden;
+    extra.forEach(lane => { lane.hidden = !expanding; });
+    stripToggle.textContent = expanding
+      ? 'show fewer'
+      : `…and ${extra.length} more below — show all`;
     return;
   }
-  const seqLink = ev.target.closest('.seg a[data-sort]');
-  if (seqLink) {
+  const sortLink = ev.target.closest('.seg a[data-sort], .sortth');
+  if (sortLink) {
     ev.preventDefault();
-    activeCols.clear();
-    const newSort = new URL(seqLink.href, location.href).searchParams.get('sort');
+    const newSort = new URL(sortLink.href, location.href).searchParams.get('sort');
     params.set('sort', newSort);
     history.replaceState(null, '', location.pathname + '?' + params);
-    updateSortBar();
+    updateSortBar(newSort);
     refresh();
     return;
   }
@@ -418,20 +662,100 @@ document.addEventListener('mouseout', ev => {
   if (el) linkHover(el.dataset.desig, false);
 });
 
+// Replaying the sky map, live or archived. Touching either control takes
+// the map out of live polling -- replayNight === '' means tonight, anything
+// else names an archived night written by archive_night() at the last
+// rollover. Scrubbing just reads the tracks behind whichever night is
+// selected at an earlier instant; nothing new is collected either way.
+let replayTs = null;
+let replayNight = (ARCHIVE_BOUNDS.length && !HAS_LIVE) ? ARCHIVE_BOUNDS[0].night : '';
+const replaySlider = document.getElementById('replaySlider');
+const replayTimeEl = document.getElementById('replayTime');
+const replayLiveBtn = document.getElementById('replayLive');
+const replayNightSel = document.getElementById('replayNight');
+const replayStartEl = document.getElementById('replayStart');
+const replayEndEl = document.getElementById('replayEnd');
+
+function boundsFor(night) {
+  if (!night) return LIVE_BOUNDS;
+  return ARCHIVE_BOUNDS.find(n => n.night === night) || null;
+}
+
+async function loadSky(ts) {
+  const qs = new URLSearchParams(params);
+  if (replayNight) qs.set('night', replayNight);
+  if (ts !== null) qs.set('ts', ts);
+  const resp = await fetch('/skymap.svg?' + qs.toString());
+  const svg = await resp.text();
+  const plot = document.getElementById('skyplot');
+  if (plot) plot.innerHTML = svg;
+  if (replayTimeEl) {
+    replayTimeEl.textContent = (ts === null && !replayNight)
+      ? 'live' : (resp.headers.get('X-Sky-Time') || '');
+  }
+}
+
+if (replaySlider) {
+  replaySlider.addEventListener('input', () => {
+    replayTs = Number(replaySlider.value);
+    loadSky(replayTs);
+  });
+}
+if (replayNightSel) {
+  replayNightSel.addEventListener('change', () => {
+    replayNight = replayNightSel.value;
+    const b = boundsFor(replayNight);
+    if (b) {
+      replaySlider.min = Math.floor(b.start_ts);
+      replaySlider.max = Math.floor(b.end_ts);
+      replaySlider.value = replaySlider.max;
+      if (replayStartEl) replayStartEl.textContent = b.start_label;
+      if (replayEndEl) replayEndEl.textContent = b.end_label;
+    }
+    replayTs = Number(replaySlider.value);
+    loadSky(replayTs);
+  });
+}
+if (replayLiveBtn) {
+  replayLiveBtn.addEventListener('click', () => {
+    replayTs = null;
+    replayNight = '';
+    if (replayNightSel) replayNightSel.value = '';
+    if (LIVE_BOUNDS) {
+      replaySlider.min = Math.floor(LIVE_BOUNDS.start_ts);
+      replaySlider.max = Math.floor(LIVE_BOUNDS.end_ts);
+      replaySlider.value = replaySlider.max;
+      if (replayStartEl) replayStartEl.textContent = LIVE_BOUNDS.start_label;
+      if (replayEndEl) replayEndEl.textContent = LIVE_BOUNDS.end_label;
+    }
+    loadSky(null);
+  });
+}
+
+// If tonight has nothing up yet, land on the most recent archived night
+// instead of an empty live map.
+if (!HAS_LIVE && replayNight) loadSky(Number(replaySlider ? replaySlider.value : 0));
+
+function skyIsLive() { return replayTs === null && !replayNight; }
+
 async function refresh() {
   try {
     const [rows, sky, st] = await Promise.all([
       fetch('/rows?' + params.toString()).then(r => r.text()),
-      fetch('/skymap.svg?' + params.toString()).then(r => r.text()),
+      skyIsLive() ? fetch('/skymap.svg?' + params.toString()).then(r => r.text()) : null,
       fetch('/status').then(r => r.json())
     ]);
     document.getElementById('rows').innerHTML = rows;
-    const plot = document.getElementById('skyplot');
-    if (plot) plot.innerHTML = sky;
+    if (sky !== null) {
+      const plot = document.getElementById('skyplot');
+      if (plot) plot.innerHTML = sky;
+    }
     applyOpenPlans();
     document.getElementById('last-update').innerHTML =
       st.last_update_local + '<small> ' + TZ + '</small>';
   } catch (e) { /* keep the last good render */ }
+
+  await syncPlanNow();
 }
 setInterval(refresh, POLL);
 applyOpenPlans();

@@ -11,6 +11,12 @@
   <td class="l nm">
     <a href="{{ url_for('target_detail', desig=r.desig) }}">{{ r.desig }}</a>
     {% if r.is_new %} <span class="pill new">new</span>{% endif %}
+    {# Observer state is per account, so a target another observer has already
+       shot still sits in your list looking outstanding. This is the only thing
+       standing between that and two twenty-minute integrations on the same
+       object, so it is on the designation rather than tucked in the actions. #}
+    {% if r.others_observed %} <span class="pill byother"
+        title="Already marked done by {{ r.others_names }}. Their marks are their own &mdash; this target is still outstanding on your list.">done by {{ r.others_names }}</span>{% endif %}
     {% if r.crosscheck and not r.crosscheck.ok %} <span class="pill xc">xcheck</span>{% endif %}
   </td>
 
@@ -38,6 +44,19 @@
   </td>
 
   <td>{{ r.score }}</td>
+  {# Three states, deliberately distinguishable: a posterior, a scored object
+     with no posterior (shown as a dash carrying the reason), and one not
+     scored at all. Collapsing the last two would hide whether ds42 has an
+     opinion or has simply not looked yet. #}
+  <td class="ds42">
+    {%- if r.p_neo is not none -%}
+      <span title="ds42 p(NEO) = {{ '%.4f'|format(r.p_neo) }} from {{ r.ds42_n_obs }} observation(s) of the discovery tracklet{% if r.ds42_status != 'ok' %} — status {{ r.ds42_status }}{% endif %}">{{ '%.3f'|format(r.p_neo) }}</span>
+    {%- elif r.ds42_status -%}
+      <span class="dim" title="ds42 could not compute a posterior: {{ r.ds42_status }}{% if r.ds42_status == 'empty_region' %} — no bound orbit is consistent with this tracklet at all{% endif %}">&mdash;</span>
+    {%- else -%}
+      <span class="dim" title="Not scored by ds42. Objects rejected before their astrometry is fetched never reach it.">&middot;</span>
+    {%- endif -%}
+  </td>
   <td>{{ '%.1f'|format(r.vmag) }}</td>
   <td class="expo"
       title="{{ r.frames }} frames of {{ r.frame_sec }} s, from {{ '%.2f'|format(r.frame_motion) if r.frame_motion else '?' }}&Prime;/min at best altitude &mdash; obsExposure (the legacy magnitude figure) says {{ '%.0f'|format(r.exposure_min) if r.exposure_min else '—' }} min, which is not the instruction">
@@ -77,6 +96,7 @@
 
   <td>
     <form method="post" action="{{ url_for('mark', desig=r.desig) }}" class="acts">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
       {% if r.plan_block %}
       <button type="button" class="ghost" data-plan="{{ r.desig }}"
               title="Show this target's plan entry">plan</button>
@@ -92,7 +112,7 @@
 {% if r.plan_block %}
 <tr class="planrow" id="plan-{{ r.desig }}" hidden>
   <td></td>
-  <td colspan="16">
+  <td colspan="17">
     <div class="planwrap">
       <pre id="blk-{{ r.desig }}">{{ r.plan_block }}</pre>
       <button type="button" class="ghost copy" data-copy="blk-{{ r.desig }}">copy</button>
@@ -101,5 +121,5 @@
 </tr>
 {% endif %}
 {% else %}
-<tr><td colspan="17" class="empty">No targets yet &mdash; has the updater run?</td></tr>
+<tr><td colspan="18" class="empty">No targets yet &mdash; has the updater run?</td></tr>
 {% endfor %}

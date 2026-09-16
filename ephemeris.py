@@ -36,7 +36,17 @@ _UA = {"User-Agent": "visnjan_whichneo/0.2 "
 #   2 -- offsets regex now tolerates MPC's trailing ! / !! motion flag, which
 #        had been silently discarding the uncertainty cloud of every fast
 #        mover.
-CACHE_SCHEMA = 2
+#   3 -- payloads now carry gap_fill_lines, the floor-free ephemeris the
+#        altitude plot uses to fill holes where MPC withheld rows. Without a
+#        bump an entry cached at 2 is still perfectly valid by every other
+#        test, so it is never refetched and simply has no gap-fill data --
+#        measured as 106 of 114 objects silently keeping a gapped plot.
+#   4 -- payloads now carry obs_records, the raw 80-column astrometry the
+#        fetch was already downloading and discarding. Same failure mode as 3
+#        if not bumped, and worse here: the records cannot be fetched back
+#        later, because MPC stops serving an object's astrometry once it
+#        leaves NEOCP. Measured attrition is 17 of 77 objects overnight.
+CACHE_SCHEMA = 4
 
 # Row layout, whitespace separated:
 #   0    1  2   3      4  5   6    7   8  9   10     11     12     13    14   15   16    17    18   19
@@ -292,6 +302,37 @@ def fetch(desig):
         return ObjectEphemeris(desig, [], error=f"{type(e).__name__}: {e}")
 
 
+def _post_gap_fill(desig, timeout=None):
+    """Same request as _post(), but with no altitude floor at all.
+
+    Scoped deliberately: this exists only to fill holes in moonplot.py's
+    chart when the object dips under MPC_SERVER_MIN_ALT for part of the
+    night (see update_neocp.py's _aux and app.py's target_detail, the only
+    two callers of this and fetch_gap_fill below). The filter cascade, the
+    sky map, and the uncertainty plot all keep reading the normal oalt=20
+    fetch untouched, so loosening the floor here changes nothing about what
+    gets filtered, ranked, or drawn anywhere else.
+    """
+    return requests.post(
+        config.EPHEMERIS_URL,
+        data={"mb": -30, "mf": 30, "dl": -90, "du": 90, "nl": 0, "nu": 100,
+              "sort": "d", "W": "j", "obj": desig, "Parallax": 1,
+              "obscode": config.MPC_CODE, "int": 1, "start": 0, "raty": "a",
+              "mot": "m", "dmot": "p", "out": "f", "sun": "x", "oalt": -90},
+        timeout=timeout or config.EPHEMERIS_TIMEOUT_S, headers=_UA)
+
+
+def fetch_gap_fill(desig):
+    """The same object's ephemeris with no altitude floor. Never raises;
+    an empty ObjectEphemeris on failure, exactly like fetch()."""
+    try:
+        r = _post_gap_fill(desig)
+        r.raise_for_status()
+        return parse(desig, r.text)
+    except Exception as e:
+        return ObjectEphemeris(desig, [], error=f"{type(e).__name__}: {e}")
+
+
 def fetch_many(desigs, workers=None):
     """Fetch several objects concurrently, politely."""
     desigs = list(desigs)
@@ -387,9 +428,20 @@ def observations(observations_url, mpc_code=None):
 
 
 def parse_observations(text, mpc_code=None):
-    """Split out from the fetch so it can be tested without the network."""
+    """Split out from the fetch so it can be tested without the network.
+
+    Returns the records themselves alongside the summary. They cost nothing
+    to keep -- this function is already walking every line to count observer
+    codes -- and they are the only copy we will ever have: MPC drops an
+    object from NEOCP once it is designated or rejected, and stops serving
+    its astrometry. Measured over two nights, 17 of 77 objects vanished
+    overnight. A night not kept cannot be fetched back.
+
+    They are also exactly what ds42 needs as input. See ds42.md.
+    """
     code = mpc_code or config.MPC_CODE
     counts, discovery, first = {}, None, None
+    records = []
     for line in text.splitlines():
         if len(line) < 80:
             continue
@@ -397,6 +449,10 @@ def parse_observations(text, mpc_code=None):
         if not obscode:
             continue
         counts[obscode] = counts.get(obscode, 0) + 1
+        # rstrip only: the 80-column format is fixed-width and every column
+        # before the observatory code carries meaning by position, so a
+        # leading strip would shift the whole record.
+        records.append(line.rstrip())
         if first is None:
             first = obscode
         if discovery is None and line[12] == "*":
@@ -408,7 +464,8 @@ def parse_observations(text, mpc_code=None):
             # Records are in time order, so the earliest stands in when no
             # discovery asterisk is present.
             "discovery_code": discovery or first,
-            "observed_from_site": code in counts}
+            "observed_from_site": code in counts,
+            "records": records}
 
 
 def observed_from_site(observations_url, mpc_code=None):
