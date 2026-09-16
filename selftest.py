@@ -891,6 +891,96 @@ def test_password_reset_by_email():
         importlib.reload(appmod)
 
 
+def test_invite_creates_an_account_nobody_can_sign_into():
+    """`manage.py invite` is the onboarding path that needs no terminal.
+
+    The property that matters: between creating the account and its owner
+    opening the emailed link, there must be no password that works. Not a
+    blank one, not a default, not one printed to a terminal -- nothing.
+    """
+    import argparse
+    import tempfile
+
+    import auth
+    import mailer
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    sent = []
+    real_send_now, real_available = mailer.send_now, mailer.available
+    try:
+        import manage
+
+        mailer.send_now = lambda to, subj, body: (
+            sent.append((to, subj, body)) or "<test@local>")
+        mailer.available = lambda: True
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+
+        args = argparse.Namespace(username="luka", email="luka@example.org",
+                                  admin=True, resend=False)
+        check("invite succeeds", manage.cmd_invite(conn, args) == 0)
+
+        user = db.user_by_name(conn, "luka")
+        check("the account exists", user is not None)
+        check("and is an admin", user["is_admin"] == 1)
+        check("one message went to the right address",
+              len(sent) == 1 and sent[0][0] == "luka@example.org")
+
+        # The whole point. Try the obvious candidates for a password that
+        # someone might have left working.
+        guesses = ["", " ", "luka", "password", "luka@example.org",
+                   "changeme", "whichneo"]
+        works = [g for g in guesses
+                 if auth.verify_password(user["password_hash"], g)[0]]
+        check("no guessable password signs into it", works == [], str(works))
+        check("the password is hashed, not a placeholder",
+              user["password_hash"].startswith("$argon2id$"))
+
+        body = sent[0][2]
+        token = re.search(r"/reset/(\S+)", body).group(1)
+        check("the link is in the message and absolute", config.SITE_URL in body)
+        check("the link names the account",
+              auth.reset_token_user(conn, token) is not None
+              and auth.reset_token_user(conn, token)["username"] == "luka")
+        check("the username is stated so they know what to sign in as",
+              "luka" in body)
+
+        # Setting a password through the link must kill it, exactly as a
+        # normal reset does -- an invitation is not a standing key.
+        db.update_password(conn, user["id"], auth.hash_password("chosen-by-luka"))
+        check("the invitation stops working once used",
+              auth.reset_token_user(conn, token) is None)
+
+        args2 = argparse.Namespace(username="luka", email="luka@example.org",
+                                   admin=False, resend=False)
+        check("inviting an existing account twice is refused",
+              manage.cmd_invite(conn, args2) == 1)
+        sent.clear()
+        args3 = argparse.Namespace(username="luka", email="luka@example.org",
+                                   admin=False, resend=True)
+        check("--resend sends a fresh link instead",
+              manage.cmd_invite(conn, args3) == 0 and len(sent) == 1)
+
+        db.create_user(conn, "noemail", auth.hash_password("x" * 12))
+        args4 = argparse.Namespace(username="noemail", email=None,
+                                   admin=False, resend=True)
+        check("an account with no address cannot be invited",
+              manage.cmd_invite(conn, args4) == 1)
+
+        mailer.available = lambda: False
+        args5 = argparse.Namespace(username="ana", email="ana@example.org",
+                                   admin=False, resend=False)
+        check("with no relay, no half-made account is left behind",
+              manage.cmd_invite(conn, args5) == 1
+              and db.user_by_name(conn, "ana") is None)
+        conn.close()
+    finally:
+        mailer.send_now, mailer.available = real_send_now, real_available
+        config.DB_PATH = prev_db
+
+
 def test_mailer_builds_a_sane_message():
     """The parts of a message that decide whether it is delivered or filed as
     spam, checked without sending anything."""
@@ -1874,6 +1964,7 @@ def main():
                test_accounts, test_observer_state_is_per_account,
                test_observer_state_migration_keeps_every_mark,
                test_password_reset_by_email,
+               test_invite_creates_an_account_nobody_can_sign_into,
                test_mailer_builds_a_sane_message,
                test_login_throttle,
                test_secret_key_is_stable_and_private,

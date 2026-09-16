@@ -9,7 +9,13 @@ no email, and `mailtest` for finding out why nothing arrived.
 Passwords are read from a prompt, never from argv -- an argument is visible in
 `ps` to every user on the machine and lands in shell history besides.
 
+`adduser` needs a terminal to type a password into. `invite` does not -- it
+creates the account with an unusable password and mails its owner a link to
+choose their own, so nothing secret is typed, printed, or left in a shell
+history. Prefer it.
+
     python3 manage.py list
+    python3 manage.py invite <username> --email a@b [--admin] [--resend]
     python3 manage.py adduser <username> [--email a@b] [--admin]
     python3 manage.py passwd <username>
     python3 manage.py admin <username> [--off]
@@ -28,8 +34,29 @@ import db
 
 
 def _prompt_password():
-    first = getpass.getpass("Password: ")
-    err = auth.password_error(first, getpass.getpass("Repeat: "))
+    """Read a password twice from the terminal.
+
+    Returns None on any refusal, having already said why. The no-terminal case
+    is called out explicitly because getpass raises EOFError there, which as a
+    traceback tells you nothing about what to do instead -- and it is not an
+    exotic situation: it is what happens whenever this is run through a
+    wrapper that does not allocate a tty, which is most of them.
+    """
+    if not sys.stdin.isatty():
+        print("No terminal to type a password into.\n"
+              "  Run this from a shell with a tty, or use:\n"
+              "      manage.py invite <username> --email <address>\n"
+              "  which mails the person a link to set their own password.",
+              file=sys.stderr)
+        return None
+    try:
+        first = getpass.getpass("Password: ")
+        second = getpass.getpass("Repeat: ")
+    except (EOFError, OSError) as e:
+        print(f"Could not read a password from this terminal ({e}). "
+              "Try `manage.py invite` instead.", file=sys.stderr)
+        return None
+    err = auth.password_error(first, second)
     if err:
         print(err, file=sys.stderr)
         return None
@@ -67,6 +94,83 @@ def cmd_adduser(conn, args):
         print("that username or email is already taken", file=sys.stderr)
         return 1
     print(f"created {args.username}" + (" (admin)" if args.admin else ""))
+    return 0
+
+
+def cmd_invite(conn, args):
+    """Create an account nobody can sign into yet, and mail its owner a link.
+
+    This is the better way to onboard someone, and the only way that works
+    without a terminal. The account gets a hash of 32 random bytes that are
+    then thrown away -- an unusable password, not an empty one, so the account
+    cannot be signed into by anyone including us, and the only way in is the
+    emailed link.
+
+    The link is an ordinary reset token: signed, single-use, one hour. Nothing
+    secret is printed, typed, or left in a shell history.
+    """
+    import secrets
+
+    import mailer
+
+    err = auth.username_error(args.username)
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    if not mailer.available():
+        print("no SMTP credentials configured, so there is nothing to send "
+              "the invitation with. See `manage.py mailtest`.", file=sys.stderr)
+        return 1
+
+    existing = db.user_by_name(conn, args.username)
+    if existing and not args.resend:
+        print(f"{existing['username']} already exists. Use --resend to send "
+              "them a fresh link instead.", file=sys.stderr)
+        return 1
+
+    if existing:
+        user = existing
+        if args.email and (user["email"] or "").lower() != args.email.lower():
+            print(f"account's email is {user['email'] or '(none)'}, not "
+                  f"{args.email}. Not changing it; sending to the address on "
+                  "file.", file=sys.stderr)
+        if not user["email"]:
+            print("that account has no email address on file, so there is "
+                  "nowhere to send a link.", file=sys.stderr)
+            return 1
+    else:
+        try:
+            uid = db.create_user(conn, args.username,
+                                 auth.hash_password(secrets.token_urlsafe(32)),
+                                 args.email, 1 if args.admin else 0)
+        except sqlite3.IntegrityError:
+            print("that username or email is already taken", file=sys.stderr)
+            return 1
+        user = db.user_by_id(conn, uid)
+        print(f"created {user['username']}"
+              + (" (admin)" if args.admin else ""))
+
+    link = (config.SITE_URL.rstrip("/") + "/reset/" + auth.reset_token(user))
+    hours = config.RESET_TOKEN_MAX_AGE_S // 3600
+    body = (f"You have a WhichNEO account on the L01 target board at "
+            f"{config.SITE_URL}.\n\n"
+            f'Username: {user["username"]}\n\n'
+            f"Choose a password here, within the next {hours} hour"
+            f"{'s' if hours != 1 else ''}:\n\n    {link}\n\n"
+            "The link works once. If it expires, ask for another.\n\n"
+            "-- WhichNEO, L01 Tican Station, Visnjan Observatory\n")
+    try:
+        mid = mailer.send_now(user["email"], "Your WhichNEO account", body)
+    except Exception as e:
+        # The account exists at this point and cannot be signed into. Say so,
+        # rather than leaving someone to discover it later and wonder.
+        print(f"account is ready but the invitation FAILED to send: "
+              f"{type(e).__name__}: {e}\n"
+              f"  Fix the relay and run: manage.py invite "
+              f"{user['username']} --resend", file=sys.stderr)
+        return 1
+    print(f"invitation sent to {user['email']} ({mid})")
+    print(f"good for {hours} hour{'s' if hours != 1 else ''}, once.")
     return 0
 
 
@@ -160,6 +264,13 @@ def main(argv=None):
     a.add_argument("username")
     a.add_argument("--email")
     a.add_argument("--admin", action="store_true")
+
+    a = sub.add_parser("invite")
+    a.add_argument("username")
+    a.add_argument("--email", required=True)
+    a.add_argument("--admin", action="store_true")
+    a.add_argument("--resend", action="store_true",
+                   help="send a fresh link to an account that already exists")
 
     a = sub.add_parser("passwd")
     a.add_argument("username")
