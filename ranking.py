@@ -86,6 +86,11 @@ SORTABLE_COLUMNS = {
     "moon":         {"field": "cur_moon_dist", "label": "Moon distance"},
     "unseen":       {"field": "not_seen_days", "label": "Not seen"},
     "q":            {"field": "q",             "label": "Perihelion (q)"},
+    # ds42's posterior. Sortable like the rest, and worth sorting: the point
+    # of showing it is to find where it disagrees with digest2, which is
+    # hard to see by eye in a list of a hundred. Objects with no score sink,
+    # the same as any other missing value.
+    "ds42":         {"field": "p_neo",         "label": "ds42 p(NEO)"},
 }
 
 

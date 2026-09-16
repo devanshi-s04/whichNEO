@@ -501,10 +501,18 @@ def load_targets(conn, include_hidden=False, include_observed=False,
                   FROM observer_state o
                   LEFT JOIN users u ON u.id = o.user_id
                  WHERE o.desig = t.desig AND o.observed = 1
-                   AND o.user_id IS NOT ?)  AS others_names
+                   AND o.user_id IS NOT ?)  AS others_names,
+               -- ds42's posterior, and the status that says what kind of
+               -- number it is. Both, always: p_neo alone cannot distinguish
+               -- a computed 1.0 from a policy-assigned one, and NULL from
+               -- "not scored yet" from "scored, undefined".
+               d.p_neo                      AS p_neo,
+               d.status                     AS ds42_status,
+               d.n_obs                      AS ds42_n_obs
         FROM targets t
         LEFT JOIN observer_state s
                ON s.desig = t.desig AND s.user_id IS ?
+        LEFT JOIN ds42_scores d ON d.desig = t.desig
     """
     rows = []
     for r in conn.execute(sql, (user_id, user_id, user_id)):

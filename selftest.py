@@ -1927,6 +1927,104 @@ def test_cache_schema_forces_one_refetch():
           ephemeris.CACHE_SCHEMA > 3, ephemeris.CACHE_SCHEMA)
 
 
+def test_ds42_column():
+    """The column, and the three states it has to keep apart.
+
+    A posterior; a scored object with no posterior; and one never scored.
+    Collapsing the last two would hide whether ds42 has an opinion or has
+    simply not looked -- and roughly a third of the board is never looked at,
+    because objects rejected before their astrometry is fetched never reach
+    ds42 at all.
+
+    Also checks the tooltip, which is not decoration here: p_neo is scored
+    from the discovery tracklet and does not move as follow-up arrives, so a
+    frozen number beside a moving digest2 score reads as a bug unless the
+    column says what it is.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.execute(
+            "INSERT INTO targets (desig, score, vmag, observable, not_seen_days,"
+            " score_total, discard_reasons) VALUES "
+            "('SCORED', 77, 21.4, 1, 0.5, 3.1, '[]'),"
+            "('UNDEF',  100, 21.0, 1, 0.5, 3.0, '[]'),"
+            "('NEVER',  40, 20.0, 1, 0.5, 2.0, '[]')")
+        conn.commit()
+        db.save_ds42_scores(conn, {
+            "SCORED": {"p_neo": 0.0642, "log_lr": -2.0, "status": "ok",
+                       "n_obs": 3, "arc_h": 0.23, "obscode": "F51",
+                       "vmag": 21.4},
+            "UNDEF": {"p_neo": None, "log_lr": None, "status": "empty_region",
+                      "n_obs": 4, "arc_h": 0.14, "obscode": "I41",
+                      "vmag": 21.0},
+        }, {"ds42_rev": "a4bc848", "ds42_dirty": False,
+            "model_sha256": "2b9d9d2a", "config": {}})
+        conn.close()
+
+        rows = {r["desig"]: r for r in db.load_targets(
+            db.connect(config.DB_PATH), include_observed=True)}
+        check("a posterior reaches the row", rows["SCORED"]["p_neo"] == 0.0642)
+        check("so does the status that qualifies it",
+              rows["SCORED"]["ds42_status"] == "ok"
+              and rows["SCORED"]["ds42_n_obs"] == 3)
+        check("an undefined posterior is None with a status",
+              rows["UNDEF"]["p_neo"] is None
+              and rows["UNDEF"]["ds42_status"] == "empty_region")
+        check("an unscored object has neither",
+              rows["NEVER"]["p_neo"] is None
+              and rows["NEVER"]["ds42_status"] is None)
+
+        importlib.reload(appmod)
+        page = appmod.app.test_client().get("/").data.decode()
+
+        check("the header is there", ">ds42<" in page)
+        check("the header explains it is the discovery tracklet",
+              "DISCOVERY TRACKLET" in page)
+        check("and that it does not move with follow-up",
+              "does not change as follow-up" in page)
+        check("the posterior renders to three decimals", ">0.064<" in page)
+        check("its tooltip carries the full value and the count",
+              "0.0642" in page and "3 observation(s)" in page)
+        check("an undefined posterior is a dash, not a number",
+              "could not compute a posterior: empty_region" in page)
+        check("and says what empty_region means",
+              "no bound orbit is consistent" in page)
+        check("an unscored object is distinguishable from an undefined one",
+              "Not scored by ds42" in page)
+
+        # Sortable, using the same machinery as every other column.
+        check("ds42 is a sortable column", "ds42" in ranking.SORTABLE_COLUMNS)
+        check("it sorts on p_neo",
+              ranking.SORTABLE_COLUMNS["ds42"]["field"] == "p_neo")
+        ordered = ranking.sort_targets(list(rows.values()), "ds42_asc")
+        vals = [r["p_neo"] for r in ordered if r["p_neo"] is not None]
+        check("ascending really is ascending", vals == sorted(vals), vals)
+        check("unscored objects sink rather than sorting as zero",
+              ordered[-1]["p_neo"] is None)
+        check("/?sort=ds42_desc renders",
+              appmod.app.test_client().get(
+                  "/?sort=ds42_desc").status_code == 200)
+
+        # The table must not go ragged when a column is added.
+        body = page.split('<tbody id="rows">')[1].split("</tbody>")[0]
+        first = body.split("<tr")[1]
+        head = page.split("<thead>")[1].split("</thead>")[0]
+        check("header and body cell counts agree",
+              head.count("<th") == first.count("<td"),
+              (head.count("<th"), first.count("<td")))
+    finally:
+        config.DB_PATH = prev_db
+        importlib.reload(appmod)
+
+
 def test_ds42_score_parsing():
     """ds42's TSV, including the rows that are not a posterior.
 
@@ -2584,6 +2682,7 @@ def main():
                test_priority_bump_is_fully_gone,
                test_offsets_parse_with_the_fast_motion_flag,
                test_cache_schema_forces_one_refetch,
+               test_ds42_column,
                test_ds42_score_parsing,
                test_ds42_never_breaks_an_update_cycle,
                test_ds42_scores_are_stored_once_and_survive_pruning,
