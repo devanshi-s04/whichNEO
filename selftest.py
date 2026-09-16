@@ -361,6 +361,23 @@ def test_observatory_identification():
           got["discovery_code"] == "F51", got["discovery_code"])
     check("our own site is correctly absent",
           got["observed_from_site"] is False)
+
+    # The records themselves, kept for ds42 -- see ds42.md. The parse already
+    # walks every line to count codes, so this costs nothing to return, and
+    # it is the only copy that will exist: MPC stops serving an object's
+    # astrometry once it leaves NEOCP.
+    check("the records come back with the summary",
+          len(got["records"]) == 5, got.get("records"))
+    check("the short line is excluded, as it is from the counts",
+          all(len(r) >= 80 for r in got["records"]))
+    check("records keep their fixed-width columns",
+          all(r[77:80].strip() in ("F51", "474") for r in got["records"]),
+          [r[77:80] for r in got["records"]])
+    check("the discovery asterisk survives in column 13",
+          sum(1 for r in got["records"] if r[12] == "*") == 1)
+    check("records are in the order MPC gave them",
+          [r[77:80].strip() for r in got["records"]]
+          == ["F51", "F51", "F51", "474", "474"])
     check("our own site is detected when present",
           ephemeris.parse_observations(text + "\n" + rec("L01"),
                                        "L01")["observed_from_site"] is True)
@@ -1891,9 +1908,23 @@ def test_cache_schema_forces_one_refetch():
     expected = {"lines", "gap_fill_lines", "fetched_ts", "last_row_ts",
                 "cache_schema", "offsets_url", "map_url", "observations_url",
                 "offsets", "scatteredness", "observed_from_site",
-                "discovery_code", "obs_codes", "error"}
+                "discovery_code", "obs_codes", "obs_records", "error"}
     check("the payload's keys are the ones this test knows about",
           written == expected, sorted(written ^ expected))
+
+    # Same guard again for obs_records, and it matters more here than it did
+    # for gap_fill_lines: a gapped altitude plot can be repaired by refetching
+    # whenever anyone notices, but astrometry cannot. MPC stops serving an
+    # object's records once it leaves NEOCP, and 17 of 77 objects left
+    # overnight between the two nights measured in ds42.md. An entry that
+    # never refetches is a night of astrometry lost permanently.
+    at_3 = dict(current, cache_schema=3)
+    check("an entry cached before obs_records existed is refetched",
+          update_neocp.needs_refetch((sig, at_3), target, now),
+          "schema is %d; a payload at 3 has no obs_records"
+          % ephemeris.CACHE_SCHEMA)
+    check("the schema is past 3, so astrometry actually reaches objects",
+          ephemeris.CACHE_SCHEMA > 3, ephemeris.CACHE_SCHEMA)
 
 
 def test_frame_speed_table():
