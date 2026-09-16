@@ -58,6 +58,15 @@ body {
   margin-top: 3px; font-family: var(--mono); font-size: 11px;
   color: var(--faint); letter-spacing: .01em;
 }
+.plan-btn {
+  display: inline-flex; align-items: center; flex: 0 0 auto;
+  padding: 9px 18px; border-radius: 7px; margin-bottom: 2px;
+  background: var(--no); color: #fff; font-family: var(--ui);
+  font-weight: 500; font-size: 12px;
+  letter-spacing: .01em; text-decoration: none; border: 1px solid rgba(0,0,0,.2);
+  box-shadow: 0 1px 0 rgba(0,0,0,.15);
+}
+.plan-btn:hover { background: #b8544a; }
 .live { display: flex; gap: 26px; align-items: flex-end; flex-wrap: wrap; }
 .stat .k {
   font-size: 9.5px; letter-spacing: .13em; text-transform: uppercase;
@@ -154,6 +163,11 @@ body {
   text-transform: uppercase; color: var(--muted); font-weight: 700;
 }
 .strip .cap { font-size: 12px; color: var(--faint); margin: 0 0 13px; }
+.strip-toggle {
+  display: block; margin: 9px 0 0; padding: 0; border: none; background: none;
+  font: inherit; font-size: 12px; color: var(--faint); cursor: pointer;
+}
+.strip-toggle:hover { color: var(--amber); text-decoration: underline; }
 
 .axis {
   position: relative; height: 15px; margin-left: 104px;
@@ -168,6 +182,10 @@ body {
 .lane {
   display: flex; align-items: center; height: 21px;
 }
+/* Author CSS wins ties against the browser's own [hidden] rule at equal
+   specificity, so an unconditional `display` here would silently defeat
+   `hidden` on the collapsed lanes -- see the same fix on .dirbtn. */
+.lane[hidden] { display: none; }
 .lane .who {
   width: 104px; flex: 0 0 104px; padding-right: 12px;
   font-family: var(--mono); font-size: 11.5px; text-align: right;
@@ -260,20 +278,7 @@ body {
 }
 .chip:hover { color: var(--ink); border-color: var(--faint); }
 .chip.on { color: var(--amber); border-color: rgba(240,166,60,.4); }
-.dirbtn {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; border-radius: 50%;
-  border: 1px solid var(--line); background: var(--raised); color: var(--amber);
-  text-decoration: none; transition: transform .15s ease;
-}
-.dirbtn:hover { border-color: rgba(240,166,60,.4); }
-.dirbtn.flip { transform: rotate(180deg); }
-/* A class alone can't beat the browser's own [hidden] rule here: author CSS
-   wins ties against the user-agent stylesheet, so an unconditional `display`
-   on the same element silently defeats `hidden` unless it's overridden back. */
-.dirbtn[hidden] { display: none; }
-
-/* ---------- filters dropdown ---------- */
+/* ---------- range filters dropdown ---------- */
 .filters-dd { position: relative; }
 .filters-dd > summary {
   list-style: none; cursor: pointer; user-select: none;
@@ -286,21 +291,31 @@ body {
 .filters-dd[open] > summary { color: var(--amber); border-color: rgba(240,166,60,.4); }
 .filters-panel {
   position: absolute; top: calc(100% + 6px); left: 0; z-index: 10;
-  min-width: 250px; background: var(--raised); border: 1px solid var(--line);
+  min-width: 230px; background: var(--raised); border: 1px solid var(--line);
   border-radius: var(--r); padding: 6px; box-shadow: 0 10px 28px rgba(0,0,0,.45);
 }
 .filter-row {
   display: flex; align-items: center; gap: 8px; padding: 6px 7px; border-radius: 5px;
 }
 .filter-row:hover { background: rgba(255,255,255,.035); }
-.filter-row label {
-  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
-  font-size: 12.5px; color: var(--ink); cursor: pointer;
+.filter-label { flex: 1; min-width: 0; font-size: 12.5px; color: var(--ink); }
+.range-input {
+  flex: 0 0 auto; width: 60px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 5px; color: var(--ink); font-family: var(--mono);
+  font-size: 11.5px; padding: 3px 6px; font-variant-numeric: tabular-nums;
 }
-.filter-row input[type="checkbox"] { accent-color: var(--amber); }
-.filter-row .dirbtn { flex: 0 0 auto; width: 21px; height: 21px; }
-.filter-row .dirbtn svg { width: 11px; height: 11px; }
-.filter-row .dim { flex: 0 0 auto; font-size: 10.5px; white-space: nowrap; }
+.range-input:focus { outline: none; border-color: rgba(240,166,60,.5); }
+.filter-warn {
+  margin: -2px 7px 6px; padding: 5px 8px; border-radius: 5px;
+  font-size: 11px; line-height: 1.4; color: var(--warn);
+  background: rgba(217,164,65,.09); border: 1px solid rgba(217,164,65,.3);
+}
+.range-input.active { border-color: rgba(240,166,60,.5); color: var(--amber); }
+/* Chrome/Safari spinner arrows read as clutter at this size; a plain number
+   field with a min/max label either side already communicates "type here". */
+.range-input::-webkit-outer-spin-button,
+.range-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.range-input[type="number"] { -moz-appearance: textfield; }
 .rules { margin-left: auto; font-size: 11.5px; color: var(--faint); }
 .rules code { font-family: var(--mono); color: var(--muted); }
 
@@ -318,6 +333,13 @@ table.grid thead th {
   padding: 9px 10px; border-bottom: 1px solid var(--line); white-space: nowrap;
 }
 table.grid thead th.l { text-align: left; }
+table.grid thead th.sorted { color: var(--amber); }
+table.grid thead .sortth {
+  color: inherit; text-decoration: none; cursor: pointer;
+}
+table.grid thead .sortth:hover { color: var(--ink); }
+table.grid thead th.sorted .sortth:hover { color: var(--amber); }
+table.grid thead .arrow { margin-left: 4px; font-size: 8px; color: var(--amber); }
 table.grid tbody td {
   padding: 7px 10px; text-align: right; white-space: nowrap;
   border-bottom: 1px solid var(--hair);

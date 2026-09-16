@@ -117,10 +117,17 @@ def writer_id():
     return user["id"] if user else 0
 
 
-def load_sorted(conn, show_observed=False, show_hidden=False, mode=None):
+def load_sorted(conn, show_observed=False, show_hidden=False, mode=None,
+                range_filters=None):
+    # Both sides of the merge changed this function, for unrelated reasons:
+    # main narrowed observer state to the viewing account, this branch added
+    # the range filters. Filter before sorting -- sorting a set you are about
+    # to discard most of is wasted work, and the compound sort is the
+    # expensive half.
     rows = db.load_targets(conn, include_hidden=show_hidden,
                            include_observed=show_observed,
                            user_id=viewer_id())
+    rows = ranking.apply_range_filters(rows, range_filters)
     return ranking.sort_targets(rows, mode)
 
 
@@ -200,7 +207,7 @@ def night_strip(rows, max_lanes=16):
         t += 3600
 
     lanes = []
-    for r in obs[:max_lanes]:
+    for i, r in enumerate(obs):
         left = pct(r["window_start_ts"])
         right = pct(r["window_end_ts"])
         lanes.append({
@@ -213,6 +220,9 @@ def night_strip(rows, max_lanes=16):
             # shape of the whole night, and how much of it is already behind
             # you is part of that shape.
             "observed": bool(r.get("observed")),
+            # Rendered but collapsed past max_lanes, rather than left out
+            # entirely -- so "show all" is a client-side unhide, no reload.
+            "extra": i >= max_lanes,
         })
 
     now = time.time()
@@ -325,7 +335,8 @@ def _view_args():
     # meant first finding the row again in a separate view.
     return dict(show_observed=True,
                 show_hidden=request.args.get("hidden") == "1",
-                mode=request.args.get("sort") or config.DEFAULT_SORT)
+                mode=request.args.get("sort") or config.DEFAULT_SORT,
+                range_filters=ranking.parse_range_filters(request.args.get("range")))
 
 
 @app.route("/")
@@ -333,7 +344,7 @@ def index():
     v = _view_args()
     conn = get_conn()
     try:
-        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
+        rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["range_filters"])
         upcoming = pick_upcoming(rows)
         strip = night_strip(rows)
         archived_nights = db.list_archived_nights(conn)
@@ -444,12 +455,22 @@ def skymap_svg():
             # at all once it falls outside _REPLAY_WINDOW_S.
             ts = _replay_ts(request.args.get("ts"),
                             window=(archived["start_ts"], archived["end_ts"]))
+            # Range filters deliberately do not apply here, and cannot. The
+            # archive keeps a target's designation, score, magnitude and
+            # track -- not the altitude, motion or moon distance most of the
+            # filters range over, and those were true at a moment that has
+            # passed. Narrowing a past night by tonight's numbers would be a
+            # fiction. The visible consequence is that with a past night
+            # selected the table narrows and the map does not; worth closing
+            # later by hiding the control for a past night, not by inventing
+            # values the archive never held.
             view = archived_sky_view(conn, archived, now=ts)
             used = view["used"]
             svg = view["svg"]
         else:
             ts = _replay_ts(request.args.get("ts"))
-            rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"])
+            rows = load_sorted(conn, v["show_observed"], v["show_hidden"],
+                               v["mode"], v["range_filters"])
             used = ts if ts is not None else time.time()
             svg = sky_view(conn, rows, now=ts)["svg"]
         return (svg, 200,
@@ -468,7 +489,7 @@ def rows_partial():
     try:
         return render_template(
             "_rows.html",
-            rows=load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"]),
+            rows=load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["range_filters"]),
             max_score=ranking.max_possible_score(), **v)
     finally:
         conn.close()
