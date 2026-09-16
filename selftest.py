@@ -469,21 +469,25 @@ def test_auth_protects_state_changes():
     import tempfile
 
     import app as appmod
+    import auth
+
+    # Redirected FIRST, before the app is touched at all. Every route goes
+    # through get_conn(), which calls db.init() -- so merely *reading* a page
+    # runs the schema migration against whatever database config points at,
+    # and on epyc that is the observatory's. An earlier version of this fix
+    # redirected further down, after the three reads below, and the next
+    # schema change caught it: running the suite on epyc created the new
+    # night_archive table in the live database.
+    prev_db = config.DB_PATH
+    prev_env = os.environ.get("WHICHNEO_AUTH")
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    importlib.reload(appmod)
 
     client = appmod.app.test_client()
     for path in ("/", "/status", "/rows"):
         check(f"{path} readable without credentials",
               client.get(path).status_code == 200)
 
-    import auth
-    prev_env = os.environ.get("WHICHNEO_AUTH")
-    # This test marks a target, and until it pointed somewhere else it marked
-    # one in whatever database it found -- which on epyc is the live one. It
-    # left a stray `XYZ` row in the observatory's observer_state every time
-    # anyone ran the suite there. A test must not write to the deployment it
-    # is being run on.
-    prev_db = config.DB_PATH
-    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
     os.environ["WHICHNEO_AUTH"] = "obs:secret"
     try:
         importlib.reload(auth)
@@ -1120,24 +1124,33 @@ def test_login_throttle():
     argon2's deliberate cost makes each guess expensive for *us* -- enough
     parallel attempts and the board stops rendering."""
     import importlib
+    import tempfile
 
     import app as appmod
     import auth
 
-    importlib.reload(auth)
-    importlib.reload(appmod)
-    c = appmod.app.test_client()
+    # /login opens a connection like every other route, so this needs a
+    # scratch database for the same reason the others do.
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
 
-    codes = [c.post("/login", data={"username": "ghost", "password": "x"}
-                    ).status_code for _ in range(auth.FAIL_LIMIT + 2)]
-    check("every bad attempt is refused", set(codes) == {401})
-    last = c.post("/login", data={"username": "ghost", "password": "x"})
-    check("attempts are capped after the limit",
-          b"Too many failed attempts" in last.data)
-
-    # Leave no residue: the next test's client comes from the same process
-    # and would arrive already locked out.
-    auth._fails.clear()
+        codes = [c.post("/login", data={"username": "ghost", "password": "x"}
+                        ).status_code for _ in range(auth.FAIL_LIMIT + 2)]
+        check("every bad attempt is refused", set(codes) == {401})
+        last = c.post("/login", data={"username": "ghost", "password": "x"})
+        check("attempts are capped after the limit",
+              b"Too many failed attempts" in last.data)
+    finally:
+        # Leave no residue: the next test's client comes from the same process
+        # and would arrive already locked out.
+        auth._fails.clear()
+        config.DB_PATH = prev_db
+        importlib.reload(auth)
+        importlib.reload(appmod)
 
 
 def test_secret_key_is_stable_and_private():
