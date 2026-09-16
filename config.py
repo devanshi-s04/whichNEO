@@ -262,5 +262,18 @@ LOG_PATH = os.path.join(DATA_DIR, "update.log")
 PLAN_DIR = os.path.join(BASE_DIR, "plans")
 WRITE_NIGHTLY_PLAN = True
 
+# --- Accounts ----------------------------------------------------------------
+# Marks the session cookie Secure. Leave it off while the dome reaches the
+# board over plain http://epyc:12600 -- a Secure cookie is simply not sent on
+# an http connection, so turning this on early means nobody at the observatory
+# can log in, with no error to explain why. Turn it on when every route in
+# is https (WHICHNEO_HTTPS=1 in the environment does the same).
+REQUIRE_HTTPS = os.environ.get("WHICHNEO_HTTPS", "") not in ("", "0", "no")
+
+# Open self-service sign-up. The board is a small collaboration, not a public
+# service; if it ever attracts nuisance registrations, set this false and
+# create accounts with `python3 manage.py adduser <name>`.
+ALLOW_SIGNUP = True
+
 UPDATE_INTERVAL_S = 300
 WEB_POLL_INTERVAL_S = 20

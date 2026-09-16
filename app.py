@@ -6,8 +6,9 @@ rendering stays fast. The updater has already done all the work.
 
 import json
 import math
+import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 
@@ -23,6 +24,20 @@ import skymap
 import uncertainty
 
 app = Flask(__name__)
+app.secret_key = auth.secret_key()
+
+# A session that expires overnight is a session that expires mid-observation.
+# Thirty days, refreshed on each request, so an observer who logged in at the
+# start of the season is still logged in at the end of it.
+app.permanent_session_lifetime = timedelta(days=30)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,       # JavaScript has no business reading it
+    SESSION_COOKIE_SAMESITE="Lax",      # second line of defence behind CSRF
+    # Secure would be right for whichneo.juriclab.org and wrong for
+    # http://epyc:12600, which is how the dome actually reaches the board --
+    # a Secure cookie there is simply never sent, and nobody can log in.
+    SESSION_COOKIE_SECURE=bool(config.REQUIRE_HTTPS),
+)
 
 
 try:
@@ -37,7 +52,10 @@ def inject_config():
     """Templates read limits and the horizon mask straight from config, and
     the sortable-column registry straight from ranking so the sort bar and
     the sort logic never drift apart."""
-    return {"config": config, "tzname": _tzabbr(), "ranking": ranking}
+    return {"config": config, "tzname": _tzabbr(), "ranking": ranking,
+            "current_user": auth.current_user(),
+            "csrf_token": auth.csrf_token,
+            "min_password": auth.MIN_PASSWORD}
 
 
 def _tzabbr(ts=None):
@@ -79,9 +97,28 @@ def get_conn():
     return conn
 
 
+def viewer_id():
+    """Whose observer state this request sees.
+
+    A signed-out visitor gets None, not 0: 0 is the shared basic-auth bucket,
+    a real set of marks made by a real person, and a stranger reading the
+    board should not inherit them as their own.
+    """
+    user = auth.current_user()
+    return user["id"] if user else None
+
+
+def writer_id():
+    """Whose observer state this request writes. 0 means the shared
+    credential -- a write nobody's name is on."""
+    user = auth.current_user()
+    return user["id"] if user else 0
+
+
 def load_sorted(conn, show_observed=False, show_hidden=False, mode=None):
     rows = db.load_targets(conn, include_hidden=show_hidden,
-                           include_observed=show_observed)
+                           include_observed=show_observed,
+                           user_id=viewer_id())
     return ranking.sort_targets(rows, mode)
 
 
@@ -380,20 +417,119 @@ def plan_text():
         return f"Could not read {path}: {e}", 500
 
 
+def _safe_next(raw):
+    """Where to go after logging in.
+
+    Only a path on this site. A `next` taken from the query string and handed
+    straight to redirect() is an open redirect: a link to our own login page
+    that lands the observer on somebody else's, wearing our URL as cover.
+    """
+    if not raw or not raw.startswith("/") or raw.startswith("//"):
+        return url_for("index")
+    return raw
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    nxt = _safe_next(request.values.get("next"))
+    if auth.current_user():
+        return redirect(nxt)
+
+    if not auth.HASHING_AVAILABLE:
+        return render_template("login.html", error=auth.NO_HASHING,
+                               username="", next=nxt), 503
+
+    error = None
+    username = (request.form.get("username") or "").strip()
+    if request.method == "POST":
+        if auth.throttled():
+            error = ("Too many failed attempts from this address. "
+                     "Wait a few minutes and try again.")
+        else:
+            conn = get_conn()
+            try:
+                user = db.user_by_name(conn, username)
+                ok, rehashed = (False, None)
+                if user:
+                    ok, rehashed = auth.verify_password(
+                        user["password_hash"], request.form.get("password") or "")
+                if ok:
+                    if rehashed:
+                        db.update_password(conn, user["id"], rehashed)
+                    db.touch_login(conn, user["id"])
+                    auth.start_session(user)
+                    auth.clear_failures()
+                    return redirect(nxt)
+            finally:
+                conn.close()
+            auth.note_failure()
+            # One message for both halves. "No such user" tells a stranger
+            # which names exist, which is the first half of a password guess.
+            error = "That username and password do not match an account."
+
+    return render_template("login.html", error=error, username=username,
+                           next=nxt), (200 if error is None else 401)
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    nxt = _safe_next(request.values.get("next"))
+    if not config.ALLOW_SIGNUP:
+        return render_template("login.html", error="Sign-up is closed.",
+                               username="", next=nxt), 403
+    if not auth.HASHING_AVAILABLE:
+        return render_template("login.html", error=auth.NO_HASHING,
+                               username="", next=nxt), 503
+    if auth.current_user():
+        return redirect(nxt)
+
+    error = None
+    username = (request.form.get("username") or "").strip()
+    email = (request.form.get("email") or "").strip()
+    if request.method == "POST":
+        password = request.form.get("password") or ""
+        error = (auth.username_error(username)
+                 or auth.password_error(password,
+                                        request.form.get("confirm")))
+        if error is None:
+            conn = get_conn()
+            try:
+                uid = db.create_user(conn, username,
+                                     auth.hash_password(password), email)
+                auth.start_session(db.user_by_id(conn, uid))
+                return redirect(nxt)
+            except sqlite3.IntegrityError:
+                error = ("That username or email is already taken."
+                         if email else "That username is already taken.")
+            finally:
+                conn.close()
+
+    return render_template("register.html", error=error, username=username,
+                           email=email, next=nxt), (200 if error is None else 400)
+
+
+@app.post("/logout")
+def logout():
+    auth.end_session()
+    return redirect(url_for("index"))
+
+
 @app.post("/mark/<desig>")
 @auth.required
 def mark(desig):
     action = request.form.get("action", "observed")
+    uid = writer_id()
     conn = get_conn()
     try:
         if action == "observed":
-            db.set_state(conn, desig, observed=1, observed_at_utc=db.utcnow())
+            db.set_state(conn, desig, uid, observed=1,
+                         observed_at_utc=db.utcnow())
         elif action == "unobserved":
-            db.set_state(conn, desig, observed=0, observed_at_utc=None)
+            db.set_state(conn, desig, uid, observed=0, observed_at_utc=None)
         elif action == "hide":
-            db.set_state(conn, desig, hidden=1)
+            db.set_state(conn, desig, uid, hidden=1)
         elif action == "restore":
-            db.set_state(conn, desig, hidden=0)
+            db.set_state(conn, desig, uid, hidden=0)
         # "up" and "down" are deliberately gone rather than left accepting a
         # request nothing can send: the arrows that produced them are removed,
         # and priority_bump is no longer read by the sort or the score. An
@@ -410,7 +546,8 @@ def mark(desig):
 def target_detail(desig):
     conn = get_conn()
     try:
-        rows = [r for r in db.load_targets(conn, True, True)
+        rows = [r for r in db.load_targets(conn, True, True,
+                                           user_id=viewer_id())
                 if r["desig"] == desig]
         if not rows:
             return f"Unknown target {desig}", 404

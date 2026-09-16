@@ -27,6 +27,22 @@
     <div class="stat"><div class="k">Cross-check</div>
       <div class="v bad">{{ status.mismatches }}</div></div>
     {% endif %}
+    {# Who is marking targets. Anyone may read the board; changing it needs an
+       account, so this is the one control that has to be visible from every
+       page an observer works from. #}
+    <div class="stat who">
+      <div class="k">Observer</div>
+      <div class="v">
+        {% if current_user %}
+          {{ current_user.username }}
+          <form method="post" action="{{ url_for('logout') }}" class="inline">
+            <button class="ghost">sign out</button>
+          </form>
+        {% else %}
+          <a class="ghost btn" href="{{ url_for('login') }}">sign in</a>
+        {% endif %}
+      </div>
+    </div>
   </div>
 </div>
 

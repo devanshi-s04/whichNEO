@@ -49,23 +49,58 @@ supervises its own two children, but nothing supervises `run.sh` — without
 this, a hard crash or a container restart leaves the board down until a human
 notices. Log: `data/keepalive.log`.
 
-## 2c. If the board is reachable from the internet — turn on auth
+## 2c. Accounts
 
 Reads are open by design: observers should not fumble a password on a dome
-screen to see tonight's targets. But **mark observed, hide and priority
-changes are unauthenticated by default**, so anyone who finds the URL can
-reorder or clear the queue. That is fine on a LAN and not fine on a public
-port.
+screen to see tonight's targets. **Writes — mark observed, hide — require an
+account**, on a LAN and on a public port alike. There is no configuration that
+turns that off, because the board now answers at
+`https://whichneo.juriclab.org/`.
+
+Sign-up is self-service at `/register`. Nothing else is needed to deploy: the
+`users` table is created on first run alongside the rest of the schema, and
+the session-signing key writes itself to `data/secret_key` (mode 0600) the
+first time the site starts.
+
+Two things that are worth getting right:
+
+```bash
+# Turn on the Secure flag once every route in is https. Do NOT set it while
+# the dome still reaches the board over http://epyc:12600 -- a Secure cookie
+# is never sent over http, so nobody can log in and there is no error saying
+# why.
+export WHICHNEO_HTTPS=1
+
+# Back this up with the database. Losing it does not lose any account, but it
+# signs out every observer at once.
+ls -l data/secret_key
+```
+
+Administration, for when someone forgets a password (there is no mail relay
+on this host, so there is no reset email):
+
+```bash
+python3 manage.py list
+python3 manage.py adduser luka --admin
+python3 manage.py passwd luka
+python3 manage.py deluser someone
+```
+
+### The shared password still works, for now
+
+The old `data/auth` credential is still accepted on writes, so a script or a
+browser already using it keeps working:
 
 ```bash
 printf 'observer:choose-a-real-password\n' > data/auth
 chmod 600 data/auth
-# restart the web process to pick it up
 ```
 
-or set `WHICHNEO_AUTH='observer:...'` in the environment. `data/` is
-gitignored, so the file is never committed. `GET /status` reports whether auth
-is active. With no credentials configured it stays off and nothing changes.
+It is transitional. **Delete `data/auth` once everyone has an account** — it
+is one password shared by everyone, which is exactly what accounts exist to
+replace, and a write made with it is attributed to the shared name rather than
+to a person. `GET /status` still reports `auth`, now meaning "writes are
+protected", which is always true.
 
 ## 3. Check it
 
