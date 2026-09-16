@@ -564,3 +564,15 @@ a.ghost.btn:hover { color: var(--cyan); border-color: rgba(95,201,212,.4); }
   background: rgba(207,97,84,.12); border: 1px solid rgba(207,97,84,.45);
   color: var(--no); font-size: 12px;
 }
+
+/* ---------- ds42 ----------
+   A posterior, not a rank. Tabular figures so the decimal points line up
+   down the column, which is how a reader spots the 0.06 sitting next to a
+   digest2 of 77. Deliberately uncoloured: whether a low p_neo should
+   discourage observing is exactly the question this column exists to
+   investigate, and the board should not answer it by implication. */
+td.ds42 {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+td.ds42 span[title] { cursor: help; }

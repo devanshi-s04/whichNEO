@@ -76,6 +76,28 @@ export WHICHNEO_HTTPS=1
 ls -l data/secret_key
 ```
 
+### Copying the database: do not use `cp`
+
+`data/targets.db` runs in WAL mode, so recent commits live in
+`data/targets.db-wal` until SQLite checkpoints them. **`cp data/targets.db
+somewhere` silently gives you a stale copy** — no error, just missing the most
+recent writes. It cost me a confusing half hour: a copy taken minutes after 73
+ds42 scores were written contained none of them.
+
+Use SQLite's own backup, which reads through the WAL and is safe while the
+board is running:
+
+```bash
+python3 -c "
+import sqlite3
+src = sqlite3.connect('file:data/targets.db?mode=ro', uri=True)
+dst = sqlite3.connect('/path/to/copy.db')
+src.backup(dst); dst.close(); src.close()"
+```
+
+(Or `cp` all three of `targets.db`, `-wal` and `-shm` together, but the
+backup API is the one that cannot be got subtly wrong.)
+
 Administration:
 
 ```bash

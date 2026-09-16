@@ -248,6 +248,12 @@
       <th class="l" title="Observatory code of the discovery observation">Disc. obs</th>
       <th class="l">MPC</th>
       {{ sort_th('digest2', 'Score') }}
+      {# The tooltip is the column. ds42 scores the DISCOVERY TRACKLET, so
+         unlike the digest2 score beside it this number does not move as
+         follow-up comes in -- measured over two nights, every object seen on
+         both scored identically. Without saying so, a frozen number next to a
+         moving one reads as a bug. See ds42.md. #}
+      {{ sort_th('ds42', 'ds42', title="Probability this is an NEO, from ds42. Scored from the DISCOVERY TRACKLET only, so unlike the digest2 score it does not change as follow-up observations arrive. A dash means ds42 could not compute a posterior; hover it for why.") }}
       {{ sort_th('mag', 'V') }}
       {{ sort_th('exposure_min', 'Shoot', title="Frames x seconds, from the observatory's speed table at each target's best altitude") }}
       {{ sort_th('motion', '&Prime;/min'|safe) }}
