@@ -136,6 +136,39 @@ CREATE TABLE IF NOT EXISTS ephemeris_cache (
     payload     TEXT
 );
 
+-- ds42 scores. Deliberately its OWN table rather than a column on targets or
+-- a key in the ephemeris cache, because both of those are destroyed on a
+-- schedule: targets is rewritten every cycle, and prune_cache drops an
+-- object the moment it leaves NEOCP. A score stored in either would vanish
+-- exactly when it became interesting -- which is after the object resolves
+-- and we can finally ask whether ds42 was right.
+--
+-- Written once per object and never updated. p_neo is a function of the
+-- discovery tracklet, and ds42 truncates to the first two hours of the first
+-- night, so it does not move as follow-up accumulates: across two banked
+-- nights, all 60 objects present on both scored identically. Re-scoring
+-- would spend the model load to arrive at the same number. See ds42.md.
+--
+-- The provenance columns are not decoration. A p_neo means nothing without
+-- the code revision, the model hash and the configuration that produced it,
+-- and deploy/DS42.md explains why the revision has to be resolved at scoring
+-- time rather than read from ds42.__version__.
+CREATE TABLE IF NOT EXISTS ds42_scores (
+    desig           TEXT PRIMARY KEY,
+    scored_utc      TEXT NOT NULL,
+    p_neo           REAL,
+    log_lr          REAL,
+    status          TEXT,
+    n_obs           INTEGER,
+    arc_h           REAL,
+    obscode         TEXT,
+    vmag            REAL,
+    ds42_rev        TEXT,
+    ds42_dirty      INTEGER,
+    model_sha256    TEXT,
+    config_json     TEXT
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -514,6 +547,73 @@ def set_state(conn, desig, user_id=0, **fields):
             f"VALUES (?,?,{placeholders}) "
             f"ON CONFLICT(desig,user_id) DO UPDATE SET {updates}",
             (desig, user_id, *fields.values()))
+
+
+# --- ds42 scores ------------------------------------------------------------
+
+def unscored_desigs(conn, desigs):
+    """Which of these have no ds42 score yet.
+
+    The filter that makes scoring one-shot. Everything already in the table
+    is skipped, so a cycle only ever pays for objects it has not seen.
+    """
+    want = [d for d in desigs if d]
+    if not want:
+        return []
+    have = set()
+    # Chunked: SQLite's variable limit is 999 by default and NEOCP has run to
+    # several hundred objects.
+    for i in range(0, len(want), 500):
+        chunk = want[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        have.update(r[0] for r in conn.execute(
+            f"SELECT desig FROM ds42_scores WHERE desig IN ({marks})", chunk))
+    return [d for d in want if d not in have]
+
+
+def save_ds42_scores(conn, scores, prov):
+    """Insert scores that are not already there. Never overwrites.
+
+    INSERT OR IGNORE rather than REPLACE: a score already stored was produced
+    by a known revision and model, and silently replacing it with one from a
+    different revision would make the table's provenance columns a lie.
+    """
+    if not scores:
+        return 0
+    cfg = json.dumps(prov.get("config") or {}, sort_keys=True)
+    rows = [(d, utcnow(), s.get("p_neo"), s.get("log_lr"), s.get("status"),
+             s.get("n_obs"), s.get("arc_h"), s.get("obscode"), s.get("vmag"),
+             prov.get("ds42_rev"), 1 if prov.get("ds42_dirty") else 0,
+             prov.get("model_sha256"), cfg)
+            for d, s in sorted(scores.items())]
+    with conn:
+        cur = conn.executemany(
+            "INSERT OR IGNORE INTO ds42_scores (desig, scored_utc, p_neo, "
+            "log_lr, status, n_obs, arc_h, obscode, vmag, ds42_rev, "
+            "ds42_dirty, model_sha256, config_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    return cur.rowcount
+
+
+def load_ds42_scores(conn, desigs=None):
+    """{desig: row dict}, for the whole table or a subset."""
+    if desigs is None:
+        rows = conn.execute("SELECT * FROM ds42_scores").fetchall()
+    else:
+        want = [d for d in desigs if d]
+        if not want:
+            return {}
+        rows = []
+        for i in range(0, len(want), 500):
+            chunk = want[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            rows.extend(conn.execute(
+                f"SELECT * FROM ds42_scores WHERE desig IN ({marks})", chunk))
+    return {r["desig"]: dict(r) for r in rows}
+
+
+def count_ds42_scores(conn):
+    return conn.execute("SELECT count(*) FROM ds42_scores").fetchone()[0]
 
 
 # --- accounts ---------------------------------------------------------------

@@ -307,5 +307,24 @@ RESET_TOKEN_MAX_AGE_S = 3600
 # from a broken board.
 INVITE_TOKEN_MAX_AGE_S = 86400
 
+# --- ds42 -------------------------------------------------------------------
+# The Bayesian tracklet classifier we run alongside digest2. Lives outside
+# this repository on purpose -- see deploy/DS42.md for the install and
+# ds42.md for what we have found with it.
+#
+# Off unless the install is actually present, so a clone without it, or a
+# machine that never had it, behaves exactly as before. Scoring is best
+# effort in every sense: a failure is logged and the cycle carries on.
+DS42_ROOT = os.environ.get("WHICHNEO_DS42_ROOT", "/home/devanshi-s04/ds42")
+DS42_SRC = os.path.join(DS42_ROOT, "src")
+DS42_BIN = os.path.join(DS42_ROOT, "venv", "bin", "ds42")
+DS42_MODEL = os.path.join(DS42_ROOT, "data", "digest2.model.csv")
+DS42_OBSCODES = os.path.join(DS42_ROOT, "data", "ObsCodesF.html")
+DS42_ENABLED = os.environ.get("WHICHNEO_DS42", "1") not in ("0", "no", "")
+# One subprocess scores every object that needs one, so this bounds the whole
+# batch, not a single object. Measured: 73 objects in 4.8 s including the
+# 1.5 s model load.
+DS42_TIMEOUT_S = 180
+
 UPDATE_INTERVAL_S = 300
 WEB_POLL_INTERVAL_S = 20
