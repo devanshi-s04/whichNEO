@@ -458,9 +458,11 @@ def test_uncertainty_plot():
 
 
 def test_auth_protects_state_changes():
-    """Reads stay open; anything that changes state must be protected once
-    credentials are configured. Without this, anyone who can reach the URL
-    can mark targets observed or reorder the queue."""
+    """Reads stay open; anything that changes state must be protected.
+
+    The shared basic-auth credential is transitional -- accounts replace it --
+    but it has to keep working while Luka's team moves over, so it is tested
+    as a first-class path rather than as a leftover."""
     import importlib
 
     import app as appmod
@@ -499,7 +501,319 @@ def test_auth_protects_state_changes():
         importlib.reload(auth)
         importlib.reload(appmod)
 
-    check("auth is off when no credentials are configured", not auth.ENABLED)
+    check("shared credential is off when none is configured",
+          not auth.BASIC_ENABLED)
+    # This is the line that changed meaning when accounts arrived. It used to
+    # read `not auth.ENABLED` -- "no password file, so writes are open". A
+    # board on the public internet must not have that state at all: with no
+    # credential file and no account, a write is still refused.
+    check("writes stay protected with no shared credential at all",
+          auth.ENABLED)
+    check("anonymous write refused with no credential configured",
+          appmod.app.test_client().post(
+              "/mark/XYZ", data={"action": "hide"}).status_code == 401)
+
+
+def test_accounts():
+    """Sign-up, sign-in, and the CSRF token on every write.
+
+    Each check here is something that, wrong, is invisible from the board:
+    a password stored in the clear looks identical to one that is hashed, and
+    a missing CSRF check looks identical to a working one until somebody else's
+    page starts marking targets done on an observer's behalf.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+
+    prev_db = config.DB_PATH
+    prev_env = os.environ.pop("WHICHNEO_AUTH", None)
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+
+        def session_token(client):
+            with client.session_transaction() as s:
+                return s.get("csrf")
+
+        good = {"username": "obs1", "password": "correct-horse-1",
+                "confirm": "correct-horse-1"}
+
+        r = c.post("/register", data=dict(good, password="short", confirm="short"))
+        check("short password refused", r.status_code == 400
+              and b"least" in r.data)
+        r = c.post("/register", data=dict(good, username="has space"))
+        check("malformed username refused", r.status_code == 400)
+        r = c.post("/register", data=dict(good, confirm="mistyped-horse-1"))
+        check("mismatched confirmation refused", r.status_code == 400
+              and b"do not match" in r.data)
+
+        r = c.post("/register", data=good)
+        check("registration succeeds", r.status_code == 302)
+
+        fresh = appmod.app.test_client()
+        r = fresh.post("/register", data=dict(good, username="OBS1"))
+        check("username uniqueness is case-insensitive",
+              r.status_code == 400 and b"taken" in r.data)
+
+        conn = db.connect(config.DB_PATH)
+        try:
+            user = db.user_by_name(conn, "obs1")
+            stored = user["password_hash"]
+            check("password stored as argon2id",
+                  stored.startswith("$argon2id$"))
+            # The plaintext must not appear anywhere in the row. A hash that
+            # happens to embed the password would pass the prefix check above.
+            check("plaintext password nowhere in the user row",
+                  "correct-horse-1" not in " ".join(
+                      str(v) for v in dict(user).values()))
+            ok, _ = auth.verify_password(stored, "correct-horse-1")
+            bad, _ = auth.verify_password(stored, "correct-horse-2")
+            check("hash verifies the right password", ok)
+            check("hash rejects the wrong password", not bad)
+        finally:
+            conn.close()
+
+        tok = session_token(c)
+        check("session carries a CSRF token", bool(tok))
+        check("write without a token refused",
+              c.post("/mark/AAA", data={"action": "hide"}).status_code == 400)
+        check("write with the wrong token refused",
+              c.post("/mark/AAA", data={"action": "hide", "csrf": "no"}
+                     ).status_code == 400)
+        check("write with the session's token accepted",
+              c.post("/mark/AAA", data={"action": "hide", "csrf": tok}
+                     ).status_code == 302)
+
+        conn = db.connect(config.DB_PATH)
+        try:
+            row = conn.execute("SELECT hidden FROM observer_state "
+                               "WHERE desig='AAA'").fetchone()
+            check("the accepted write actually landed",
+                  row is not None and row[0] == 1)
+        finally:
+            conn.close()
+
+        page = c.get("/").data.decode()
+        check("signed-in observer named in the header", "obs1" in page)
+        c.post("/logout")
+        check("signing out clears the session", session_token(c) != tok)
+        check("write refused again after signing out",
+              c.post("/mark/AAA", data={"action": "restore"}
+                     ).status_code in (400, 401))
+
+        # One message for a wrong password and for a name that does not exist.
+        # Two different messages would enumerate the observatory's accounts.
+        r1 = c.post("/login", data={"username": "obs1", "password": "nope"})
+        r2 = c.post("/login", data={"username": "ghost", "password": "nope"})
+        check("wrong password and unknown user answer identically",
+              r1.status_code == r2.status_code == 401
+              and b"do not match" in r1.data and b"do not match" in r2.data)
+
+        r = c.post("/login", data={"username": "obs1",
+                                   "password": "correct-horse-1"})
+        check("correct credentials sign in", r.status_code == 302)
+
+        c.post("/logout")
+        r = c.post("/login", data={"username": "obs1",
+                                   "password": "correct-horse-1",
+                                   "next": "https://evil.example/"})
+        check("next= cannot leave the site",
+              dict(r.headers).get("Location") == "/")
+        c.post("/logout")
+        r = c.post("/login", data={"username": "obs1",
+                                   "password": "correct-horse-1",
+                                   "next": "//evil.example/"})
+        check("protocol-relative next= cannot leave the site",
+              dict(r.headers).get("Location") == "/")
+
+        for path in ("/", "/status", "/rows", "/login", "/register"):
+            check(f"{path} readable signed out",
+                  appmod.app.test_client().get(path).status_code == 200)
+    finally:
+        config.DB_PATH = prev_db
+        if prev_env is not None:
+            os.environ["WHICHNEO_AUTH"] = prev_env
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+
+def test_observer_state_is_per_account():
+    """Two observers, one board.
+
+    What one marks done is their own record of their own night. The risk this
+    creates -- both integrating the same object for twenty minutes, neither
+    seeing the other -- is why every row also carries who else has marked it.
+    """
+    import sqlite3
+    import tempfile
+
+    path = os.path.join(tempfile.mkdtemp(), "targets.db")
+    conn = db.connect(path)
+    db.init(conn)
+
+    a = db.create_user(conn, "ana", "x")
+    b = db.create_user(conn, "boris", "y")
+    conn.execute("INSERT INTO targets (desig) VALUES ('P11aaaa'),('P11bbbb')")
+    conn.commit()
+
+    db.set_state(conn, "P11aaaa", a, observed=1, observed_at_utc=db.utcnow())
+
+    rows_a = {r["desig"]: r for r in db.load_targets(conn, include_observed=True,
+                                                     user_id=a)}
+    rows_b = {r["desig"]: r for r in db.load_targets(conn, include_observed=True,
+                                                     user_id=b)}
+    check("the observer who marked it sees it done",
+          rows_a["P11aaaa"]["observed"] == 1)
+    check("the other observer does not", rows_b["P11aaaa"]["observed"] == 0)
+    check("but is told somebody else did",
+          rows_b["P11aaaa"]["others_observed"] == 1
+          and rows_b["P11aaaa"]["others_names"] == "ana")
+    check("and is not told about themselves",
+          rows_a["P11aaaa"]["others_observed"] == 0)
+    check("an untouched target is clean for both",
+          rows_a["P11bbbb"]["others_observed"] == 0
+          and rows_b["P11bbbb"]["observed"] == 0)
+
+    db.set_state(conn, "P11aaaa", b, observed=1, observed_at_utc=db.utcnow())
+    rows_a = {r["desig"]: r for r in db.load_targets(conn, include_observed=True,
+                                                     user_id=a)}
+    check("two marks on one target coexist",
+          conn.execute("SELECT count(*) FROM observer_state "
+                       "WHERE desig='P11aaaa'").fetchone()[0] == 2)
+    check("now each sees the other", rows_a["P11aaaa"]["others_names"] == "boris")
+
+    # Hiding is personal too: one observer clearing their list must not take
+    # the target off anybody else's.
+    db.set_state(conn, "P11bbbb", a, hidden=1)
+    vis_b = [r["desig"] for r in db.load_targets(conn, user_id=b)]
+    check("hiding is personal", "P11bbbb" in vis_b)
+
+    anon = {r["desig"]: r for r in db.load_targets(conn, include_observed=True,
+                                                   user_id=None)}
+    check("a signed-out reader owns no state",
+          anon["P11aaaa"]["observed"] == 0 and anon["P11bbbb"]["hidden"] == 0)
+    check("but still sees what has been done",
+          anon["P11aaaa"]["others_observed"] == 2)
+
+    db.set_state(conn, "P11bbbb", 0, observed=1)
+    # include_hidden, because ana hid P11bbbb three lines up -- and that is
+    # the point: her hiding it does not stop it being on the board.
+    seen_by_a = {r["desig"]: r for r in db.load_targets(
+        conn, include_observed=True, include_hidden=True, user_id=a)}
+    check("a write with the shared credential is labelled, not attributed",
+          seen_by_a["P11bbbb"]["others_names"] == "shared")
+    conn.close()
+
+
+def test_observer_state_migration_keeps_every_mark():
+    """observer_state is the one table nothing can regenerate.
+
+    `targets` is rebuilt from MPC every five minutes, so dropping it costs
+    nothing. There is nowhere to re-fetch the fact that L01 observed something
+    last Tuesday, so the user_id migration has to rebuild and copy -- and the
+    first account has to inherit the marks, or a season of work shows up as
+    "already done by someone else" to everybody forever.
+    """
+    import tempfile
+
+    path = os.path.join(tempfile.mkdtemp(), "targets.db")
+    conn = db.connect(path)
+    # The pre-accounts shape, exactly as the live database has it.
+    conn.executescript("""
+        CREATE TABLE observer_state (
+            desig           TEXT PRIMARY KEY,
+            observed        INTEGER DEFAULT 0,
+            observed_at_utc TEXT,
+            hidden          INTEGER DEFAULT 0,
+            priority_bump   REAL DEFAULT 0,
+            note            TEXT
+        );
+        INSERT INTO observer_state (desig, observed, observed_at_utc, hidden, note)
+        VALUES ('C46JQC1', 1, '2026-09-01 22:10:00', 0, 'clouds'),
+               ('A11GP9t', 0, NULL, 1, NULL);
+    """)
+    conn.commit()
+
+    db.init(conn)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(observer_state)")}
+    check("migrated table has user_id", "user_id" in cols)
+    check("every row survived the migration",
+          conn.execute("SELECT count(*) FROM observer_state").fetchone()[0] == 2)
+    check("the old table is kept as a fallback",
+          conn.execute("SELECT count(*) FROM sqlite_master WHERE name="
+                       "'observer_state_pre_accounts'").fetchone()[0] == 1)
+    row = conn.execute("SELECT * FROM observer_state WHERE desig='C46JQC1'"
+                       ).fetchone()
+    check("fields came across intact",
+          row["observed"] == 1 and row["note"] == "clouds"
+          and row["observed_at_utc"] == "2026-09-01 22:10:00")
+    check("migrated rows land unattributed", row["user_id"] == 0)
+
+    uid = db.create_user(conn, "luka", "hash")
+    check("the first account inherits the pre-accounts marks",
+          conn.execute("SELECT count(*) FROM observer_state WHERE user_id = ?",
+                       (uid,)).fetchone()[0] == 2)
+    second = db.create_user(conn, "ana", "hash")
+    check("a later account inherits nothing",
+          conn.execute("SELECT count(*) FROM observer_state WHERE user_id = ?",
+                       (second,)).fetchone()[0] == 0)
+
+    db.init(conn)
+    check("running the migration twice is a no-op",
+          conn.execute("SELECT count(*) FROM observer_state").fetchone()[0] == 2)
+    conn.close()
+
+
+def test_login_throttle():
+    """A public login form with no throttle is an invitation to guess, and
+    argon2's deliberate cost makes each guess expensive for *us* -- enough
+    parallel attempts and the board stops rendering."""
+    import importlib
+
+    import app as appmod
+    import auth
+
+    importlib.reload(auth)
+    importlib.reload(appmod)
+    c = appmod.app.test_client()
+
+    codes = [c.post("/login", data={"username": "ghost", "password": "x"}
+                    ).status_code for _ in range(auth.FAIL_LIMIT + 2)]
+    check("every bad attempt is refused", set(codes) == {401})
+    last = c.post("/login", data={"username": "ghost", "password": "x"})
+    check("attempts are capped after the limit",
+          b"Too many failed attempts" in last.data)
+
+    # Leave no residue: the next test's client comes from the same process
+    # and would arrive already locked out.
+    auth._fails.clear()
+
+
+def test_secret_key_is_stable_and_private():
+    """Regenerating the signing key on restart logs the whole observatory out
+    mid-night, so it has to be persisted -- and persisted 0600, since anyone
+    who can read it can forge a session for any account."""
+    import stat
+
+    import auth
+
+    prev = os.environ.pop("WHICHNEO_SECRET_KEY", None)
+    try:
+        first = auth.secret_key()
+        second = auth.secret_key()
+        check("key survives a second call", first == second)
+        check("key is long enough to sign with", len(first) >= 32)
+        mode = stat.S_IMODE(os.stat(auth.SECRET_PATH).st_mode)
+        check("key file is not readable by anyone else", mode == 0o600,
+              f"mode {oct(mode)}")
+    finally:
+        if prev is not None:
+            os.environ["WHICHNEO_SECRET_KEY"] = prev
 
 
 def test_schema_migration_from_older_db():
@@ -1414,6 +1728,10 @@ def main():
                test_plan_file_survives_dawn, test_mpc_markers,
                test_observatory_identification, test_uncertainty_plot,
                test_auth_protects_state_changes,
+               test_accounts, test_observer_state_is_per_account,
+               test_observer_state_migration_keeps_every_mark,
+               test_login_throttle,
+               test_secret_key_is_stable_and_private,
                test_schema_migration_from_older_db,
                test_ranking_bounds, test_row_rejection_reasons,
                test_replay_ts_never_takes_the_map_down,
