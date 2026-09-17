@@ -78,8 +78,8 @@ the live board: **1.1 fetches per cycle, ~306 per day per site.**
 - 50 sites ≈ 10/minute — heavy but survivable
 - hundreds — not acceptable without talking to MPC first
 
-So the cap is a real number, not a vague worry. It is the main argument for
-approving new sites rather than letting sign-up be instant.
+So the cap is a real number rather than a vague worry, and it is what the
+sign-up limit should be derived from — see Permissions and sign-up below.
 
 ---
 
