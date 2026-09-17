@@ -153,6 +153,7 @@ which is what correctness requires, costs it 218 s and costs us about 2.
 | File | Role |
 |---|---|
 | `sites.py` | The `Site` type, and loading sites from `sites/*.toml`. |
+| `siteconf.py` | Settings edited on the web, layered over a site's file. |
 | `sites/` | One TOML file per observatory. `L01.toml` is Višnjan, and its TBDs. |
 | `config.py` | The deployment: MPC endpoints, storage, mail, accounts, ds42. |
 | `neocp.py` | NEOCP list + `neocp_info` orbital parameters. |

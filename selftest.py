@@ -36,6 +36,7 @@ import output
 import pipeline
 import ranking
 import moonplot
+import siteconf
 import sites as sitesmod
 import skymap
 import update_neocp
@@ -1870,8 +1871,13 @@ def test_the_settings_page_keeps_soft_and_hard_apart():
               "clockwise" in page.lower())
         check("the mask and wedges are drawn, not only tabulated",
               "<svg" in page)
-        check("and the page says it cannot be edited yet",
-              "Read-only" in page or "read-only" in page)
+        # The page was read-only when it first shipped and is editable now,
+        # so what it has to say is no longer "you cannot change this" but
+        # "here is what changing it does, and who may".
+        check("a signed-out reader is told why they cannot change anything",
+              "signed out" in page and "Sign in" in page)
+        check("and the page says an edit overrides the file, not rewrites it",
+              "override of that file" in page)
 
         # The numbers an observer would come here to check.
         check("the magnitude limit is shown", str(site.max_mag) in page)
@@ -1893,6 +1899,367 @@ def test_the_settings_page_keeps_soft_and_hard_apart():
             config.SITES = prev_sites
     finally:
         config.DB_PATH = prev_db
+        importlib.reload(appmod)
+
+
+def _settings_client(appmod):
+    """A test client signed in as a real account, plus its CSRF token."""
+    c = appmod.app.test_client()
+    c.post("/register", data={"username": "keeper",
+                              "password": "correct-horse-7",
+                              "confirm": "correct-horse-7"})
+    with c.session_transaction() as s:
+        return c, s.get("csrf")
+
+
+def _mask_form(site, **over):
+    """The settings form as the page would submit it, unchanged by default."""
+    form = {}
+    for spec in siteconf.SCALARS:
+        value = getattr(site, spec.name)
+        if spec.kind == "bool":
+            if value:
+                form[spec.name] = "on"
+        else:
+            form[spec.name] = str(value)
+    form["max_altitude"] = ("none" if site.max_altitude is None
+                            else str(site.max_altitude))
+    for k in siteconf.RANK_WEIGHT_KEYS:
+        form[f"weight_{k}"] = str(site.rank_weights[k])
+    for i, e in enumerate(site.horizon_mask):
+        form[f"mask_alt_{i}"] = "any" if e[2] is None else str(e[2])
+        form[f"mask_hard_{i}"] = e[3]
+        form[f"mask_why_{i}"] = e[4]
+    form["wedge_from"] = [str(w[0]) for w in site.keepout_wedges]
+    form["wedge_to"] = [str(w[1]) for w in site.keepout_wedges]
+    form["wedge_alt"] = [str(w[2]) for w in site.keepout_wedges]
+    form["wedge_why"] = [w[3] for w in site.keepout_wedges]
+    form.update(over)
+    return form
+
+
+def test_settings_edits_layer_over_the_file_and_can_be_undone():
+    """An edit overrides the file; it never rewrites it, and it reverts.
+
+    The file is where the reasoning lives -- why a wedge starts where it
+    does, why a sector's figure is interpolated -- and a form cannot write a
+    comment. So an edit is a row in the database applied on top, reverting is
+    deleting that row, and a site nobody has touched reads exactly as before.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        importlib.reload(appmod)
+
+        base = config.DEFAULT_SITE
+        anon = appmod.app.test_client()
+        check("the page is readable signed out",
+              anon.get("/settings").status_code == 200)
+        check("but it offers no inputs to somebody who cannot save",
+              'name="max_mag"' not in anon.get("/settings").data.decode())
+        check("and a save from an unnamed writer is refused",
+              anon.post("/settings", data={"action": "save"}).status_code
+              in (400, 401, 403))
+
+        c, tok = _settings_client(appmod)
+        page = c.get("/settings").data.decode()
+        check("a signed-in account gets a form", 'name="max_mag"' in page)
+
+        # --- a scalar edit ---
+        form = _mask_form(base, csrf=tok, action="save", max_mag="20.5")
+        r = c.post("/settings", data=form)
+        check("the edit is accepted", r.status_code == 302, r.status_code)
+
+        conn = db.connect(config.DB_PATH)
+        try:
+            over = db.load_site_overrides(conn, base.id)
+            check("only the field that changed is stored",
+                  list(over) == ["max_mag"], list(over))
+            check("stored as the new value", over["max_mag"] == 20.5)
+            siteconf.forget()
+            eff = siteconf.effective(conn, base)
+            check("the site now reads the edited value", eff.max_mag == 20.5)
+            check("and everything else still comes from the file",
+                  eff.min_score == base.min_score
+                  and eff.keepout_wedges == base.keepout_wedges)
+            rows = db.site_settings_rows(conn, base.id)
+            check("what it replaced is kept, so it can be undone",
+                  json.loads(rows["max_mag"]["previous_json"]) == base.max_mag,
+                  rows["max_mag"]["previous_json"])
+            check("and who changed it is recorded",
+                  rows["max_mag"]["changed_by"] is not None)
+        finally:
+            conn.close()
+
+        check("the file on disk is untouched",
+              sitesmod.load_file("sites/L01.toml").max_mag == base.max_mag)
+
+        # --- undo ---
+        r = c.post("/settings", data={"csrf": tok, "action": "revert:max_mag"})
+        check("reverting is accepted", r.status_code == 302, r.status_code)
+        conn = db.connect(config.DB_PATH)
+        try:
+            check("the override is gone entirely",
+                  db.load_site_overrides(conn, base.id) == {})
+            siteconf.forget()
+            check("so the file decides again",
+                  siteconf.effective(conn, base).max_mag == base.max_mag)
+        finally:
+            conn.close()
+
+        # --- a value that must not be stored ---
+        bad = _mask_form(base, csrf=tok, action="save", max_mag="banana")
+        r = c.post("/settings", data=bad)
+        check("a non-numeric limit is refused", r.status_code == 400)
+        check("and the refusal says which field and why",
+              b"Faintest magnitude" in r.data and b"not a number" in r.data)
+        r = c.post("/settings", data=_mask_form(base, csrf=tok, action="save",
+                                                sun_alt_max="40"))
+        check("a sun altitude above the horizon is refused",
+              r.status_code == 400 and b"at most" in r.data)
+        conn = db.connect(config.DB_PATH)
+        try:
+            check("nothing was written by either refusal",
+                  db.load_site_overrides(conn, base.id) == {})
+        finally:
+            conn.close()
+
+        # --- a mask sector with no stated reason ---
+        r = c.post("/settings", data=_mask_form(base, csrf=tok, action="save",
+                                                mask_why_0=""))
+        check("a mask limit with no reason is refused",
+              r.status_code == 400 and b"say why" in r.data)
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
+        importlib.reload(appmod)
+
+
+def test_a_keepout_wedge_cannot_be_changed_by_accident():
+    """The one setting where a typo points a telescope at a wall.
+
+    Saving a wedge change requires typing the observatory code, the pattern
+    GitHub uses for deleting a repository. Everything else on the page saves
+    without it, so the guard has to apply to wedge changes and only to them --
+    a confirmation demanded for every save is a confirmation people learn to
+    type without reading.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        importlib.reload(appmod)
+
+        base = config.DEFAULT_SITE
+        c, tok = _settings_client(appmod)
+
+        # A scalar change alone needs no confirmation.
+        r = c.post("/settings", data=_mask_form(base, csrf=tok, action="save",
+                                                min_score="30"))
+        check("an ordinary setting saves without ceremony",
+              r.status_code == 302, r.status_code)
+
+        widened = _mask_form(base, csrf=tok, action="save")
+        widened["wedge_alt"] = ["80.0"]          # was 70
+        r = c.post("/settings", data=widened)
+        check("a wedge change without the code is refused",
+              r.status_code == 400, r.status_code)
+        check("and the refusal names the code that has to be typed",
+              b"L01" in r.data)
+
+        r = c.post("/settings", data=dict(widened, confirm_obscode="WRONG"))
+        check("the wrong code is refused too", r.status_code == 400)
+
+        conn = db.connect(config.DB_PATH)
+        try:
+            siteconf.forget()
+            check("the wedge is untouched by either attempt",
+                  siteconf.effective(conn, base).keepout_wedges
+                  == base.keepout_wedges)
+        finally:
+            conn.close()
+
+        r = c.post("/settings", data=dict(widened, confirm_obscode="l01"))
+        check("the right code saves it, case-insensitively",
+              r.status_code == 302, r.status_code)
+        conn = db.connect(config.DB_PATH)
+        try:
+            siteconf.forget()
+            wedges = siteconf.effective(conn, base).keepout_wedges
+            check("and the new wedge is what takes effect",
+                  wedges[0][2] == 80.0, wedges)
+            check("with its reason carried over", wedges[0][3] == base.keepout_wedges[0][3])
+        finally:
+            conn.close()
+
+        # A wedge is removed by clearing its row, not by a separate verb.
+        cleared = _mask_form(base, csrf=tok, action="save",
+                             confirm_obscode="L01")
+        cleared["wedge_from"] = [""]
+        cleared["wedge_to"] = [""]
+        cleared["wedge_alt"] = [""]
+        cleared["wedge_why"] = [""]
+        r = c.post("/settings", data=cleared)
+        check("clearing a row removes that wedge", r.status_code == 302)
+        conn = db.connect(config.DB_PATH)
+        try:
+            siteconf.forget()
+            check("leaving no sky refused outright",
+                  siteconf.effective(conn, base).keepout_wedges == ())
+        finally:
+            conn.close()
+
+        # Half a row is a mistake, not an instruction.
+        half = _mask_form(base, csrf=tok, action="save",
+                          confirm_obscode="L01")
+        half["wedge_from"] = ["100"]
+        half["wedge_to"] = [""]
+        half["wedge_alt"] = ["50"]
+        half["wedge_why"] = ["half filled"]
+        r = c.post("/settings", data=half)
+        check("a half-filled wedge row is refused rather than guessed at",
+              r.status_code == 400 and b"every field" in r.data)
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
+        importlib.reload(appmod)
+
+
+def test_an_edited_limit_reaches_the_update_cycle():
+    """A setting changed on the page has to change what reaches the board.
+
+    The failure this guards against is the quiet one: the settings page and
+    the board both reading the override while the cycle that decides what is
+    observable keeps reading the file. The limit would appear changed
+    everywhere a person looks and be unchanged in the only place it acts.
+    """
+    import tempfile
+
+    prev_db, prev_sites = config.DB_PATH, config.SITES
+    d = tempfile.mkdtemp()
+    config.DB_PATH = os.path.join(d, "targets.db")
+    config.SITES = {1: config.DEFAULT_SITE}
+    siteconf.forget()
+    src = os.path.join(d, "neocp.txt")
+    with open(src, "w") as f:
+        f.write(NEOCP_TWO_OBJECTS)
+
+    real_info = neocp.fetch_neocp_info
+    real_many = ephemeris.fetch_many
+    real_score = update_neocp._score_new_objects
+    real_plan = config.WRITE_NIGHTLY_PLAN
+    try:
+        neocp.fetch_neocp_info = lambda *a, **k: ""
+        ephemeris.fetch_many = lambda desigs, **k: (list(desigs), {})[1]
+        update_neocp._score_new_objects = lambda conn, cache: None
+        config.WRITE_NIGHTLY_PLAN = False
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+
+        # The sample list holds objects scoring 100 and 90.
+        update_neocp.run_update(conn, None, src)
+        rows = db.load_targets(conn, True, True, site=config.DEFAULT_SITE)
+        kept = {r["desig"] for r in rows
+                if "LOW_SCORE" not in (r["discard_reasons"] or [])}
+        check("both objects clear the file's digest2 floor", len(kept) == 2,
+              kept)
+
+        db.save_site_override(conn, config.DEFAULT_SITE.id, "min_score",
+                              siteconf.dumps(95),
+                              siteconf.dumps(config.DEFAULT_SITE.min_score), 1)
+        siteconf.forget()
+
+        update_neocp.run_update(conn, None, src)
+        rows = db.load_targets(conn, True, True, site=config.DEFAULT_SITE)
+        low = {r["desig"] for r in rows
+               if "LOW_SCORE" in (r["discard_reasons"] or [])}
+        check("raising the floor on the page rejects the weaker object",
+              low == {"TR0007"}, low)
+        check("and leaves the stronger one alone",
+              not any(r["desig"] == "TR0006" and "LOW_SCORE"
+                      in (r["discard_reasons"] or []) for r in rows))
+        conn.close()
+    finally:
+        neocp.fetch_neocp_info = real_info
+        ephemeris.fetch_many = real_many
+        update_neocp._score_new_objects = real_score
+        config.WRITE_NIGHTLY_PLAN = real_plan
+        config.DB_PATH, config.SITES = prev_db, prev_sites
+        siteconf.forget()
+
+
+def test_the_settings_preview_is_drawn_by_the_board_s_own_code():
+    """The preview must not be a second implementation of the sky map.
+
+    A preview drawn by different code is a preview that can disagree with
+    what actually gets enforced, which is the one thing it must never do. So
+    it goes back to the server and comes out of skymap.render_svg.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        importlib.reload(appmod)
+
+        base = config.DEFAULT_SITE
+        c = appmod.app.test_client()
+        args = {k: v for k, v in _mask_form(base).items()
+                if isinstance(v, str)}
+        args["wedge_from"] = "247.5"
+        args["wedge_to"] = "45.0"
+        args["wedge_alt"] = "70.0"
+        args["wedge_why"] = "mount/dome collision risk"
+
+        r = c.get("/settings/preview.svg", query_string=args)
+        check("the preview renders", r.status_code == 200, r.status_code)
+        check("as an SVG", r.mimetype == "image/svg+xml", r.mimetype)
+        body = r.data.decode()
+        check("drawn by the same code as the board",
+              "Keep out" in body and "mount/dome collision risk" in body)
+
+        # A wedge the form has not finished describing must not 500 the
+        # endpoint the page polls on every keystroke.
+        r = c.get("/settings/preview.svg",
+                  query_string=dict(args, wedge_alt="banana"))
+        check("an unparseable value answers rather than failing",
+              r.status_code == 200)
+        check("and says so on the drawing itself",
+              b"Cannot draw this yet" in r.data)
+
+        # The reason is user text reaching an SVG, so it must be escaped.
+        r = c.get("/settings/preview.svg",
+                  query_string=dict(args, wedge_why="</title><script>x</script>"))
+        check("a reason cannot inject markup into the drawing",
+              b"<script>x</script>" not in r.data)
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
         importlib.reload(appmod)
 
 
@@ -3727,6 +4094,10 @@ def main():
                test_each_site_writes_its_own_plan_file,
                test_the_switcher_only_appears_when_there_is_somewhere_to_go,
                test_the_settings_page_keeps_soft_and_hard_apart,
+               test_settings_edits_layer_over_the_file_and_can_be_undone,
+               test_a_keepout_wedge_cannot_be_changed_by_accident,
+               test_an_edited_limit_reaches_the_update_cycle,
+               test_the_settings_preview_is_drawn_by_the_board_s_own_code,
                test_ranking_bounds, test_row_rejection_reasons,
                test_replay_ts_never_takes_the_map_down,
                test_night_archive_survives_per_account_state,

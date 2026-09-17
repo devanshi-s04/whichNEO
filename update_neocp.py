@@ -32,6 +32,7 @@ import neocp_history
 import output
 import pipeline
 import ranking
+import siteconf
 
 
 def setup_logging(verbose=False):
@@ -189,6 +190,11 @@ def run_update(conn, hist_conn=None, source=None, sites=None):
     happened to sign up; see multisite.md.
     """
     sites = list(config.SITES.values()) if sites is None else list(sites)
+    # Settings edited through the web are overrides layered over each site's
+    # file, so they have to be applied here too. Without this the board would
+    # show a changed limit while the cycle that decides what reaches the board
+    # kept using the old one -- the worst of both, and invisible.
+    sites = [siteconf.effective(conn, s) for s in sites]
     shared = {}
     t0 = time.perf_counter()
 

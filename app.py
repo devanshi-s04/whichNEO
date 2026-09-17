@@ -5,15 +5,18 @@ rendering stays fast. The updater has already done all the work.
 """
 
 import csv
+import dataclasses
 import io
 import json
 import math
 import sqlite3
 import time
+from html import escape
 from datetime import datetime, timedelta, timezone
 
-from flask import (Flask, Response, has_request_context, jsonify, redirect,
-                   render_template, request, send_file, session, url_for)
+from flask import (Flask, Response, g, has_request_context, jsonify,
+                   redirect, render_template, request, send_file, session,
+                   url_for)
 
 import auth
 import config
@@ -26,6 +29,7 @@ import moonplot
 import observability
 import observatories
 import ranking
+import siteconf
 import skymap
 import uncertainty
 
@@ -71,6 +75,33 @@ def current_site():
     from one, but the module is imported by tools that are not), hence the
     context check rather than a bare request.args.
     """
+    base = requested_base_site()
+    if not has_request_context():
+        return base
+    # Settings edited through this page live in the database, layered over
+    # the site's file. Resolved once per request and cached on `g`, because
+    # this is called many times while rendering one board.
+    cached = getattr(g, "_site_effective", None)
+    if cached is not None and cached.id == base.id:
+        return cached
+    site = base
+    try:
+        conn = db.connect()
+        try:
+            site = siteconf.effective(conn, base)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        # A database that has not been created or migrated yet has no edits
+        # in it by definition, so the file's own values are the right answer
+        # rather than a reason to fail the request.
+        pass
+    g._site_effective = site
+    return site
+
+
+def requested_base_site():
+    """The site this request names, before any edited settings are applied."""
     if has_request_context():
         chosen = site_by_code(request.args.get("site"))
         if chosen is not None:
@@ -625,26 +656,166 @@ def api_targets():
 
 @app.route("/settings")
 def settings():
-    """Everything this observatory is configured to do. Read-only.
+    """Everything this observatory is configured to do.
 
-    Open, like the rest of the board's reads: somebody standing at a dome
-    screen should be able to check what the limits are without signing in.
-
-    Editing is the second half of this stage rather than part of this one,
-    because the keep-out wedge is the single setting where a typo points a
-    telescope at a wall -- it needs the confirm-by-obscode guard, the live
-    preview and a kept previous value before anything here can be saved. See
-    multisite.md.
+    Reading is open, like the rest of the board: somebody at a dome screen
+    should be able to check a limit without signing in. Changing anything
+    needs a named account -- see settings_save.
     """
+    return _render_settings()
+
+
+def _settings_groups():
+    """The editable scalars, in the order the page shows them."""
+    out = {}
+    for spec in siteconf.SCALARS:
+        out.setdefault(spec.group, []).append(spec)
+    return out
+
+
+def _render_settings(errors=None, form=None, saved=False, status_code=200):
     site = current_site()
-    return render_template(
-        "settings.html", site=site,
+    base = config.SITES.get(site.id, site)
+    conn = get_conn()
+    try:
+        edited = db.site_settings_rows(conn, site.id)
+    finally:
+        conn.close()
+    page = render_template(
+        "settings.html", site=site, file_site=base, edited=edited,
+        groups=_settings_groups(), siteconf=siteconf,
+        errors=errors or [], form=form or {}, saved=saved,
+        can_edit=auth.current_user() is not None,
         telescope=(observatories.lookup(site.obscode) or {}).get("telescope"),
         # The mask and the wedges as shapes rather than as numbers. A wedge
         # whose arc runs the wrong way round the sky is obvious here and
-        # nearly invisible in a table -- and this is the same preview the
-        # editable half will redraw as the values are typed.
+        # nearly invisible in a table -- which is why this same drawing is
+        # what the form redraws as the values are typed.
         sky_svg=skymap.render_svg([], None, site=site))
+    return (page, status_code) if status_code != 200 else page
+
+
+def _proposed_site(form, site):
+    """The site the submitted form describes. Raises SettingsError."""
+    values = {}
+    for spec in siteconf.SCALARS:
+        got = siteconf.scalar_from_form(spec, form)
+        if got is not None:
+            values[spec.name] = got
+    values[siteconf.MAX_ALTITUDE] = siteconf.max_altitude_from_form(form)
+    values["rank_weights"] = siteconf.rank_weights_from_form(form)
+    values["horizon_mask"] = siteconf.horizon_mask_from_form(
+        form, site.horizon_mask)
+    values["keepout_wedges"] = siteconf.keepout_wedges_from_form(form)
+    return values
+
+
+@app.get("/settings/preview.svg")
+def settings_preview():
+    """The sky map as the form currently describes it, before anything saves.
+
+    Rendered here rather than redrawn in JavaScript so that the preview and
+    the board come from the same code: a preview drawn by a second
+    implementation is a preview that can disagree with what actually gets
+    enforced, which is the one thing it must never do.
+    """
+    site = current_site()
+    try:
+        values = _proposed_site(request.args, site)
+        preview = dataclasses.replace(
+            site, horizon_mask=values["horizon_mask"],
+            keepout_wedges=values["keepout_wedges"],
+            max_altitude=values[siteconf.MAX_ALTITUDE])
+        svg = skymap.render_svg([], None, site=preview)
+    except siteconf.SettingsError as e:
+        svg = (f'<svg viewBox="0 0 {config.SKYMAP_SIZE} 60" width="100%" '
+               f'xmlns="http://www.w3.org/2000/svg">'
+               f'<text x="8" y="24" fill="#cf6154" font-size="12" '
+               f'font-family="monospace">Cannot draw this yet:</text>'
+               f'<text x="8" y="42" fill="#cf6154" font-size="11" '
+               f'font-family="monospace">{escape(str(e))}</text></svg>')
+    return Response(svg, mimetype="image/svg+xml",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.post("/settings")
+@auth.required
+def settings_save():
+    """Apply edited settings, or put one back the way the file has it.
+
+    Deliberately stricter than the rest of the board's writes: marking a
+    target observed may be done with the shared credential, which names
+    nobody, but a change to where a telescope may point should have a person
+    attached to it.
+    """
+    if auth.current_user() is None:
+        return _render_settings(
+            errors=["Changing settings needs a named account. The shared "
+                    "credential can mark targets, but a change to where the "
+                    "telescope may point should have a person attached."],
+            form=request.form, status_code=403)
+
+    site = current_site()
+    base = config.SITES.get(site.id, site)
+    uid = auth.current_user()["id"]
+    conn = get_conn()
+    try:
+        # The restore buttons sit inside the same form as everything else --
+        # a nested form is not valid HTML -- so which field to restore rides
+        # in the button's own value.
+        action = request.form.get("action", "save")
+        if action.startswith("revert:"):
+            field = action.split(":", 1)[1]
+            if field not in siteconf.EDITABLE:
+                return _render_settings(errors=[f"Nothing called {field!r} "
+                                                "can be reverted."],
+                                        status_code=400)
+            db.clear_site_override(conn, site.id, field)
+            siteconf.forget(site.id)
+            if field == "mpc_server_min_alt":
+                db.prune_cache(conn, [], site)
+            return redirect(url_for("settings", reverted=field))
+
+        try:
+            values = _proposed_site(request.form, site)
+        except siteconf.SettingsError as e:
+            return _render_settings(errors=[str(e)], form=request.form,
+                                    status_code=400)
+
+        changed = {f: v for f, v in values.items()
+                   if not siteconf.same(v, getattr(site, f))}
+
+        # The one setting where a typo points a telescope at a wall. Typing
+        # the observatory code is the pattern GitHub uses for deleting a
+        # repository: it makes an accidental save nearly impossible without
+        # inventing a second permissions system on top of the first.
+        if "keepout_wedges" in changed:
+            typed = (request.form.get("confirm_obscode") or "").strip()
+            if typed.upper() != site.obscode.upper():
+                return _render_settings(
+                    errors=["The keep-out wedges remove sky outright, so "
+                            f"saving a change to them needs the observatory "
+                            f"code typed exactly: {site.obscode}."],
+                    form=request.form, status_code=400)
+
+        for field, value in changed.items():
+            db.save_site_override(
+                conn, site.id, field, siteconf.dumps(value),
+                siteconf.dumps(getattr(base, field)), uid)
+
+        # MPC was asked for nothing below the old floor, so every cached
+        # ephemeris is missing exactly the rows a lower floor is asking for.
+        # Dropping this site's cache costs one cycle of refetching and is the
+        # only way the new floor means anything.
+        if "mpc_server_min_alt" in changed:
+            db.prune_cache(conn, [], site)
+
+        siteconf.forget(site.id)
+        if not changed:
+            return redirect(url_for("settings", unchanged=1))
+        return redirect(url_for("settings", saved=len(changed)))
+    finally:
+        conn.close()
 
 
 @app.route("/plan")
