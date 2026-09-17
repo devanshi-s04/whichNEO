@@ -1,0 +1,72 @@
+{# One header for every page.
+
+   Before this, all eleven templates hand-rolled their own top block, which is
+   why the observatories page ended up reachable from nowhere: there was no
+   single place for navigation to live, so each page invented its own
+   back-link and nothing linked forward.
+
+   A page sets what varies and includes this:
+
+     {% set page_heading %}Which<b>NEO</b>{% endset %}
+     {% set page_subtitle %}...{% endset %}
+     {% set header_extra %}<a class="chip" ...>...</a>{% endset %}   (optional)
+     {% include "_header.html" %}
+
+   `set ... endset` captures markup, so a heading can carry <b> and a
+   designation can carry none, without either being escaped wrongly.
+#}
+<div class="top">
+  <div class="brand">
+    <h1><a class="home" href="{{ url_for('index') }}">{{ page_heading }}</a></h1>
+    {% if page_subtitle %}<div class="where">{{ page_subtitle }}</div>{% endif %}
+  </div>
+
+  {# The observatory switcher. Always here, even when there is only one:
+     hiding it until a second exists is what made the whole feature
+     undiscoverable, since you cannot add the second one without it.
+
+     A <details> menu rather than a script, so it works on a dome screen with
+     nothing loaded, and plain links rather than a form, because switching
+     always lands on that observatory's board. #}
+  <details class="sitemenu">
+    <summary title="Which observatory this board is for">
+      <span class="code">{{ site.obscode }}</span>
+      <span class="dim">{{ site.name }}</span>
+    </summary>
+    <div class="sitemenu-panel">
+      {% if site_groups.mine %}
+      <div class="sitemenu-group">Your observatories</div>
+      {% for row in site_groups.mine %}
+      <a class="sitemenu-item{{ ' on' if row.site.id == site.id }}"
+         href="{{ url_for('index', site=row.site.obscode) }}">
+        <span class="code">{{ row.site.obscode }}</span>
+        {{ row.site.name }}
+        <span class="pill{{ ' warn' if row.role == 'owner' }}">{{ row.role }}</span>
+      </a>
+      {% endfor %}
+      {% endif %}
+
+      {% if site_groups.others %}
+      <div class="sitemenu-group">{{ 'Also served' if site_groups.mine else 'Observatories' }}</div>
+      {% for row in site_groups.others %}
+      <a class="sitemenu-item{{ ' on' if row.site.id == site.id }}"
+         href="{{ url_for('index', site=row.site.obscode) }}">
+        <span class="code">{{ row.site.obscode }}</span>
+        {{ row.site.name }}
+      </a>
+      {% endfor %}
+      {% endif %}
+
+      <div class="sitemenu-sep"></div>
+      <a class="sitemenu-item add" href="{{ url_for('site_new_form') }}">
+        + Add an observatory&hellip;</a>
+    </div>
+  </details>
+
+  <a class="nav-btn{{ ' current' if request.endpoint == 'sites_list' }}"
+     href="{{ url_for('sites_list') }}">Observatories</a>
+  <a class="nav-btn{{ ' current' if request.endpoint == 'history_view' }}"
+     href="{{ url_for('history_view') }}">History</a>
+
+  {{ header_extra }}
+</div>

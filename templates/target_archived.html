@@ -9,11 +9,9 @@
 <body>
 <div class="wrap">
 
-<div class="top">
-  <div class="brand">
-    <h1>{{ obj.desig }}</h1>
-    <div class="where">L01 &middot; TI&#268;AN STATION</div>
-  </div>
+{% set page_heading %}{{ obj.desig }}{% endset %}
+{% set page_subtitle %}{{ site.obscode }} &middot; {{ site.name }}{% endset %}
+{% set header_extra %}
   <div class="live">
     <div class="stat"><div class="k">Status</div><div class="v">
       {% if obj.status == 'confirmed' %}<span class="pill go">confirmed</span>
@@ -22,7 +20,8 @@
     </div></div>
     <div class="stat"><div class="k">&nbsp;</div><div class="v"><a class="chip" href="{{ url_for('history_view') }}">&larr; history</a></div></div>
   </div>
-</div>
+{% endset %}
+{% include "_header.html" %}
 
 <p class="note">
   No longer on the live NEOCP board {% if obj.status != 'pending' %}&mdash;

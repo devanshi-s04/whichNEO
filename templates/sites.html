@@ -9,20 +9,17 @@
 <body>
 <div class="wrap">
 
-<div class="top">
-  <div class="brand">
-    <h1>Which<b>NEO</b> &mdash; observatories</h1>
-    <div class="where">Every observatory this deployment serves</div>
-  </div>
+{% set page_heading %}Which<b>NEO</b> &mdash; observatories{% endset %}
+{% set page_subtitle %}Every observatory this deployment serves{% endset %}
+{% set header_extra %}
   <div class="live">
     <div class="stat"><div class="k">Serving</div>
       <div class="v{{ ' amber' if at_capacity }}">{{ active }} / {{ cap }}</div></div>
     <div class="stat"><div class="k">&nbsp;</div>
       <div class="v"><a class="chip" href="{{ url_for('site_new_form') }}">add an observatory</a></div></div>
-    <div class="stat"><div class="k">&nbsp;</div>
-      <div class="v"><a class="chip" href="{{ url_for('index') }}">&larr; sequence</a></div></div>
   </div>
-</div>
+{% endset %}
+{% include "_header.html" %}
 
 <table class="mini">
   <tr><th>Code</th><th>Observatory</th><th>Where</th><th>You</th><th>People</th><th></th></tr>

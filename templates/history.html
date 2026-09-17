@@ -9,11 +9,9 @@
 <body>
 <div class="wrap">
 
-<div class="top">
-  <div class="brand">
-    <h1>NEOCP <b>history</b></h1>
-    <div class="where">Every value NEOCP has reported for every object, since polling began</div>
-  </div>
+{% set page_heading %}NEOCP <b>history</b>{% endset %}
+{% set page_subtitle %}Every value NEOCP has reported for every object, since polling began{% endset %}
+{% set header_extra %}
   <div class="live">
     <div class="stat"><div class="k">Tracking since</div>
       <div class="v">{{ summary.tracking_since[:16] if summary.tracking_since else '&mdash;' }}</div></div>
@@ -26,10 +24,9 @@
         <a class="chip" href="{{ url_for('history_download_db') }}">.db</a>
         <a class="chip" href="{{ url_for('history_download_csv') }}">.csv</a>
       </div></div>
-    <div class="stat"><div class="k">&nbsp;</div>
-      <div class="v"><a class="chip" href="{{ url_for('index') }}">&larr; sequence</a></div></div>
   </div>
-</div>
+{% endset %}
+{% include "_header.html" %}
 
 <div class="bar-row">
   <span class="rules">

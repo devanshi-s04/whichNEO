@@ -1764,12 +1764,16 @@ def test_each_site_writes_its_own_plan_file():
         config.BASE_DIR = prev_base
 
 
-def test_the_switcher_only_appears_when_there_is_somewhere_to_go():
-    """One observatory must look exactly as it did before several existed.
+def test_the_switcher_resolves_an_observatory_by_code():
+    """A URL someone pastes names the observatory, and a wrong one is safe.
 
-    Also the reason the switcher is driven by obscode rather than by id: a
-    URL someone pastes should name the observatory, and an unknown one must
-    fall back rather than 500.
+    This test used to assert the switcher stayed hidden until a second
+    observatory existed. That was the original design and it was wrong: it
+    made the whole feature undiscoverable, because you cannot add the second
+    observatory without the control that offers it. What it is always
+    present is now asserted by
+    test_the_switcher_is_there_with_only_one_observatory; what survives here
+    is the resolution behaviour, which is unchanged.
     """
     import importlib
     import tempfile
@@ -1783,22 +1787,12 @@ def test_the_switcher_only_appears_when_there_is_somewhere_to_go():
         db.init(conn)
         conn.close()
 
-        config.SITES = {1: config.DEFAULT_SITE}
-        importlib.reload(appmod)
-        page = appmod.app.test_client().get("/").data.decode()
-        check("with one site there is no switcher on the board",
-              'class="siteswitch"' not in page)
-        check("and the header still names L01",
-              "L01" in page and "Vi" in page)
-
         config.SITES = {1: config.DEFAULT_SITE, 2: _second_site()}
         importlib.reload(appmod)
         c = appmod.app.test_client()
         page = c.get("/").data.decode()
-        check("with two sites the switcher appears",
-              'class="siteswitch"' in page)
-        check("offering both observatories",
-              "Z99" in page and "L01" in page)
+        check("the switcher offers both observatories",
+              "Z99" in page and config.DEFAULT_SITE.obscode in page)
 
         with appmod.app.test_request_context("/?site=Z99"):
             check("?site= picks the observatory by code",
@@ -2547,6 +2541,251 @@ def test_you_land_on_the_observatory_you_work_at():
         config.DB_PATH = prev_db
         siteconf.forget()
         import importlib
+        importlib.reload(appmod)
+
+
+HEADER_PAGES = ("/", "/history", "/settings", "/sites", "/sites/new",
+                "/login", "/register", "/forgot")
+
+
+def test_every_page_carries_the_same_navigation():
+    """Navigation has to exist in one place, or pages lose it one by one.
+
+    Every template used to hand-roll its own header, which is exactly how the
+    observatories page ended up reachable from nowhere: there was no single
+    place for a link to live, so each page invented its own back-link and
+    nothing linked forward.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+
+        for path in HEADER_PAGES:
+            body = c.get(path).data.decode()
+            check(f"{path} offers the observatory switcher",
+                  'class="sitemenu"' in body)
+            check(f"{path} links to the observatories page",
+                  'href="/sites"' in body)
+            check(f"{path} offers a way to add one",
+                  "Add an observatory" in body)
+
+        # The target page is per-object rather than per-section, and is the
+        # one people reach by clicking rather than by navigating, so it is
+        # the easiest to forget. It needs a real row: an unknown designation
+        # answers with a bare 404 string, which is not a page at all.
+        conn = db.connect(config.DB_PATH)
+        try:
+            now = time.time()
+            conn.execute(
+                "INSERT INTO targets (site_id, desig, score, vmag, hmag,"
+                " nobs, arc_days, not_seen_days, observable, score_total,"
+                " discard_reasons, max_alt, max_alt_az, max_alt_ts,"
+                " exposure_min, frames, frame_sec, frame_motion,"
+                " window_minutes, window_start_ts, window_end_ts, cur_alt,"
+                " cur_az, cur_motion, cur_moon_dist, cur_vmag, cur_sun_alt,"
+                " cur_ts, incl, q, e)"
+                " VALUES (?, 'NAVCHECK', 90, 20.0, 22.0, 3, 0.5, 0.2, 1, 3.0,"
+                " '[]', 61.0, 180.0, ?, 20.5, 36, 30, 1.4, 120.0, ?, ?, 55.0,"
+                " 175.0, 1.4, 55.0, 20.1, -20.0, ?, 12.5, 0.9, 0.6)",
+                (config.DEFAULT_SITE.id, now + 3600, now, now + 7200, now))
+            conn.commit()
+        finally:
+            conn.close()
+        body = c.get("/target/NAVCHECK").data.decode()
+        check("even a target page keeps the navigation",
+              'class="sitemenu"' in body)
+        check("and its link to the observatories page",
+              'href="/sites"' in body)
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
+        importlib.reload(appmod)
+
+
+def test_the_switcher_is_there_with_only_one_observatory():
+    """The regression that would quietly undo this whole change.
+
+    Hiding the control until a second observatory exists is what made the
+    feature undiscoverable, because you cannot add the second one without
+    it. One observatory is exactly the state every new deployment is in.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db, prev_sites = config.DB_PATH, config.SITES
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        config.SITES = {1: config.DEFAULT_SITE}
+        importlib.reload(appmod)
+
+        body = appmod.app.test_client().get("/").data.decode()
+        check("with one observatory the switcher is still there",
+              'class="sitemenu"' in body)
+        check("naming the one there is", config.DEFAULT_SITE.obscode in body)
+        check("and still offering to add another",
+              "Add an observatory" in body)
+
+        # Signed out is the state a visiting astronomer is in.
+        check("a signed-out visitor sees it too",
+              'class="sitemenu"' in body and "Sign in" in body
+              or 'class="sitemenu"' in body)
+    finally:
+        config.DB_PATH, config.SITES = prev_db, prev_sites
+        siteconf.forget()
+        importlib.reload(appmod)
+
+
+def test_switching_observatory_always_lands_on_that_board():
+    """Wherever you switch from, you arrive at that observatory's queue.
+
+    A target page is the reason: a designation on one site's queue need not
+    be on another's at all, so "the same page, elsewhere" can be a page that
+    does not exist.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db, prev_sites = config.DB_PATH, config.SITES
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        config.SITES = {1: config.DEFAULT_SITE, 2: _second_site()}
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+
+        for path in ("/", "/settings", "/history", "/sites"):
+            body = c.get(path).data.decode()
+            check(f"from {path} the switcher points at a board",
+                  'href="/?site=Z99"' in body,
+                  [l for l in body.splitlines() if "site=Z99" in l][:1])
+            # Only meaningful away from the board: on the board itself,
+            # "that observatory's board" and "this page, elsewhere" are the
+            # same URL, so the check would contradict the one above.
+            if path != "/":
+                check(f"from {path} it does not try to stay on this page",
+                      f'href="{path}?site=Z99"' not in body)
+
+        # And the link actually works from there.
+        r = c.get("/?site=Z99")
+        check("following it switches the board", r.status_code == 200)
+        check("and the switch sticks for the session",
+              "Z99" in c.get("/status").data.decode())
+    finally:
+        config.DB_PATH, config.SITES = prev_db, prev_sites
+        siteconf.forget()
+        importlib.reload(appmod)
+
+
+def test_the_switcher_puts_your_own_observatories_first():
+    """At the cap of 25 a flat list buries the one you actually observe from."""
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db, prev_sites = config.DB_PATH, config.SITES
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        config.SITES = {1: config.DEFAULT_SITE, 2: _second_site()}
+        importlib.reload(appmod)
+
+        anon = appmod.app.test_client().get("/").data.decode()
+        check("a signed-out visitor gets one plain list",
+              "Your observatories" not in anon)
+        check("listing every observatory served",
+              "Z99" in anon and config.DEFAULT_SITE.obscode in anon)
+
+        c, _tok = _settings_client(appmod, username="grouped", admin=False)
+        conn = db.connect(config.DB_PATH)
+        try:
+            uid = db.user_by_name(conn, "grouped")["id"]
+            db.add_site_member(conn, 2, uid, db.OWNER)
+        finally:
+            conn.close()
+
+        body = c.get("/").data.decode()
+        check("a member's own observatories are grouped first",
+              "Your observatories" in body)
+        check("with their role shown", "owner" in body)
+        check("and the rest still reachable below",
+              "Also served" in body)
+        check("yours comes before the rest",
+              body.index("Your observatories") < body.index("Also served"))
+    finally:
+        config.DB_PATH, config.SITES = prev_db, prev_sites
+        siteconf.forget()
+        importlib.reload(appmod)
+
+
+def test_no_page_still_claims_to_be_l01():
+    """Every page's header must name the site it is showing.
+
+    Stage C made the board's own header follow the site and missed the rest:
+    the sign-in pages, both target pages, and two lines in the target page's
+    body still wrote the first observatory's name out. On a second site each
+    of those is a wrong statement rather than a cosmetic slip.
+    """
+    import importlib
+    import pathlib
+    import tempfile
+
+    import app as appmod
+
+    written_out = []
+    for f in sorted(pathlib.Path("templates").glob("*.html")):
+        for n, line in enumerate(f.read_text().splitlines(), 1):
+            if "L01" in line and "placeholder" not in line:
+                written_out.append(f"{f.name}:{n}")
+    check("no template writes an observatory code out by hand",
+          not written_out, written_out)
+
+    prev_db, prev_sites = config.DB_PATH, config.SITES
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        config.SITES = {1: config.DEFAULT_SITE, 2: _second_site()}
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+
+        for path in ("/?site=Z99", "/login?site=Z99", "/settings?site=Z99"):
+            body = c.get(path).data.decode()
+            check(f"{path} names the observatory it is showing",
+                  "Z99" in body)
+            check(f"{path} does not claim to be the other one",
+                  config.DEFAULT_SITE.obscode not in body.split(
+                      'class="sitemenu-panel"')[0])
+    finally:
+        config.DB_PATH, config.SITES = prev_db, prev_sites
+        siteconf.forget()
         importlib.reload(appmod)
 
 
@@ -4379,7 +4618,7 @@ def main():
                test_a_cycle_serves_several_sites_without_repeating_shared_work,
                test_one_sites_failure_does_not_take_the_others_down,
                test_each_site_writes_its_own_plan_file,
-               test_the_switcher_only_appears_when_there_is_somewhere_to_go,
+               test_the_switcher_resolves_an_observatory_by_code,
                test_the_settings_page_keeps_soft_and_hard_apart,
                test_settings_edits_layer_over_the_file_and_can_be_undone,
                test_a_keepout_wedge_cannot_be_changed_by_accident,
@@ -4390,6 +4629,11 @@ def main():
                test_the_observatory_cap_is_enforced,
                test_owner_edits_and_members_observe,
                test_you_land_on_the_observatory_you_work_at,
+               test_every_page_carries_the_same_navigation,
+               test_the_switcher_is_there_with_only_one_observatory,
+               test_switching_observatory_always_lands_on_that_board,
+               test_the_switcher_puts_your_own_observatories_first,
+               test_no_page_still_claims_to_be_l01,
                test_ranking_bounds, test_row_rejection_reasons,
                test_replay_ts_never_takes_the_map_down,
                test_night_archive_survives_per_account_state,

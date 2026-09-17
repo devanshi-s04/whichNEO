@@ -146,6 +146,41 @@ def _resolve_site():
     return sites.get(config.DEFAULT_SITE.id, config.DEFAULT_SITE)
 
 
+def my_site_roles():
+    """{site_id: role} for the signed-in account, once per request."""
+    cached = getattr(g, "_my_roles", None)
+    if cached is not None:
+        return cached
+    roles = {}
+    user = auth.current_user()
+    if user is not None:
+        try:
+            conn = db.connect()
+            try:
+                roles = dict(db.sites_for_user(conn, user["id"]))
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            roles = {}
+    g._my_roles = roles
+    return roles
+
+
+def site_groups():
+    """The switcher's two groups: where you work, and everything else.
+
+    Grouped rather than listed flat because the list is bounded by the site
+    cap rather than by anything about you -- at twenty-five observatories a
+    flat list buries the one or two you actually observe from.
+    """
+    roles = my_site_roles()
+    mine, others = [], []
+    for s in visible_sites().values():
+        row = {"site": s, "role": roles.get(s.id)}
+        (mine if s.id in roles else others).append(row)
+    return {"mine": mine, "others": others}
+
+
 def may_edit_settings(conn, site):
     """Whether this request may change this observatory's configuration.
 
@@ -190,7 +225,7 @@ def inject_config():
     site = current_site()
     telescope = (observatories.lookup(site.obscode) or {}).get("telescope")
     return {"config": config, "site": site, "sites": visible_sites(),
-            "site_telescope": telescope,
+            "site_groups": site_groups(), "site_telescope": telescope,
             "tzname": _tzabbr(), "ranking": ranking,
             "current_user": auth.current_user(),
             "csrf_token": auth.csrf_token,
