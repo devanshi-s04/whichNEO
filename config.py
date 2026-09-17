@@ -269,6 +269,10 @@ _L01_SPEED_BANDS = [                 # (max "/min inclusive, seconds per frame)
 # ObsCodes.htm: "L01  13.749300.704742+0.707169Visnjan Observatory, Tican"
 # These resolve to 45.2909 N, 13.74930 E, 381 m.
 DEFAULT_SITE = Site(
+    # Site one, by migration rather than by privilege: every row that existed
+    # before site_id did belongs to L01, so it takes the first id and runs the
+    # same code path as any observatory added later.
+    id=1,
     obscode="L01",
     lon_deg=13.74930,
     rho_cos_phi=0.704742,
