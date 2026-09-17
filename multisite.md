@@ -24,6 +24,10 @@ changes, so the decisions survive the conversation that produced them.
 | new sites | **immediate, with a cap** on total active sites |
 | permissions | **owner edits settings, members observe** |
 | L01 | **becomes site number one**, like any other |
+| cap | **25 active observatories** — about 5 requests/minute to MPC |
+| membership | **the owner invites by email**, reusing the existing invite flow |
+| landing page | **your own site if signed in, L01 if not** |
+| ranking weights | **per site, and shown in the settings page** |
 
 That is the most ambitious option on every axis, and worth naming plainly:
 **it makes whichNEO a service, and you the operator.** Other observatories'
@@ -192,28 +196,61 @@ account observe at several, and caps limit MPC exposure.
 **Owner edits, members observe.** Whoever created a site owns it; everyone
 else marks targets and reads the board. One role boundary, simple to explain.
 
-**Sign-up is immediate, capped.** A new observatory starts working straight
-away, and the deployment refuses new sites past a limit. That bounds MPC load
-without making a legitimate observatory in another timezone wait for a human.
-The trade is that the cap is reached by whoever signs up first rather than by
-who most needs it — acceptable while the number is small and the operator can
-raise it.
+**Sign-up is immediate, capped at 25 active observatories.** A new site starts
+working straight away; the deployment refuses new ones past the limit. 25 is
+about 5 requests/minute and ~8,000 ephemeris fetches a day — comfortably
+inside what a small institutional service can justify without asking anyone's
+permission, with headroom to raise it once real usage is visible.
+
+**Members are invited by the owner, by email.** This reuses the invite flow
+already built: an account created with an unusable password and an emailed
+single-use link. Nobody can attach themselves to an observatory they do not
+work at.
+
+**Ranking weights are per site and shown in the settings page.** A 0.4-m
+telescope weighs magnitude differently from a 1-m, and an observatory should
+be able to see what its sort is optimising rather than inherit Višnjan's
+judgement invisibly. Defaults to L01's values so nobody has to think about it
+on day one.
+
+**Landing: your own site if signed in, L01 if not.** A member goes straight to
+the observatory they work at; a stranger sees Višnjan, as today. Someone who
+belongs to several needs a default, set on their account.
 
 **L01 becomes site number one.** The migration turns today's `config.py` into
 the first row of the sites table and nothing knows L01 by name afterwards.
 Višnjan therefore runs the same code path as everyone else, so a bug in it is
 found rather than hidden.
 
+## Two implementation notes that follow from the shape
+
+**The shared work must be hoisted out of the per-site loop.** ds42 scoring
+and `neocp_history.record_cycle` are about the object, not the site. In a
+cycle that iterates 25 sites they must run **once**, not 25 times — otherwise
+the efficiency win of shared data is thrown away and the history records 25
+identical snapshots per poll.
+
+**Dormant sites should stop fetching.** A site whose owner has not signed in
+for weeks still costs ~306 ephemeris fetches a day. Skipping sites with no
+recent activity is what makes a cap of 25 mean 25 *working* observatories
+rather than 25 registrations. It also gives a graceful way to let someone try
+the service and drift away without permanently consuming a slot.
+
+### Does the cycle still fit?
+
+Today a cycle is ~3 s: one NEOCP fetch, ~1 ephemeris, ~90 ms of astropy for
+122 targets, a plan file. Twenty-five sites means one shared fetch plus
+~27 ephemeris fetches and 25× the analysis — on the order of 30–60 s, against
+a 300 s interval. It fits, with room. The first thing to watch is not CPU but
+the ephemeris fetches bunching when many sites go stale at once.
+
+---
+
 ## Open questions
 
-1. **What is the cap**, concretely? The measured load says tens of sites are
-   fine and hundreds are not.
-2. **How does someone become a member** of an existing site — invited by the
-   owner, or requests access?
-3. **What does an anonymous visitor see?** Today whichneo.juriclab.org is
-   L01's board. With many sites it has to be a default site, a picker, or a
-   landing page.
-4. **Ranking weights** — per site, or global? They encode what an observatory
-   thinks is worth pointing at, which is arguably a local judgement.
-5. **The plan file format** is the legacy Višnjan planner's. Does another
-   observatory get the same format, their own, or a choice?
+1. **The plan file format** is the legacy Višnjan planner's. Does another
+   observatory get the same format, their own, or a choice? Leaning: same
+   format for now, since nobody has asked for another, and it is the kind of
+   thing to change when a real user needs it rather than in advance.
+2. **What counts as a dormant site** — no sign-in for 14 days? 30? And is a
+   dormant site paused silently or told?
