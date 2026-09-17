@@ -18,6 +18,7 @@ on the site's horizon mask for why that matters.
 """
 
 import math
+from html import escape
 
 import config
 import observability
@@ -254,16 +255,20 @@ def render_svg(marks, moon=None, size=None, localt=None, site=None):
          f'stroke="#242b3a"/>']
 
     # --- horizon mask, drawn rather than enforced ---
-    for idx, (a0, a1, minalt, hardness) in enumerate(s.horizon_mask):
+    for idx, (a0, a1, minalt, hardness, why) in enumerate(s.horizon_mask):
         r_in = 0.0 if minalt is None else _radius_for(minalt, radius)
         hard = hardness == "hard"
         fill = "rgba(207,97,84,.20)" if hard else (
             "rgba(207,97,84,.15)" if minalt is None else "rgba(207,97,84,.085)")
+        # The sector's own reason rather than a guess: "light pollution" was
+        # true of L01's north and is not a fact about anybody else's sky.
         label = ("cannot point" if hard else
-                 "light pollution" if minalt is None else
+                 "discouraged at every altitude" if minalt is None else
                  f"below {minalt:.0f}&#176;")
+        if why:
+            label += f" &#8212; {escape(str(why))}"
         p.append(f'<path d="{_wedge_path(cx, cy, radius, r_in, a0, a0 + _SECTOR_WIDTH)}" '
-                 f'fill="{fill}"><title>{s.sector_names[idx]} &#8212; '
+                 f'fill="{fill}"><title>{escape(str(s.sector_names[idx]))} &#8212; '
                  f'{label}</title></path>')
 
     # --- keep-out wedges, over the advisory mask and under everything else ---
@@ -272,7 +277,8 @@ def render_svg(marks, moon=None, size=None, localt=None, site=None):
         r_in = _radius_for(min_alt, radius)
         p.append(f'<path d="{_wedge_path(cx, cy, radius, r_in, start, start + span)}" '
                  f'fill="url(#keepout)" stroke="#cf6154" stroke-opacity=".5" '
-                 f'stroke-width="1.2"><title>Keep out &#8212; {reason}. '
+                 f'stroke-width="1.2"><title>Keep out &#8212; '
+                 f'{escape(str(reason))}. '
                  f'Below {min_alt:.0f}&#176; between azimuth {start:.0f}&#176; '
                  f'and {end:.0f}&#176;, the telescope must not be pointed here.'
                  f'</title></path>')

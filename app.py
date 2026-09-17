@@ -623,6 +623,30 @@ def api_targets():
         conn.close()
 
 
+@app.route("/settings")
+def settings():
+    """Everything this observatory is configured to do. Read-only.
+
+    Open, like the rest of the board's reads: somebody standing at a dome
+    screen should be able to check what the limits are without signing in.
+
+    Editing is the second half of this stage rather than part of this one,
+    because the keep-out wedge is the single setting where a typo points a
+    telescope at a wall -- it needs the confirm-by-obscode guard, the live
+    preview and a kept previous value before anything here can be saved. See
+    multisite.md.
+    """
+    site = current_site()
+    return render_template(
+        "settings.html", site=site,
+        telescope=(observatories.lookup(site.obscode) or {}).get("telescope"),
+        # The mask and the wedges as shapes rather than as numbers. A wedge
+        # whose arc runs the wrong way round the sky is obvious here and
+        # nearly invisible in a table -- and this is the same preview the
+        # editable half will redraw as the values are typed.
+        sky_svg=skymap.render_svg([], None, site=site))
+
+
 @app.route("/plan")
 def plan_text():
     """The nightly plan file, exactly as written to disk."""

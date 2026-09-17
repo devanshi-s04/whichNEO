@@ -556,6 +556,14 @@ h2.sect {
   font-size: 10px; letter-spacing: .13em; text-transform: uppercase;
   color: var(--muted); font-weight: 700; margin: 26px 0 10px;
 }
+/* Sub-heading inside a settings block. Quieter than .sect, because on the
+   settings page the two mask tables sit under one section and the reader
+   needs to see at a glance which is the advisory one and which refuses. */
+h3.sub {
+  font-size: 11px; letter-spacing: .04em; color: var(--muted);
+  font-weight: 600; margin: 16px 0 6px;
+}
+h3.sub:first-child { margin-top: 0; }
 .unc { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
 .uncplot {
   background: var(--panel); border: 1px solid var(--line);

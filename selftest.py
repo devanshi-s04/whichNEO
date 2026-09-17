@@ -1472,15 +1472,25 @@ def test_l01_from_file_is_the_l01_we_had():
           s.keepout_wedges == ((247.5, 45.0, 70.0,
                                 "mount/dome collision risk"),),
           s.keepout_wedges)
+    # The first four fields are the ones that decide where the telescope may
+    # point, and they are asserted exactly. The comparison is sliced rather
+    # than whole so that adding a field to an entry -- stage D added the
+    # reason -- is not mistaken for a change in the limits themselves.
     check("the horizon mask is the same eight soft sectors",
-          s.horizon_mask == (
+          tuple(e[:4] for e in s.horizon_mask) == (
               (337.5, 22.5, None, "soft"), (22.5, 67.5, 20.0, "soft"),
               (67.5, 112.5, 20.0, "soft"), (112.5, 157.5, 20.0, "soft"),
               (157.5, 202.5, 20.0, "soft"), (202.5, 247.5, 30.0, "soft"),
               (247.5, 292.5, 40.0, "soft"), (292.5, 337.5, 40.0, "soft")),
-          s.horizon_mask)
+          tuple(e[:4] for e in s.horizon_mask))
     check("north is still discouraged at every altitude, not blocked",
           s.horizon_mask[0][2] is None and s.horizon_mask[0][3] == "soft")
+    # A limit with no stated reason is one nobody can safely relax later.
+    missing = [s.sector_names[i] for i, e in enumerate(s.horizon_mask)
+               if not (len(e) > 4 and str(e[4]).strip())]
+    check("every sector says why its limit exists", not missing, missing)
+    check("and the north's reason is the light dome, not an obstruction",
+          "Trieste" in s.horizon_mask[0][4], s.horizon_mask[0][4])
     check("the speed table is unchanged",
           s.exposure_speed_bands == ((5.0, 30), (25.0, 15), (50.0, 10),
                                      (100.0, 5), (200.0, 2)),
@@ -1561,7 +1571,8 @@ def _toml_of(d):
             tables.append(f"[{k}]\n" + "\n".join(
                 f"{kk} = {val(vv)}" for kk, vv in v.items()))
         elif k == "horizon_mask":
-            rows = [[a, b, -1.0 if m is None else m, h] for a, b, m, h in v]
+            rows = [[a, b, -1.0 if m is None else m, h, r]
+                    for a, b, m, h, r in v]
             lines.append(f"{k} = " + val(rows))
         else:
             lines.append(f"{k} = {val(v)}")
@@ -1806,6 +1817,82 @@ def test_the_switcher_only_appears_when_there_is_somewhere_to_go():
               "Z99" in c.get("/status").data.decode())
     finally:
         config.DB_PATH, config.SITES = prev_db, prev_sites
+        importlib.reload(appmod)
+
+
+def test_the_settings_page_keeps_soft_and_hard_apart():
+    """The page must never let a light-dome limit read as a dome collision.
+
+    This is the subtlety the plan calls the one most likely to be lost in a
+    settings page. A form offering only "minimum altitude per direction"
+    collapses an advisory limit and a physical obstruction into one number
+    and silently picks an interpretation: an observatory with light pollution
+    to the north types a high number, and either its northern targets vanish
+    or its telescope is pointed into a wall.
+
+    So the page has to keep them in separate tables, say which removes and
+    which only warns, and print the reason each one exists.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        importlib.reload(appmod)
+
+        r = appmod.app.test_client().get("/settings")
+        check("the settings page renders", r.status_code == 200, r.status_code)
+        page = r.data.decode()
+
+        check("the soft structure says it never removes",
+              "Warns, never removes" in page)
+        check("the hard structure says it removes with no override",
+              "Removes, with no override" in page)
+        check("they are two tables, not one",
+              page.index("Warns, never removes")
+              < page.index("Removes, with no override"))
+
+        site = config.DEFAULT_SITE
+        for i, entry in enumerate(site.horizon_mask):
+            check(f"sector {site.sector_names[i]} prints its reason",
+                  entry[4].split(",")[0].replace("'", "&#39;") in page
+                  or entry[4].split(",")[0] in page, entry[4])
+        for wedge in site.keepout_wedges:
+            check("the wedge prints its reason", wedge[3] in page, wedge[3])
+
+        check("the arc direction is spelled out, not assumed",
+              "clockwise" in page.lower())
+        check("the mask and wedges are drawn, not only tabulated",
+              "<svg" in page)
+        check("and the page says it cannot be edited yet",
+              "Read-only" in page or "read-only" in page)
+
+        # The numbers an observer would come here to check.
+        check("the magnitude limit is shown", str(site.max_mag) in page)
+        check("the digest2 floor is shown", str(site.min_score) in page)
+        check("the frame count is shown", str(site.exposure_frames) in page)
+        check("the ranking weights are shown",
+              all(str(v) in page for v in site.rank_weights.values()))
+
+        # It is one observatory's page, not the deployment's.
+        prev_sites = config.SITES
+        try:
+            config.SITES = {1: site, 2: _second_site()}
+            importlib.reload(appmod)
+            other = appmod.app.test_client().get(
+                "/settings?site=Z99").data.decode()
+            check("the page follows the site switcher",
+                  "Z99" in other and "Second Site" in other)
+        finally:
+            config.SITES = prev_sites
+    finally:
+        config.DB_PATH = prev_db
         importlib.reload(appmod)
 
 
@@ -3639,6 +3726,7 @@ def main():
                test_one_sites_failure_does_not_take_the_others_down,
                test_each_site_writes_its_own_plan_file,
                test_the_switcher_only_appears_when_there_is_somewhere_to_go,
+               test_the_settings_page_keeps_soft_and_hard_apart,
                test_ranking_bounds, test_row_rejection_reasons,
                test_replay_ts_never_takes_the_map_down,
                test_night_archive_survives_per_account_state,

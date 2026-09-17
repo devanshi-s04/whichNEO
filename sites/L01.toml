@@ -59,15 +59,18 @@ plan_dir = "plans"
 #   * "northwest is 50 degrees" vs later "Northwest = 40"  -> using 40
 #   * "below 30-40 degrees in the west" vs "West = 40"     -> using 40
 #   * SW was never specified                               -> interpolated 30
+# The fifth field is the REASON, and it is the field that decides whether a
+# limit can ever safely be relaxed. It carries what these comments used to,
+# because the settings page can show a reason and cannot show a comment.
 horizon_mask = [
-    [337.5,  22.5, -1.0, "soft"],   # N  - "avoid north completely" (Trieste)
-    [ 22.5,  67.5, 20.0, "soft"],   # NE - "above 20 in South and East"
-    [ 67.5, 112.5, 20.0, "soft"],   # E
-    [112.5, 157.5, 20.0, "soft"],   # SE
-    [157.5, 202.5, 20.0, "soft"],   # S
-    [202.5, 247.5, 30.0, "soft"],   # SW - TBD, interpolated between S and W
-    [247.5, 292.5, 40.0, "soft"],   # W  - "West = 40"
-    [292.5, 337.5, 40.0, "soft"],   # NW - "Northwest = 40"
+    [337.5,  22.5, -1.0, "soft", "Trieste's light dome, 41 km away at bearing 3°"],
+    [ 22.5,  67.5, 20.0, "soft", "observer: above 20° in the south and east"],
+    [ 67.5, 112.5, 20.0, "soft", "observer: above 20° in the south and east"],
+    [112.5, 157.5, 20.0, "soft", "observer: above 20° in the south and east"],
+    [157.5, 202.5, 20.0, "soft", "observer: above 20° in the south and east"],
+    [202.5, 247.5, 30.0, "soft", "TBD: never specified, interpolated between S and W"],
+    [247.5, 292.5, 40.0, "soft", "observer: West = 40°"],
+    [292.5, 337.5, 40.0, "soft", "observer: Northwest = 40°"],
 ]
 sector_names = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
