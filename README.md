@@ -160,7 +160,7 @@ which is what correctness requires, costs it 218 s and costs us about 2.
 | `ranking.py` | Chronological ordering; intrinsic score. |
 | `output.py` | Nightly plan file in the legacy format. |
 | `observability.py` | Independent astropy calculations. |
-| `db.py` | SQLite: targets, observer state, ephemeris cache. |
+| `db.py` | SQLite: targets, observer state, ephemeris cache. Per-site tables carry `site_id`; ds42 scores and the history are shared. |
 | `update_neocp.py` | The 5-minute cycle, with per-stage timing. |
 | `app.py` | Flask website. |
 | `auth.py` | Accounts: argon2id passwords, sessions, CSRF. |

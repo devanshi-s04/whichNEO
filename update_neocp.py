@@ -197,7 +197,7 @@ def run_update(conn, hist_conn=None, source=None, site=None):
     incoming_night = pipeline.night_label(time.time(), site)
     if outgoing_night and outgoing_night != incoming_night:
         try:
-            db.archive_night(conn, outgoing_night)
+            db.archive_night(conn, outgoing_night, site)
         except Exception:
             # Logged and swallowed: a failed archive costs a night of replay,
             # and taking the updater down over it would cost the board. But it
@@ -236,7 +236,7 @@ def run_update(conn, hist_conn=None, source=None, site=None):
         t["cheap_reject"] = cheap_reject(t, site)
 
     now = time.time()
-    cache = db.load_cache(conn)
+    cache = db.load_cache(conn, site)
     candidates = [t for t in targets if not t["cheap_reject"]]
 
     stale = [t for t in candidates if needs_refetch(cache.get(t["desig"]), t, now)]
@@ -295,7 +295,7 @@ def run_update(conn, hist_conn=None, source=None, site=None):
     mark("fetch_aux")
 
     if new_cache:
-        db.save_cache(conn, new_cache)
+        db.save_cache(conn, new_cache, site)
     cache.update(new_cache)
 
     _score_new_objects(conn, cache)
@@ -358,8 +358,8 @@ def run_update(conn, hist_conn=None, source=None, site=None):
         plan_path = output.write_plan(ordered, night)
     mark("plan")
 
-    n = db.replace_targets(conn, ordered)
-    db.prune_cache(conn, [t["desig"] for t in targets])
+    n = db.replace_targets(conn, ordered, site)
+    db.prune_cache(conn, [t["desig"] for t in targets], site)
     mark("database")
 
     n_obs = sum(1 for t in ordered if t["observable"])

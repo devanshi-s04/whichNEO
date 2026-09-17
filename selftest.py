@@ -1235,6 +1235,193 @@ def test_schema_migration_from_older_db():
           {r[1] for r in c.execute("PRAGMA table_info(targets)")} == set(db._COLS))
 
 
+def _site_2():
+    """A second observatory, identical to L01 but for its identity.
+
+    Deliberately a copy: every difference that is not site_id would give a
+    test a second way to pass, and the thing under test is the id alone.
+    """
+    return dataclasses.replace(config.DEFAULT_SITE, id=2, obscode="Z99")
+
+
+def test_site_id_migration_keeps_every_row():
+    """Gaining site_id must not lose a row from the three unregenerable tables.
+
+    observer_state, ephemeris_cache and night_archive all hold state the
+    updater cannot rebuild -- what an observer marked, what MPC sent, and
+    where objects were on a night that has ended. site_id changes each of
+    their primary keys, which SQLite cannot do with ALTER, so they are
+    rebuilt. A rebuild that silently drops rows is the failure to guard
+    against, and the rows must land on the site this deployment has always
+    been rather than on a null.
+    """
+    import sqlite3
+
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    # The pre-site shape, exactly as the live database has it: observer_state
+    # already migrated to per-account, nothing yet carrying site_id.
+    c.executescript("""
+        CREATE TABLE observer_state (
+            desig TEXT NOT NULL, user_id INTEGER NOT NULL DEFAULT 0,
+            observed INTEGER DEFAULT 0, observed_at_utc TEXT,
+            hidden INTEGER DEFAULT 0, priority_bump REAL DEFAULT 0, note TEXT,
+            PRIMARY KEY (desig, user_id));
+        CREATE TABLE ephemeris_cache (desig TEXT PRIMARY KEY, signature TEXT,
+            fetched_utc TEXT, payload TEXT);
+        CREATE TABLE night_archive (night TEXT PRIMARY KEY, archived_utc TEXT,
+            start_ts REAL, end_ts REAL, payload TEXT);
+        INSERT INTO observer_state (desig, user_id, observed)
+            VALUES ('MARKED', 7, 1), ('HIDDEN', 7, 0);
+        INSERT INTO ephemeris_cache VALUES ('CACHED', 'sig', 'now', '{}');
+        INSERT INTO night_archive VALUES ('2026-09-01', 'now', 1.0, 2.0, '{}');
+    """)
+    c.commit()
+
+    db.init(c)
+
+    want = config.DEFAULT_SITE.id
+    for table, n in (("observer_state", 2), ("ephemeris_cache", 1),
+                     ("night_archive", 1)):
+        cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        check(f"{table} gained site_id", "site_id" in cols)
+        got = c.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        check(f"{table} kept all {n} row(s)", got == n, got)
+        strays = c.execute(
+            f"SELECT count(*) FROM {table} WHERE site_id IS NOT ?",
+            (want,)).fetchone()[0]
+        check(f"{table} rows all belong to site {want}", strays == 0, strays)
+        check(f"{table}_pre_site is cleaned up after the copy is verified",
+              not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name=?", (f"{table}_pre_site",)).fetchone())
+
+    kept = c.execute("SELECT observed, user_id FROM observer_state "
+                     "WHERE desig='MARKED'").fetchone()
+    check("the mark itself survives, still owned by its account",
+          kept is not None and kept["observed"] == 1 and kept["user_id"] == 7,
+          dict(kept) if kept else None)
+
+    db.init(c)  # must be idempotent, and must not re-migrate
+    check("init is idempotent once site_id is present",
+          c.execute("SELECT count(*) FROM observer_state").fetchone()[0] == 2)
+
+
+def test_two_sites_never_read_each_others_rows():
+    """The whole point of stage B: one object, two observatories, no bleed.
+
+    Every one of these was a single shared row before site_id, so each check
+    is a thing that would silently have been wrong the moment a second
+    observatory existed -- not hypothetically, but on the first cycle.
+    """
+    import tempfile
+
+    prev = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        one, two = config.DEFAULT_SITE, _site_2()
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+
+        shared = dict(desig="SHARED", score=90, vmag=20.0, observable=1,
+                      window_start_ts=1.0, window_end_ts=2.0)
+        db.replace_targets(conn, [shared, dict(desig="ONLY1", score=50,
+                                               vmag=21.0, observable=1)], one)
+        db.replace_targets(conn, [shared, dict(desig="ONLY2", score=60,
+                                               vmag=21.0, observable=1)], two)
+
+        at1 = {r["desig"] for r in db.load_targets(conn, True, True, site=one)}
+        at2 = {r["desig"] for r in db.load_targets(conn, True, True, site=two)}
+        check("each site sees its own board", at1 == {"SHARED", "ONLY1"}, at1)
+        check("and not the other's", at2 == {"SHARED", "ONLY2"}, at2)
+
+        # Rewriting one site's targets must not empty the other's board.
+        db.replace_targets(conn, [dict(desig="ONLY1", score=50, vmag=21.0,
+                                       observable=1)], one)
+        still = {r["desig"] for r in db.load_targets(conn, True, True, site=two)}
+        check("rewriting one site leaves the other's targets alone",
+              still == {"SHARED", "ONLY2"}, still)
+        # Put site one's board back, so the checks below are about site_id
+        # rather than about what this rewrite just removed.
+        db.replace_targets(conn, [shared, dict(desig="ONLY1", score=50,
+                                               vmag=21.0, observable=1)], one)
+
+        # The cache is the one genuinely per-observatory fetch: MPC computes
+        # an ephemeris for one obscode, so the same object is two entries.
+        db.save_cache(conn, {"SHARED": ("sig1", {"lines": ["from L01"]})}, one)
+        db.save_cache(conn, {"SHARED": ("sig2", {"lines": ["from Z99"]})}, two)
+        c1, c2 = db.load_cache(conn, one), db.load_cache(conn, two)
+        check("one object caches once per site, not once in total",
+              c1["SHARED"][0] == "sig1" and c2["SHARED"][0] == "sig2",
+              (c1["SHARED"][0], c2["SHARED"][0]))
+        check("and the tracks come back per site",
+              db.load_tracks(conn, ["SHARED"], one) == {"SHARED": ["from L01"]},
+              db.load_tracks(conn, ["SHARED"], one))
+
+        # Pruning one site's cache must not drop the other's.
+        db.prune_cache(conn, [], one)
+        check("pruning one site's cache leaves the other's",
+              "SHARED" in db.load_cache(conn, two))
+        check("while genuinely clearing its own",
+              db.load_cache(conn, one) == {})
+
+        # "Somebody else already shot this" has to mean from HERE.
+        #
+        # Read as the account that made the mark, and as a second account.
+        # Viewing as a signed-out visitor would pass whether site_id worked
+        # or not -- the observer_state join matches no rows at all for
+        # user_id NULL, so there is nothing left for site_id to get wrong.
+        ana = db.create_user(conn, "ana2", "x")
+        bob = db.create_user(conn, "bob2", "x")
+        db.set_state(conn, "SHARED", ana, two, observed=1)
+
+        mine_at_1 = [r for r in db.load_targets(conn, True, True, user_id=ana,
+                                                site=one)
+                     if r["desig"] == "SHARED"][0]
+        check("my own mark at another site is not observed here",
+              not mine_at_1["observed"], mine_at_1["observed"])
+        mine_at_2 = [r for r in db.load_targets(conn, True, True, user_id=ana,
+                                                site=two)
+                     if r["desig"] == "SHARED"][0]
+        check("but it is recorded at the site it was made at",
+              mine_at_2["observed"] == 1, mine_at_2["observed"])
+
+        others_at_1 = [r for r in db.load_targets(conn, True, True,
+                                                  user_id=bob, site=one)
+                       if r["desig"] == "SHARED"][0]
+        check("nor does it count as somebody else having done it here",
+              others_at_1["others_observed"] == 0,
+              others_at_1["others_observed"])
+        others_at_2 = [r for r in db.load_targets(conn, True, True,
+                                                  user_id=bob, site=two)
+                       if r["desig"] == "SHARED"][0]
+        check("while at that site it does warn the next observer",
+              others_at_2["others_observed"] == 1,
+              others_at_2["others_observed"])
+
+        # ds42 is about the tracklet, so it stays shared across sites.
+        db.save_ds42_scores(conn, {"SHARED": {"p_neo": 0.42, "status": "ok"}},
+                            {"ds42_rev": "r", "model_sha256": "m", "config": {}})
+        p1 = [r for r in db.load_targets(conn, True, True, site=one)
+              if r["desig"] == "SHARED"][0]["p_neo"]
+        p2 = [r for r in db.load_targets(conn, True, True, site=two)
+              if r["desig"] == "SHARED"][0]["p_neo"]
+        check("one ds42 score serves every site", p1 == 0.42 and p2 == 0.42,
+              (p1, p2))
+
+        # Two observatories can be observing the same calendar night.
+        db.replace_targets(conn, [shared], one)
+        db.replace_targets(conn, [shared], two)
+        check("the same night label archives once per site",
+              db.archive_night(conn, "2026-09-20", one)
+              and db.archive_night(conn, "2026-09-20", two))
+        check("and each reads back its own",
+              db.load_archived_night(conn, "2026-09-20", one) is not None
+              and db.load_archived_night(conn, "2026-09-20", two) is not None)
+        conn.close()
+    finally:
+        config.DB_PATH = prev
+
+
 def test_ranking_bounds():
     rows = [dict(score=100, arc_days=0.0, vmag=config.DEFAULT_SITE.mag_bright),
             dict(score=0, arc_days=99.0, vmag=config.DEFAULT_SITE.max_mag)]
@@ -2985,6 +3172,8 @@ def main():
                test_login_throttle,
                test_secret_key_is_stable_and_private,
                test_schema_migration_from_older_db,
+               test_site_id_migration_keeps_every_row,
+               test_two_sites_never_read_each_others_rows,
                test_ranking_bounds, test_row_rejection_reasons,
                test_replay_ts_never_takes_the_map_down,
                test_night_archive_survives_per_account_state,

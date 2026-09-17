@@ -40,6 +40,12 @@ class Site:
     """One observatory. Every field is supplied; nothing defaults to L01."""
 
     # --- Identity and geometry ---------------------------------------------
+    # The site's identity in the database. Every per-site row carries it:
+    # targets, ephemeris_cache, observer_state and night_archive are all
+    # about an object *as seen from here*, while the NEOCP list, the ds42
+    # scores and the history are about the object itself and stay shared.
+    # L01 is site 1, by migration rather than by privilege.
+    id: int
     # Parallax constants rather than a lat/lon, so the site matches exactly
     # what Find_Orb and the MPC use for this code.
     obscode: str
@@ -164,4 +170,4 @@ class Site:
         )
 
     def __repr__(self):
-        return f"<Site {self.obscode}>"
+        return f"<Site {self.id} {self.obscode}>"

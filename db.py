@@ -5,7 +5,8 @@ Four concerns, deliberately separated:
   targets          rewritten wholesale by the updater every cycle
   observer_state   owned by the website, never touched by the updater --
                    this is what makes "mark observed" survive a refresh.
-                   Keyed by (desig, user_id): one row per observer per target
+                   Keyed by (site_id, desig, user_id): one row per observer
+                   per target per observatory
   users            accounts. Reads are open; writes need one of these
   ephemeris_cache  raw MPC responses keyed by a signature of the object's
                    NEOCP row, so an ephemeris is re-requested only when new
@@ -15,6 +16,23 @@ The nightly plan file is deliberately built from `targets` alone and never
 consults observer_state. The plan is the observatory's, not one observer's --
 one person marking a target done must not silently drop it out of the file
 the telescope is driven from.
+
+Some data is about the object and some is about the object *as seen from a
+site*, and the schema now says which is which:
+
+  per site, carrying site_id   targets, ephemeris_cache, observer_state,
+                               night_archive
+  shared by every site         ds42_scores, users, meta, and the whole of
+                               neocp_history
+
+That split is the efficiency win rather than an accident of layout: an object
+is scored once and its NEOCP history recorded once, however many observatories
+are watching it. Only the ephemeris is genuinely per-observatory, because MPC
+computes it for one observatory code.
+
+Every function that reads or writes a per-site table takes the site it is
+working on; passing none means the deployment's default. See sites.py and
+multisite.md.
 """
 
 import json
@@ -26,7 +44,11 @@ import config
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS targets (
-    desig                TEXT PRIMARY KEY,
+    -- The same object is a different row for each observatory watching it:
+    -- its altitude, window, exposure and discard reasons are all statements
+    -- about this site's sky, not about the object.
+    site_id              INTEGER NOT NULL DEFAULT 1,
+    desig                TEXT NOT NULL,
     score                INTEGER,
     ra_deg               REAL,
     dec_deg              REAL,
@@ -91,7 +113,9 @@ CREATE TABLE IF NOT EXISTS targets (
     plan_block           TEXT,
 
     first_seen_utc       TEXT,
-    last_updated_utc     TEXT
+    last_updated_utc     TEXT,
+
+    PRIMARY KEY (site_id, desig)
 );
 
 -- Observer state is per account: what one observer has marked done is their
@@ -104,7 +128,11 @@ CREATE TABLE IF NOT EXISTS targets (
 -- either seeing the other do it. Every row therefore also carries a count of
 -- how many *other* accounts have marked it, so the duplication is visible
 -- even though the state is not shared.
+-- Also per site: an account can observe at more than one observatory, and
+-- having shot an object from one of them says nothing about whether it still
+-- needs shooting from another.
 CREATE TABLE IF NOT EXISTS observer_state (
+    site_id         INTEGER NOT NULL DEFAULT 1,
     desig           TEXT NOT NULL,
     user_id         INTEGER NOT NULL DEFAULT 0,
     observed        INTEGER DEFAULT 0,
@@ -112,7 +140,7 @@ CREATE TABLE IF NOT EXISTS observer_state (
     hidden          INTEGER DEFAULT 0,
     priority_bump   REAL DEFAULT 0,
     note            TEXT,
-    PRIMARY KEY (desig, user_id)
+    PRIMARY KEY (site_id, desig, user_id)
 );
 
 -- Accounts. Lives here rather than in its own file for the same reason
@@ -129,11 +157,16 @@ CREATE TABLE IF NOT EXISTS users (
     is_admin       INTEGER NOT NULL DEFAULT 0
 );
 
+-- Per site, and the one genuinely unavoidable per-observatory cost: MPC
+-- generates an ephemeris for one observatory code, so the same object has to
+-- be fetched once per site. Measured at ~1.1 fetches per cycle per site.
 CREATE TABLE IF NOT EXISTS ephemeris_cache (
-    desig       TEXT PRIMARY KEY,
+    site_id     INTEGER NOT NULL DEFAULT 1,
+    desig       TEXT NOT NULL,
     signature   TEXT,
     fetched_utc TEXT,
-    payload     TEXT
+    payload     TEXT,
+    PRIMARY KEY (site_id, desig)
 );
 
 -- ds42 scores. Deliberately its OWN table rather than a column on targets or
@@ -178,19 +211,24 @@ CREATE TABLE IF NOT EXISTS meta (
 -- tracks are the only thing that would otherwise be lost: prune_cache drops
 -- an object's cache entry once it rolls off NEOCP, and unlike targets and
 -- observer_state there is no other record of where it actually was.
+-- Per site, and per site the night label itself differs: once observatories
+-- span longitudes, "tonight" stops being one global thing.
 CREATE TABLE IF NOT EXISTS night_archive (
-    night        TEXT PRIMARY KEY,
+    site_id      INTEGER NOT NULL DEFAULT 1,
+    night        TEXT NOT NULL,
     archived_utc TEXT,
     start_ts     REAL,
     end_ts       REAL,
-    payload      TEXT
+    payload      TEXT,
+    PRIMARY KEY (site_id, night)
 );
 
 CREATE INDEX IF NOT EXISTS idx_targets_seq
-    ON targets(observable DESC, max_alt_ts ASC);
+    ON targets(site_id, observable DESC, max_alt_ts ASC);
 """
 
 _COLS = [
+    "site_id",
     "desig", "score", "ra_deg", "dec_deg", "vmag", "hmag", "nobs", "arc_days",
     "not_seen_days", "update_note", "is_new", "note_flag", "mpc_flag",
     "discovery_code", "obs_codes",
@@ -207,6 +245,17 @@ _COLS = [
     "observable", "discard_reasons", "crosscheck", "plan_block",
     "first_seen_utc", "last_updated_utc",
 ]
+
+
+# The per-site tables that hold state nothing can regenerate, so they are
+# rebuilt to gain site_id rather than dropped. `targets` is absent on purpose:
+# the updater rewrites it every cycle, so it is dropped and rebuilt instead.
+_PER_SITE_TABLES = ("observer_state", "ephemeris_cache", "night_archive")
+
+
+def _site(site):
+    """The site to work on. None means the deployment's default."""
+    return config.DEFAULT_SITE if site is None else site
 
 
 def utcnow():
@@ -235,8 +284,57 @@ def init(conn):
         conn.execute("DROP INDEX IF EXISTS idx_targets_seq")
         conn.execute("DROP TABLE targets")
     _migrate_observer_state(conn)
+
+    # Gaining site_id changes each of these tables' PRIMARY KEY, which SQLite
+    # cannot do with ALTER, so they are renamed aside, recreated from SCHEMA
+    # below, and copied back. Done here rather than after executescript
+    # because CREATE TABLE IF NOT EXISTS is a no-op against the old table and
+    # would leave it, unchanged and unnoticed, forever.
+    pending = _tables_predating_site_id(conn)
+    for table in pending:
+        conn.execute(f"ALTER TABLE {table} RENAME TO {table}_pre_site")
+
     conn.executescript(SCHEMA)
+    _adopt_pre_site_rows(conn, pending)
     conn.commit()
+
+
+def _tables_predating_site_id(conn):
+    """Per-site tables that exist but were written before site_id did."""
+    out = []
+    for table in _PER_SITE_TABLES:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if cols and "site_id" not in cols:
+            out.append(table)
+    return out
+
+
+def _adopt_pre_site_rows(conn, pending):
+    """Copy the renamed tables' rows into the new ones, as the default site.
+
+    Every row that existed before site_id belongs to the observatory this
+    deployment has always served, so they all take its id -- L01 becomes site
+    one by migration rather than by privilege.
+
+    Unlike the user_id migration this cannot lose anything: it is a pure
+    column addition, one old row to exactly one new row. The count is checked
+    rather than assumed, and only then is the old table dropped -- the whole
+    point of these three tables is that nothing can fetch them back.
+    """
+    site_id = config.DEFAULT_SITE.id
+    for table in pending:
+        old = f"{table}_pre_site"
+        cols = sorted(r[1] for r in conn.execute(f"PRAGMA table_info({old})"))
+        names = ",".join(cols)
+        conn.execute(f"INSERT INTO {table} ({names}, site_id) "
+                     f"SELECT {names}, ? FROM {old}", (site_id,))
+        before = conn.execute(f"SELECT count(*) FROM {old}").fetchone()[0]
+        after = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        if before != after:
+            raise RuntimeError(
+                f"site_id migration of {table} would lose rows: "
+                f"{before} before, {after} after -- refusing to drop {old}")
+        conn.execute(f"DROP TABLE {old}")
 
 
 def _migrate_observer_state(conn):
@@ -281,23 +379,25 @@ def _migrate_observer_state(conn):
 
 # --- ephemeris cache -------------------------------------------------------
 
-def load_cache(conn):
+def load_cache(conn, site=None):
     return {r["desig"]: (r["signature"], json.loads(r["payload"]))
             for r in conn.execute(
-                "SELECT desig, signature, payload FROM ephemeris_cache")}
+                "SELECT desig, signature, payload FROM ephemeris_cache "
+                "WHERE site_id=?", (_site(site).id,))}
 
 
-def load_offsets(conn, desig):
+def load_offsets(conn, desig, site=None):
     """Uncertainty-map points for one object, or None if not cached."""
-    row = conn.execute("SELECT payload FROM ephemeris_cache WHERE desig=?",
-                       (desig,)).fetchone()
+    row = conn.execute(
+        "SELECT payload FROM ephemeris_cache WHERE site_id=? AND desig=?",
+        (_site(site).id, desig)).fetchone()
     if not row:
         return None
     pts = json.loads(row["payload"]).get("offsets")
     return [tuple(p) for p in pts] if pts else None
 
 
-def load_tracks(conn, desigs):
+def load_tracks(conn, desigs, site=None):
     """Cached ephemeris lines for several objects, as {desig: [line, ...]}.
 
     Feeds the sky map, which is redrawn on each page load so its positions
@@ -310,28 +410,30 @@ def load_tracks(conn, desigs):
     out = {}
     marks = ",".join("?" * len(want))
     for r in conn.execute(
-            f"SELECT desig, payload FROM ephemeris_cache WHERE desig IN ({marks})",
-            want):
+            f"SELECT desig, payload FROM ephemeris_cache "
+            f"WHERE site_id=? AND desig IN ({marks})",
+            (_site(site).id, *want)):
         lines = json.loads(r["payload"]).get("lines")
         if lines:
             out[r["desig"]] = lines
     return out
 
 
-def load_gap_fill_lines(conn, desig):
+def load_gap_fill_lines(conn, desig, site=None):
     """The same object's ephemeris with no altitude floor, cached
     specifically to patch holes the normal (oalt=20) fetch leaves in the
     altitude plot. See ephemeris.fetch_gap_fill / update_neocp.py's _aux.
     None if this object was never stale since that fetch was added, or the
     fetch itself failed."""
-    row = conn.execute("SELECT payload FROM ephemeris_cache WHERE desig=?",
-                       (desig,)).fetchone()
+    row = conn.execute(
+        "SELECT payload FROM ephemeris_cache WHERE site_id=? AND desig=?",
+        (_site(site).id, desig)).fetchone()
     if not row:
         return None
     return json.loads(row["payload"]).get("gap_fill_lines") or None
 
 
-def archive_night(conn, night):
+def archive_night(conn, night, site=None):
     """Snapshot a just-ended night into night_archive, once.
 
     Called from the update loop at the moment it notices the night label has
@@ -354,6 +456,11 @@ def archive_night(conn, night):
     # night as the observatory saw it (did anyone shoot this) and the night as
     # a given observer saw it (did *I*). Deciding that at render time keeps
     # both; deciding it here would throw one away permanently.
+    # The observer_state join carries site_id as well as desig: the same
+    # account marking the same object at another observatory is a different
+    # night's work, and joining on desig alone would import it into this
+    # site's archive.
+    s = _site(site)
     rows = conn.execute("""
         SELECT t.desig, t.score, t.vmag, t.window_start_ts, t.window_end_ts,
                COALESCE(MAX(s.observed), 0) AS observed_any,
@@ -361,16 +468,18 @@ def archive_night(conn, night):
                                  THEN COALESCE(u.username, 'shared') END)
                    AS observers
         FROM targets t
-        LEFT JOIN observer_state s ON s.desig = t.desig
+        LEFT JOIN observer_state s
+               ON s.desig = t.desig AND s.site_id = t.site_id
         LEFT JOIN users u ON u.id = s.user_id
-        WHERE t.observable = 1
+        WHERE t.site_id = ?
+          AND t.observable = 1
           AND t.window_start_ts IS NOT NULL AND t.window_end_ts IS NOT NULL
         GROUP BY t.desig
-    """).fetchall()
+    """, (s.id,)).fetchall()
     if not rows:
         return False
 
-    tracks = load_tracks(conn, [r["desig"] for r in rows])
+    tracks = load_tracks(conn, [r["desig"] for r in rows], s)
     start = min(r["window_start_ts"] for r in rows)
     end = max(r["window_end_ts"] for r in rows)
 
@@ -388,17 +497,18 @@ def archive_night(conn, night):
     with conn:
         cur = conn.execute(
             "INSERT OR IGNORE INTO night_archive "
-            "(night, archived_utc, start_ts, end_ts, payload) "
-            "VALUES (?,?,?,?,?)",
-            (night, utcnow(), start, end, json.dumps(payload)))
+            "(site_id, night, archived_utc, start_ts, end_ts, payload) "
+            "VALUES (?,?,?,?,?,?)",
+            (s.id, night, utcnow(), start, end, json.dumps(payload)))
     return cur.rowcount > 0
 
 
-def load_archived_night(conn, night):
+def load_archived_night(conn, night, site=None):
     """A previously archived night's targets/tracks/bounds, or None."""
     row = conn.execute(
-        "SELECT start_ts, end_ts, payload FROM night_archive WHERE night=?",
-        (night,)).fetchone()
+        "SELECT start_ts, end_ts, payload FROM night_archive "
+        "WHERE site_id=? AND night=?",
+        (_site(site).id, night)).fetchone()
     if not row:
         return None
     d = json.loads(row["payload"])
@@ -407,46 +517,65 @@ def load_archived_night(conn, night):
     return d
 
 
-def list_archived_nights(conn):
+def list_archived_nights(conn, site=None):
     """Archived nights, most recent first, as [{night, start_ts, end_ts}, ...]."""
     return [dict(r) for r in conn.execute(
-        "SELECT night, start_ts, end_ts FROM night_archive ORDER BY night DESC")]
+        "SELECT night, start_ts, end_ts FROM night_archive "
+        "WHERE site_id=? ORDER BY night DESC", (_site(site).id,))]
 
 
-def save_cache(conn, entries):
+def save_cache(conn, entries, site=None):
     """entries: {desig: (signature, payload dict)}"""
     now = utcnow()
+    site_id = _site(site).id
     with conn:
         conn.executemany(
-            "INSERT INTO ephemeris_cache (desig,signature,fetched_utc,payload) "
-            "VALUES (?,?,?,?) ON CONFLICT(desig) DO UPDATE SET "
+            "INSERT INTO ephemeris_cache "
+            "(site_id,desig,signature,fetched_utc,payload) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(site_id,desig) DO UPDATE SET "
             "signature=excluded.signature, fetched_utc=excluded.fetched_utc, "
             "payload=excluded.payload",
-            [(d, sig, now, json.dumps(p)) for d, (sig, p) in entries.items()])
+            [(site_id, d, sig, now, json.dumps(p))
+             for d, (sig, p) in entries.items()])
 
 
-def prune_cache(conn, keep_desigs):
-    """Drop cached ephemerides for objects no longer on NEOCP."""
+def prune_cache(conn, keep_desigs, site=None):
+    """Drop cached ephemerides for objects no longer on NEOCP.
+
+    Scoped to this site: another observatory's cache of the same object is
+    its own business, and the object may still be on its board.
+    """
+    site_id = _site(site).id
     keep = set(keep_desigs)
-    have = [r["desig"] for r in conn.execute("SELECT desig FROM ephemeris_cache")]
-    gone = [(d,) for d in have if d not in keep]
+    have = [r["desig"] for r in conn.execute(
+        "SELECT desig FROM ephemeris_cache WHERE site_id=?", (site_id,))]
+    gone = [(site_id, d) for d in have if d not in keep]
     if gone:
         with conn:
-            conn.executemany("DELETE FROM ephemeris_cache WHERE desig=?", gone)
+            conn.executemany(
+                "DELETE FROM ephemeris_cache WHERE site_id=? AND desig=?", gone)
     return len(gone)
 
 
 # --- targets ---------------------------------------------------------------
 
-def replace_targets(conn, rows):
-    """Rewrite the target table. observer_state is intentionally untouched."""
+def replace_targets(conn, rows, site=None):
+    """Rewrite one site's targets. observer_state is intentionally untouched.
+
+    Only this site's rows are replaced. Another observatory's board is not
+    this cycle's business, and deleting the whole table would empty it.
+    """
     now = utcnow()
+    site_id = _site(site).id
     first_seen = {r["desig"]: r["first_seen_utc"]
-                  for r in conn.execute("SELECT desig, first_seen_utc FROM targets")}
+                  for r in conn.execute(
+                      "SELECT desig, first_seen_utc FROM targets "
+                      "WHERE site_id=?", (site_id,))}
 
     payload = []
     for r in rows:
         d = dict(r)
+        d["site_id"] = site_id
         sc = d.get("scatteredness")
         d["scat_ra"] = sc[0] if sc else None
         d["scat_dec"] = sc[1] if sc else None
@@ -467,7 +596,7 @@ def replace_targets(conn, rows):
 
     placeholders = ",".join("?" * len(_COLS))
     with conn:
-        conn.execute("DELETE FROM targets")
+        conn.execute("DELETE FROM targets WHERE site_id=?", (site_id,))
         conn.executemany(
             f"INSERT INTO targets ({','.join(_COLS)}) VALUES ({placeholders})",
             payload)
@@ -475,7 +604,7 @@ def replace_targets(conn, rows):
 
 
 def load_targets(conn, include_hidden=False, include_observed=False,
-                 include_discarded=True, user_id=None):
+                 include_discarded=True, user_id=None, site=None):
     """Targets with the viewing account's own observer state attached.
 
     `user_id` None is a signed-out visitor: they have no state of their own,
@@ -494,13 +623,18 @@ def load_targets(conn, include_hidden=False, include_observed=False,
                COALESCE(s.hidden, 0)        AS hidden,
                COALESCE(s.priority_bump, 0) AS priority_bump,
                s.note                       AS note,
+               -- Scoped to this site as well as this object: "somebody else
+               -- has already shot this" must mean from HERE. Another
+               -- observatory having it done is not a reason to skip it.
                (SELECT count(*) FROM observer_state o
-                 WHERE o.desig = t.desig AND o.observed = 1
+                 WHERE o.desig = t.desig AND o.site_id = t.site_id
+                   AND o.observed = 1
                    AND o.user_id IS NOT ?)  AS others_observed,
                (SELECT group_concat(COALESCE(u.username, 'shared'))
                   FROM observer_state o
                   LEFT JOIN users u ON u.id = o.user_id
-                 WHERE o.desig = t.desig AND o.observed = 1
+                 WHERE o.desig = t.desig AND o.site_id = t.site_id
+                   AND o.observed = 1
                    AND o.user_id IS NOT ?)  AS others_names,
                -- ds42's posterior, and the status that says what kind of
                -- number it is. Both, always: p_neo alone cannot distinguish
@@ -511,11 +645,15 @@ def load_targets(conn, include_hidden=False, include_observed=False,
                d.n_obs                      AS ds42_n_obs
         FROM targets t
         LEFT JOIN observer_state s
-               ON s.desig = t.desig AND s.user_id IS ?
+               ON s.desig = t.desig AND s.site_id = t.site_id
+              AND s.user_id IS ?
+        -- ds42 joins on desig alone, deliberately: a score is a property of
+        -- the discovery tracklet, so it is the same number at every site.
         LEFT JOIN ds42_scores d ON d.desig = t.desig
+        WHERE t.site_id = ?
     """
     rows = []
-    for r in conn.execute(sql, (user_id, user_id, user_id)):
+    for r in conn.execute(sql, (user_id, user_id, user_id, _site(site).id)):
         d = dict(r)
         d["discard_reasons"] = json.loads(d["discard_reasons"] or "[]")
         d["mask_flags"] = json.loads(d["mask_flags"] or "[]")
@@ -535,8 +673,8 @@ def load_targets(conn, include_hidden=False, include_observed=False,
     return rows
 
 
-def set_state(conn, desig, user_id=0, **fields):
-    """Record one account's view of one target.
+def set_state(conn, desig, user_id=0, site=None, **fields):
+    """Record one account's view of one target at one site.
 
     user_id 0 is the shared basic-auth credential, which names nobody. It is
     the default so that a caller who forgets to pass an account writes to the
@@ -551,10 +689,10 @@ def set_state(conn, desig, user_id=0, **fields):
     updates = ",".join(f"{k}=excluded.{k}" for k in fields)
     with conn:
         conn.execute(
-            f"INSERT INTO observer_state (desig,user_id,{cols}) "
-            f"VALUES (?,?,{placeholders}) "
-            f"ON CONFLICT(desig,user_id) DO UPDATE SET {updates}",
-            (desig, user_id, *fields.values()))
+            f"INSERT INTO observer_state (site_id,desig,user_id,{cols}) "
+            f"VALUES (?,?,?,{placeholders}) "
+            f"ON CONFLICT(site_id,desig,user_id) DO UPDATE SET {updates}",
+            (_site(site).id, desig, user_id, *fields.values()))
 
 
 # --- ds42 scores ------------------------------------------------------------
@@ -652,6 +790,11 @@ def create_user(conn, username, password_hash, email=None, is_admin=0):
             # registers first. Left on user_id 0 they would show up as
             # "already done by someone else" to every account forever, which
             # is true but useless.
+            #
+            # Deliberately not scoped to a site: this only ever runs for the
+            # very first account on the deployment, which can only happen in
+            # the era before a second observatory existed, so every row it
+            # adopts is already site one's.
             conn.execute("UPDATE observer_state SET user_id = ? "
                          "WHERE user_id = 0", (uid,))
     return uid

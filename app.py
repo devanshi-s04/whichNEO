@@ -143,7 +143,7 @@ def load_sorted(conn, show_observed=False, show_hidden=False, mode=None,
     # expensive half.
     rows = db.load_targets(conn, include_hidden=show_hidden,
                            include_observed=show_observed,
-                           user_id=viewer_id())
+                           user_id=viewer_id(), site=current_site())
     rows = ranking.apply_range_filters(rows, range_filters)
     return ranking.sort_targets(rows, mode, site=current_site())
 
@@ -265,11 +265,11 @@ def sky_view(conn, rows, now=None):
     ephemeris lines already cached, so this makes no network call.
     """
     now = now if now is not None else time.time()
+    site = current_site()
     shown = [r for r in rows if r["observable"]]
     tracks = {d: ephemeris.track(lines)
               for d, lines in db.load_tracks(
-                  conn, [r["desig"] for r in shown]).items()}
-    site = current_site()
+                  conn, [r["desig"] for r in shown], site).items()}
     marks = skymap.target_marks(shown, tracks, now)
     try:
         moon = observability.moon_state(now, site)
@@ -373,7 +373,7 @@ def true_now(conn, desig, now=None):
     directly so the two questions get two answers.
     """
     now = now if now is not None else time.time()
-    lines = db.load_tracks(conn, [desig]).get(desig)
+    lines = db.load_tracks(conn, [desig], current_site()).get(desig)
     track = ephemeris.track(lines) if lines else None
     if not track:
         return None
@@ -408,7 +408,7 @@ def index():
         rows = load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["range_filters"])
         upcoming = pick_upcoming(rows)
         strip = night_strip(rows)
-        archived_nights = db.list_archived_nights(conn)
+        archived_nights = db.list_archived_nights(conn, current_site())
         for n in archived_nights:
             n["start_label"] = localt(n["start_ts"])
             n["end_label"] = localt(n["end_ts"])
@@ -507,7 +507,8 @@ def skymap_svg():
     conn = get_conn()
     try:
         if night:
-            archived = db.load_archived_night(conn, night)
+            archived = db.load_archived_night(conn, night,
+                                              current_site())
             if archived is None:
                 return f"No archive for night {night}", 404
             # An archived night knows its own bounds, so scrub against those
@@ -785,14 +786,15 @@ def mark(desig):
     conn = get_conn()
     try:
         if action == "observed":
-            db.set_state(conn, desig, uid, observed=1,
+            db.set_state(conn, desig, uid, current_site(), observed=1,
                          observed_at_utc=db.utcnow())
         elif action == "unobserved":
-            db.set_state(conn, desig, uid, observed=0, observed_at_utc=None)
+            db.set_state(conn, desig, uid, current_site(),
+                         observed=0, observed_at_utc=None)
         elif action == "hide":
-            db.set_state(conn, desig, uid, hidden=1)
+            db.set_state(conn, desig, uid, current_site(), hidden=1)
         elif action == "restore":
-            db.set_state(conn, desig, uid, hidden=0)
+            db.set_state(conn, desig, uid, current_site(), hidden=0)
         # "up" and "down" are deliberately gone rather than left accepting a
         # request nothing can send: the arrows that produced them are removed,
         # and priority_bump is no longer read by the sort or the score. An
@@ -810,7 +812,8 @@ def target_detail(desig):
     conn = get_conn()
     try:
         rows = [r for r in db.load_targets(conn, True, True,
-                                           user_id=viewer_id())
+                                           user_id=viewer_id(),
+                                           site=current_site())
                 if r["desig"] == desig]
         if not rows:
             # Gone from the live board -- update_neocp.py rewrites `targets`
@@ -832,7 +835,7 @@ def target_detail(desig):
                 "target_archived.html", obj=obj,
                 hist_rows=hist_rows, hist_charts=hist_charts)
         # Drawn from points/rows already cached, so the page makes no network call.
-        pts = db.load_offsets(conn, desig)
+        pts = db.load_offsets(conn, desig, current_site())
         cov = uncertainty.coverage(pts, site=current_site()) if pts else None
 
         # Same cached lines the sky map reads; full Row objects this time,
@@ -841,8 +844,10 @@ def target_detail(desig):
         # (no altitude floor) fetch scoped only to this plot -- see
         # ephemeris.fetch_gap_fill -- by timestamp, so a hole in the normal
         # feed is patched wherever the wider one actually covers it.
-        eph_lines = db.load_tracks(conn, [desig]).get(desig)
-        gap_fill_lines = db.load_gap_fill_lines(conn, desig)
+        eph_lines = db.load_tracks(conn, [desig],
+                                   current_site()).get(desig)
+        gap_fill_lines = db.load_gap_fill_lines(conn, desig,
+                                                current_site())
         primary_rows = ephemeris.from_lines(desig, eph_lines or []).rows
         filler_rows = ephemeris.from_lines(desig, gap_fill_lines or []).rows
         seen_ts = {r.ts for r in primary_rows}
