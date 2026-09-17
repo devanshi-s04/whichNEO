@@ -1991,6 +1991,81 @@ def test_prevdes_parsing_keeps_what_ground_truth_needs():
           H.parse_prevdes("<html><body>nothing here</body></html>") == {})
 
 
+def test_archived_run_import():
+    """Reconstructing past polls from the ds42 run archive.
+
+    The history poller only started when it was deployed, and MPC keeps no
+    archive of past NEOCP listings -- so those nights exist only where
+    something else happened to record them. The ds42 runs did.
+
+    Two daily samples are not five-minute polling, which is why every row is
+    flagged: anything reasoning about cadence, or reading a column the
+    archive never held, has to be able to exclude them.
+    """
+    import tempfile
+
+    import neocp_history as H
+
+    prev = H.DB_PATH
+    H.DB_PATH = os.path.join(tempfile.mkdtemp(), "neocp_history.db")
+    try:
+        con = H.ensure_db()
+        cols = {r[1] for r in con.execute("PRAGMA table_info(snapshots)")}
+        check("snapshots can be flagged retrospective",
+              "retrospective" in cols)
+
+        meta = {"P12aaaa": {"score": 100, "vmag": 20.1, "nobs": 3, "arc": 0.02},
+                "P12bbbb": {"score": 77, "vmag": 21.4, "nobs": 6, "arc": 0.05}}
+        ts = "2026-09-15T01:19:47+00:00"
+        rows, tracked = H.import_archived_run(con, "2026-09-15", meta, ts)
+        check("one snapshot per object", rows == 2, rows)
+        check("and each is tracked as an object", tracked == 2, tracked)
+
+        got = con.execute("SELECT desig, score, vmag, nobs, arc_days, "
+                          "retrospective, ra_deg FROM snapshots "
+                          "ORDER BY desig").fetchall()
+        check("what the archive held comes across",
+              got[0][1] == 100 and abs(got[0][2] - 20.1) < 1e-9
+              and got[0][3] == 3)
+        check("every row is flagged retrospective",
+              all(r[5] == 1 for r in got))
+        check("a column the archive never held stays NULL",
+              all(r[6] is None for r in got))
+
+        # Re-running must not double the history.
+        again = H.import_archived_run(con, "2026-09-15", meta, ts)
+        check("importing the same night twice is a no-op", again == (0, 0),
+              again)
+        check("still one poll", con.execute(
+            "SELECT count(DISTINCT snapshot_ts) FROM snapshots"
+        ).fetchone()[0] == 1)
+
+        # A later night must extend last_seen, not rewrite first_seen.
+        later = "2026-09-16T14:34:00+00:00"
+        H.import_archived_run(con, "2026-09-16", {"P12aaaa": meta["P12aaaa"]},
+                              later)
+        row = con.execute("SELECT first_seen_ts, last_seen_ts FROM objects "
+                          "WHERE desig='P12aaaa'").fetchone()
+        check("first seen stays at the earliest night", row[0] == ts, row)
+        check("last seen moves to the latest", row[1] == later, row)
+        check("two polls now", con.execute(
+            "SELECT count(DISTINCT snapshot_ts) FROM snapshots"
+        ).fetchone()[0] == 2)
+
+        # Out of order: an older night imported afterwards must still win
+        # first_seen, or an object looks younger than it is.
+        older = "2026-09-14T00:00:00+00:00"
+        H.import_archived_run(con, "2026-09-14", {"P12aaaa": meta["P12aaaa"]},
+                              older)
+        row = con.execute("SELECT first_seen_ts, last_seen_ts FROM objects "
+                          "WHERE desig='P12aaaa'").fetchone()
+        check("an older night imported later still wins first_seen",
+              row[0] == older and row[1] == later, row)
+        con.close()
+    finally:
+        H.DB_PATH = prev
+
+
 def test_history_backfill_and_resolution():
     """Backfill recovers labels that already exist, and never overwrites.
 
@@ -2863,6 +2938,7 @@ def main():
                test_offsets_parse_with_the_fast_motion_flag,
                test_cache_schema_forces_one_refetch,
                test_prevdes_parsing_keeps_what_ground_truth_needs,
+               test_archived_run_import,
                test_history_backfill_and_resolution,
                test_history_bulk_download_needs_an_account,
                test_ds42_column,

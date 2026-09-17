@@ -289,6 +289,60 @@ def _num(s):
     return None if v != v else v
 
 
+def cmd_histimport(conn, args):
+    """Import the banked ds42 runs into the NEOCP history as past polls.
+
+    The history poller only started when it was deployed, and MPC keeps no
+    archive of past NEOCP listings -- so the nights before that are gone
+    except where something else happened to record them. The ds42 run archive
+    did: each run's meta.json holds the board's score, V, nobs and arc for
+    every object it considered.
+
+    Two daily samples are not five-minute polling, so every row is flagged
+    retrospective. Re-running is safe; a night already imported is skipped.
+    """
+    import glob
+    import json
+
+    import neocp_history as H
+
+    runs = sorted(glob.glob(os.path.join(args.runs, "*", "meta.json")))
+    if not runs:
+        print(f"no meta.json under {args.runs}", file=sys.stderr)
+        return 1
+
+    hist = H.ensure_db()
+    try:
+        total_rows = total_new = 0
+        for path in runs:
+            night = os.path.basename(os.path.dirname(path))
+            prov_path = os.path.join(os.path.dirname(path), "provenance.json")
+            try:
+                with open(path) as f:
+                    meta = json.load(f)
+                with open(prov_path) as f:
+                    ts = json.load(f)["run_utc"]
+            except (OSError, KeyError, ValueError) as e:
+                print(f"  {night}: unreadable ({e}), skipped", file=sys.stderr)
+                continue
+            rows, new = H.import_archived_run(hist, night, meta, ts)
+            total_rows += rows
+            total_new += new
+            print(f"  {night}: {len(meta)} in file, {rows} snapshot(s) "
+                  f"written at {ts}" + ("" if rows else "  [already imported]"))
+        # "touched", not "new": SQLite's UPSERT reports rowcount 1 whether
+        # it inserted or updated, so this counts objects whose first/last
+        # seen were adjusted as well as ones created.
+        print(f"{total_rows} retrospective snapshot(s), "
+              f"{total_new} object row(s) touched")
+        polls = hist.execute(
+            "SELECT count(DISTINCT snapshot_ts) FROM snapshots").fetchone()[0]
+        print(f"history now spans {polls} poll(s)")
+    finally:
+        hist.close()
+    return 0
+
+
 def cmd_mailtest(conn, args):
     """Send one message and let the exception through.
 
@@ -353,6 +407,10 @@ def main(argv=None):
 
     a = sub.add_parser("mailtest")
     a.add_argument("address")
+
+    a = sub.add_parser("histimport")
+    a.add_argument("--runs", default=os.path.join(config.DS42_ROOT, "runs"),
+                   help="the ds42 run archive (default: %(default)s)")
 
     a = sub.add_parser("ds42import")
     a.add_argument("--runs", default=os.path.join(config.DS42_ROOT, "runs"),
