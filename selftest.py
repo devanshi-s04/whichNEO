@@ -2122,6 +2122,78 @@ def test_history_page_survives_missing_columns():
         importlib.reload(appmod)
 
 
+def test_target_history_section_survives_missing_columns():
+    """The same NULL must not take a TARGET page down either.
+
+    /history was fixed for this; the per-object history table on target.html
+    is a second template with the same unguarded formats, and it was missed.
+    Found on deploy: 65 of the 123 objects on the live board had at least one
+    snapshot with no hmag or not_seen_days, so more than half the detail
+    pages answered 500 while /history itself was fine.
+
+    Both columns are exercised here, because they are NULL together in the
+    real data and guarding only one would still leave the page down.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import neocp_history as H
+
+    prev_db, prev_hist = config.DB_PATH, H.DB_PATH
+    d = tempfile.mkdtemp()
+    config.DB_PATH = os.path.join(d, "targets.db")
+    H.DB_PATH = os.path.join(d, "neocp_history.db")
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        now = time.time()
+        conn.execute(
+            "INSERT INTO targets (desig, score, vmag, hmag, nobs, arc_days,"
+            " not_seen_days, observable, score_total, discard_reasons,"
+            " max_alt, max_alt_az, max_alt_ts, exposure_min, frames,"
+            " frame_sec, frame_motion, window_minutes, cur_alt, cur_az,"
+            " cur_motion, cur_moon_dist, cur_vmag, cur_sun_alt, cur_ts,"
+            " window_start_ts, window_end_ts, incl, q, e)"
+            " VALUES ('NULLHIST', 88, 20.1, 22.4, 3, 0.9, 0.4, 1, 3.2, '[]',"
+            f" 61.0, 180.0, {now + 3600}, 20.5, 36, 30, 1.4, 120.0, 55.0,"
+            f" 175.0, 1.4, 55.0, 20.1, -20.0, {now}, {now}, {now + 7200},"
+            " 12.5, 0.9, 0.6)")
+        conn.commit()
+        conn.close()
+
+        con = H.ensure_db()
+        hnow = H._now()
+        con.execute("INSERT INTO objects (desig, first_seen_ts, last_seen_ts) "
+                    "VALUES ('NULLHIST', ?, ?)", (hnow, hnow))
+        # One complete snapshot and one missing exactly what the archived runs
+        # do not carry -- the shape that broke the page.
+        con.execute("INSERT INTO snapshots (desig, snapshot_ts, score, vmag, "
+                    "nobs, arc_days, hmag, not_seen_days) "
+                    "VALUES ('NULLHIST', ?, 100, 20.1, 5, 0.03, 22.0, 0.40)",
+                    (hnow,))
+        con.execute("INSERT INTO snapshots (desig, snapshot_ts, score, vmag, "
+                    "nobs, arc_days, retrospective) "
+                    "VALUES ('NULLHIST', ?, 77, 21.4, 6, 0.05, 1)", (hnow,))
+        con.commit()
+        con.close()
+
+        importlib.reload(appmod)
+        r = appmod.app.test_client().get("/target/NULLHIST")
+        check("a target page renders with NULL hmag and not_seen_days",
+              r.status_code == 200, r.status_code)
+        body = r.data.decode()
+        check("the sparse snapshot is shown rather than skipped",
+              "21.4" in body)
+        check("its missing values read as a dash",
+              "&mdash;" in body or "—" in body)
+        check("the complete snapshot still formats normally",
+              "22.0" in body and "0.40" in body)
+    finally:
+        config.DB_PATH, H.DB_PATH = prev_db, prev_hist
+        importlib.reload(appmod)
+
+
 def test_history_backfill_and_resolution():
     """Backfill recovers labels that already exist, and never overwrites.
 
@@ -2997,6 +3069,7 @@ def main():
                test_prevdes_parsing_keeps_what_ground_truth_needs,
                test_archived_run_import,
                test_history_page_survives_missing_columns,
+               test_target_history_section_survives_missing_columns,
                test_history_backfill_and_resolution,
                test_history_bulk_download_needs_an_account,
                test_ds42_column,
