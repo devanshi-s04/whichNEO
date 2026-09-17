@@ -231,6 +231,29 @@ CREATE TABLE IF NOT EXISTS night_archive (
     PRIMARY KEY (site_id, night)
 );
 
+-- Settings edited through the web, one row per changed field, layered over
+-- the site's own TOML file when the site is used.
+--
+-- The file stays the written record rather than being rewritten, because the
+-- file is where the *reasoning* lives -- why a wedge starts at 247.5, why a
+-- sector's figure is interpolated -- and a form cannot write a comment. So
+-- reverting a setting is deleting a row here, and the file's value comes back
+-- untouched. A field nobody has edited is simply absent, which is why a site
+-- never touched through the web behaves exactly as it did before this table
+-- existed.
+--
+-- previous_json is the value this row replaced, kept so a change can be undone
+-- without anyone having to remember what it was.
+CREATE TABLE IF NOT EXISTS site_settings (
+    site_id       INTEGER NOT NULL,
+    field         TEXT NOT NULL,
+    value_json    TEXT NOT NULL,
+    previous_json TEXT,
+    changed_utc   TEXT NOT NULL,
+    changed_by    INTEGER,
+    PRIMARY KEY (site_id, field)
+);
+
 CREATE INDEX IF NOT EXISTS idx_targets_seq
     ON targets(site_id, observable DESC, max_alt_ts ASC);
 """
@@ -876,6 +899,65 @@ def update_password(conn, uid, password_hash):
 
 def count_users(conn):
     return conn.execute("SELECT count(*) FROM users").fetchone()[0]
+
+
+# --- edited settings ---------------------------------------------------------
+
+def load_site_overrides(conn, site_id):
+    """{field: value} for one site's edited settings."""
+    return {r["field"]: json.loads(r["value_json"])
+            for r in conn.execute(
+                "SELECT field, value_json FROM site_settings WHERE site_id=?",
+                (site_id,))}
+
+
+def site_settings_rows(conn, site_id):
+    """The same, with what each edit replaced and who made it.
+
+    Feeds the settings page's "edited" markers and its undo, so an observer
+    can see that a limit is not the one the file states, and what it was.
+    """
+    return {r["field"]: dict(r) for r in conn.execute(
+        "SELECT field, value_json, previous_json, changed_utc, changed_by "
+        "FROM site_settings WHERE site_id=?", (site_id,))}
+
+
+def site_settings_stamp(conn, site_id):
+    """When this site's settings last changed, or None. Cheap cache key."""
+    row = conn.execute(
+        "SELECT max(changed_utc) AS s FROM site_settings WHERE site_id=?",
+        (site_id,)).fetchone()
+    return row["s"] if row else None
+
+
+def save_site_override(conn, site_id, field, value_json, previous_json,
+                       user_id=None):
+    """Store one field's new value, keeping what it replaced.
+
+    previous_json is only written when this is the FIRST edit of a field --
+    after that the stored previous stays the file's original value, so undo
+    always returns to what the site was configured with rather than walking
+    back one edit at a time through a long afternoon of tuning.
+    """
+    with conn:
+        conn.execute(
+            "INSERT INTO site_settings "
+            "(site_id, field, value_json, previous_json, changed_utc, "
+            " changed_by) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(site_id, field) DO UPDATE SET "
+            "value_json=excluded.value_json, "
+            "changed_utc=excluded.changed_utc, "
+            "changed_by=excluded.changed_by",
+            (site_id, field, value_json, previous_json, utcnow(), user_id))
+
+
+def clear_site_override(conn, site_id, field):
+    """Forget an edit, so the site's file decides this field again."""
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM site_settings WHERE site_id=? AND field=?",
+            (site_id, field))
+    return cur.rowcount > 0
 
 
 def set_meta(conn, key, value, site=None):

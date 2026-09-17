@@ -677,3 +677,40 @@ td.ds42 {
   white-space: nowrap;
 }
 td.ds42 span[title] { cursor: help; }
+
+/* --- settings page ---------------------------------------------------- */
+/* A banner states what just happened to the configuration, which on this
+   page matters more than on any other: a save that silently did nothing, or
+   did something else, is how a dome limit ends up not being what someone
+   believes it is. */
+.banner {
+  margin: 14px 0; padding: 10px 14px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--raised);
+  color: var(--muted); font-size: 12.5px; line-height: 1.6;
+}
+.banner p { margin: 0 0 6px; }
+.banner p:last-child { margin-bottom: 0; }
+.banner.good { border-color: var(--go); color: var(--ink); }
+.banner.bad { border-color: var(--no); color: var(--ink); }
+input.num {
+  width: 5.6em; padding: 3px 6px; border-radius: 5px;
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 11.5px;
+}
+input.why {
+  width: 28em; max-width: 100%; padding: 3px 6px; border-radius: 5px;
+  background: var(--panel); color: var(--muted); border: 1px solid var(--line);
+  font-family: var(--ui); font-size: 11.5px;
+}
+input.num:focus, input.why:focus { outline: 1px solid var(--amber); }
+/* The wedge confirmation. Deliberately not styled as a quiet afterthought:
+   it is the guard on the one setting that can point a telescope at a wall. */
+.confirmbox {
+  margin: 12px 0; padding: 10px 14px; border-radius: 7px;
+  border: 1px solid var(--no); background: var(--raised);
+  color: var(--muted); font-size: 12px; line-height: 1.7;
+}
+.savebar {
+  margin: 22px 0 6px; display: flex; gap: 14px; align-items: center;
+  flex-wrap: wrap;
+}
