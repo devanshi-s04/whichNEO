@@ -28,6 +28,8 @@ changes, so the decisions survive the conversation that produced them.
 | membership | **the owner invites by email**, reusing the existing invite flow |
 | landing page | **your own site if signed in, L01 if not** |
 | ranking weights | **per site, and shown in the settings page** |
+| plan file format | **per site**, Višnjan's as the placeholder — but see the limits below |
+| dormancy | **30 days without a sign-in**, emailed, reactivated on next login |
 
 That is the most ambitious option on every axis, and worth naming plainly:
 **it makes whichNEO a service, and you the operator.** Other observatories'
@@ -246,11 +248,59 @@ the ephemeris fetches bunching when many sites go stale at once.
 
 ---
 
+## The plan file: configurable, but only partly
+
+Decided that a site supplies its own format, with Višnjan's as the
+placeholder. Building it needs one distinction, because the file is two
+different things stapled together.
+
+**The ephemeris lines are fixed-width and column-aligned** — `{rh:02d}
+{rm:02d} {rs:04.1f}` and so on in `output.py`, mirroring MPC's layout because
+the legacy planner parses them by column position. An observatory's software
+either reads that exact layout or it does not. A free-form template here
+produces a file nothing can parse, so this part is **not** a free-text
+setting. At most it is a choice between named layouts, once a second one
+exists.
+
+**The entry lines are metadata** — `* P12pWTl 36 x 30 sec`, `score=`,
+`obs=`, `arc=`, `notSeen=`. What a site wants here genuinely varies, and this
+is where "your own format" belongs.
+
+### It must not be Jinja, and must not be str.format
+
+This is user-supplied text rendered on our server, so the templating choice is
+a security decision, not a convenience one.
+
+- **Jinja** templates from users are a remote-code-execution vector. Not an
+  option at any level of escaping.
+- **`str.format`** allows attribute traversal — `{t.__class__.__init__.__globals__}`
+  reaches the interpreter from a format string. Not an option either.
+- **`string.Template`** is the right primitive: `$desig`, `$frames`,
+  `$frame_sec`. No attribute access, no method calls, by design. Unknown
+  names left alone with `safe_substitute` rather than raising at 3 a.m.
+
+Whatever is offered, the settings page should render a live preview from a
+real target, so a format is seen before a night depends on it.
+
+---
+
+## Dormancy
+
+**30 days without a sign-in.** The site is emailed when it goes dormant,
+saying it will reactivate when someone logs back in — not deleted, not
+silently stopped.
+
+That is what makes the cap of 25 mean 25 working observatories rather than 25
+registrations, and it lets somebody try the service and drift away without
+permanently holding a slot.
+
+Details to settle when building it: whether any member's sign-in reactivates
+or only the owner's, and whether a reactivating site refetches immediately or
+waits for the next ordinary cycle (its ephemeris cache will be a month stale,
+so: immediately).
+
+---
+
 ## Open questions
 
-1. **The plan file format** is the legacy Višnjan planner's. Does another
-   observatory get the same format, their own, or a choice? Leaning: same
-   format for now, since nobody has asked for another, and it is the kind of
-   thing to change when a real user needs it rather than in advance.
-2. **What counts as a dormant site** — no sign-in for 14 days? 30? And is a
-   dormant site paused silently or told?
+None blocking. The next step is Stage A.
