@@ -23,6 +23,12 @@
   <button type="button" id="planSyncBtn" class="chip"
           title="Keep a local .txt file on this computer in sync with the plan file, updated on every refresh">sync to file</button>
   <span id="planSyncStatus" class="syncstatus"></span>
+  {# Promoted out of the toolbar chips, where it sat next to a plan-file link
+     that has since moved up here. It leads to a different page rather than
+     changing this one, which is what the other chips do -- so it belongs
+     beside Plan file, the board's other exit, not among the filters. #}
+  <a class="nav-btn" href="{{ url_for('history_view') }}"
+     title="Every NEOCP object this board has polled, what its digest2 score and magnitude did over time, and how it eventually resolved">History</a>
   <div class="live">
     <div class="stat"><div class="k">Night</div>
       <div class="v">{{ status.night }}</div></div>

@@ -1927,6 +1927,186 @@ def test_cache_schema_forces_one_refetch():
           ephemeris.CACHE_SCHEMA > 3, ephemeris.CACHE_SCHEMA)
 
 
+PREVDES_FIXTURE = """
+<html><body><a name="prev"></a>
+<ul>
+<li>2026 RR<sub>39</sub> = 6JD1C21 (Sept. 16.48 UT) [see <a
+    href="/mpec/K26/K26S09.html">MPEC 2026-S09</a>]
+<li>2026 RS<sub>39</sub> = P22pRQ8 (Sept. 16.49 UT)
+<li>ZTF10GC = SK000cT (Sept. 16.62 UT)
+<li>A11GXkI was not a minor planet (Sept. 16.30 UT)
+<li>S06001 was not confirmed (Sept. 15.90 UT)
+<li>P99xxxx does not exist (Sept. 15.10 UT)
+<li>Q88yyyy was suspected artificial (Sept. 14.80 UT)
+</ul></body></html>
+"""
+
+
+def test_prevdes_parsing_keeps_what_ground_truth_needs():
+    """MPC's archive, parsed for more than "it resolved".
+
+    "confirmed" alone cannot answer the question ds42 is asked: a main-belt
+    asteroid that lands on NEOCP is confirmed too. The permanent designation
+    is what lets an orbit be looked up later and the object classified, so
+    losing it means the archive records that something resolved without
+    recording what it was.
+
+    Note which side is which. An entry reads "2026 RR39 = 6JD1C21" -- the
+    permanent designation on the LEFT, the NEOCP tracklet on the right -- and
+    an entry can also link two tracklets with no permanent designation at all.
+    """
+    import neocp_history as H
+
+    got = H.parse_prevdes(PREVDES_FIXTURE)
+
+    check("a designated object keeps its designation",
+          got["6JD1C21"]["linked_desig"] == "2026 RR39", got.get("6JD1C21"))
+    check("and its MPEC", got["6JD1C21"]["mpec"] == "MPEC 2026-S09")
+    check("the designation is found however the entry is ordered",
+          got["P22pRQ8"]["linked_desig"] == "2026 RS39")
+    check("an entry with no MPEC still resolves",
+          got["P22pRQ8"]["status"] == "confirmed"
+          and got["P22pRQ8"]["mpec"] is None)
+    check("the permanent designation is itself lookupable",
+          got["2026 RR39"]["status"] == "confirmed")
+
+    # Two tracklets of the same object. Confirmed, but nothing is designated,
+    # so there is no orbit to look up and no NEO verdict to reach.
+    check("a tracklet merge confirms both sides",
+          got["ZTF10GC"]["status"] == "confirmed"
+          and got["SK000cT"]["status"] == "confirmed")
+    check("but claims no designation for either",
+          got["ZTF10GC"]["linked_desig"] is None
+          and got["SK000cT"]["linked_desig"] is None)
+
+    for d, st in (("A11GXkI", "not_minor_planet"), ("S06001", "not_confirmed"),
+                  ("P99xxxx", "does_not_exist"),
+                  ("Q88yyyy", "suspected_artificial")):
+        check("%s -> %s" % (d, st), got[d]["status"] == st, got.get(d))
+    check("a negative outcome designates nothing",
+          all(got[d]["linked_desig"] is None
+              for d in ("A11GXkI", "S06001", "P99xxxx", "Q88yyyy")))
+
+    check("a page with no archive list yields nothing, rather than raising",
+          H.parse_prevdes("<html><body>nothing here</body></html>") == {})
+
+
+def test_history_backfill_and_resolution():
+    """Backfill recovers labels that already exist, and never overwrites.
+
+    ds42 scored objects before this history existed, and MPC's archive still
+    lists their outcomes -- so those labels are recoverable rather than lost.
+    But a resolved_at means "when we learned this", so a later pass must not
+    rewrite it.
+    """
+    import tempfile
+
+    import neocp_history as H
+
+    prev = H.DB_PATH
+    H.DB_PATH = os.path.join(tempfile.mkdtemp(), "neocp_history.db")
+    try:
+        con = H.ensure_db()
+        mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+        check("the history database uses WAL, like targets.db",
+              mode.lower() == "wal", mode)
+
+        cols = {r[1] for r in con.execute("PRAGMA table_info(objects)")}
+        for c in ("linked_desig", "mpec", "is_neo", "perihelion_au",
+                  "retrospective"):
+            check("objects has %s" % c, c in cols)
+
+        scored = ["6JD1C21", "P22pRQ8", "A11GXkI", "P12unknown"]
+        entries = H.parse_prevdes(PREVDES_FIXTURE)
+        inserted = 0
+        now = H._now()
+        known = {r[0] for r in con.execute("SELECT desig FROM objects")}
+        for d in scored:
+            if d not in known:
+                con.execute("INSERT INTO objects (desig, first_seen_ts, "
+                            "last_seen_ts, status, retrospective) "
+                            "VALUES (?,?,?,'pending',1)", (d, now, now))
+                inserted += 1
+        con.commit()
+        check("every scored object is tracked", inserted == 4)
+
+        n = H.apply_resolutions(con, entries, now)
+        check("the three the archive knows are resolved", n == 3, n)
+
+        rows = {r[0]: r for r in con.execute(
+            "SELECT desig, status, linked_desig, mpec, resolved_at, "
+            "retrospective FROM objects")}
+        check("a designated object records what it became",
+              rows["6JD1C21"][2] == "2026 RR39" and rows["6JD1C21"][3]
+              == "MPEC 2026-S09")
+        check("a negative outcome is recorded as such",
+              rows["A11GXkI"][1] == "not_minor_planet")
+        check("an object the archive has never heard of stays pending",
+              rows["P12unknown"][1] == "pending"
+              and rows["P12unknown"][4] is None)
+        check("backfilled rows are flagged retrospective",
+              all(rows[d][5] == 1 for d in scored))
+
+        # Re-running must be inert: resolved_at is when we learned, not when
+        # we last looked.
+        first_seen_at = rows["6JD1C21"][4]
+        again = H.apply_resolutions(con, entries, "2099-01-01T00:00:00+00:00")
+        after = con.execute("SELECT resolved_at FROM objects WHERE desig="
+                            "'6JD1C21'").fetchone()[0]
+        # Zero, not three: the default pass only looks at objects still
+        # pending, so already-resolved ones are not even considered.
+        check("a second pass resolves nothing new", again == 0, again)
+        check("and does not rewrite when we learned it",
+              after == first_seen_at, (first_seen_at, after))
+        con.close()
+    finally:
+        H.DB_PATH = prev
+
+
+def test_history_bulk_download_needs_an_account():
+    """The dashboard and CSV stay open; the whole database does not.
+
+    Reads are open on this board and should stay open, but one row per object
+    per five minutes grows to gigabytes, and an anonymous endpoint handing out
+    the entire file is a bandwidth commitment rather than a read. Nothing in
+    it is secret -- it is all public MPC data -- so this is about cost.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+
+    prev_db, prev_env = config.DB_PATH, os.environ.pop("WHICHNEO_AUTH", None)
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+        check("the dashboard is open to anyone",
+              c.get("/history").status_code == 200)
+        check("so is the CSV",
+              c.get("/history/download.csv").status_code == 200)
+        check("the whole database is not",
+              c.get("/history/download.db").status_code in (302, 401),
+              c.get("/history/download.db").status_code)
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        uid = db.create_user(conn, "obs", auth.hash_password("x" * 12))
+        conn.close()
+        with c.session_transaction() as s:
+            s["uid"] = uid
+        check("but it is once you are signed in",
+              c.get("/history/download.db").status_code == 200)
+    finally:
+        config.DB_PATH = prev_db
+        if prev_env is not None:
+            os.environ["WHICHNEO_AUTH"] = prev_env
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+
 def test_ds42_column():
     """The column, and the three states it has to keep apart.
 
@@ -2682,6 +2862,9 @@ def main():
                test_priority_bump_is_fully_gone,
                test_offsets_parse_with_the_fast_motion_flag,
                test_cache_schema_forces_one_refetch,
+               test_prevdes_parsing_keeps_what_ground_truth_needs,
+               test_history_backfill_and_resolution,
+               test_history_bulk_download_needs_an_account,
                test_ds42_column,
                test_ds42_score_parsing,
                test_ds42_never_breaks_an_update_cycle,

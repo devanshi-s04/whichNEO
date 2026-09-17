@@ -1,0 +1,29 @@
+{% for o in objects %}
+<tr>
+  <td class="l nm">
+    <a href="{{ url_for('target_detail', desig=o.desig) }}">{{ o.desig }}</a>
+    <button type="button" class="histexpand" aria-expanded="false">&#9656; charts</button>
+  </td>
+  <td class="l dim">{{ o.first_seen_ts[:16] }}</td>
+  <td class="l dim">{{ o.last_seen_ts[:16] }}</td>
+  <td class="l">
+    {% if o.status == 'confirmed' %}<span class="pill go">confirmed</span>
+    {% elif o.status == 'pending' %}<span class="pill">pending</span>
+    {% else %}<span class="pill no">{{ o.status|replace('_',' ') }}</span>{% endif %}
+  </td>
+  <td class="l dim">{{ o.resolved_at[:16] if o.resolved_at else '&mdash;'|safe }}</td>
+  <td>{{ o.score }}</td>
+  <td>{{ '%.1f'|format(o.vmag) }}</td>
+  <td>{{ o.nobs }}</td>
+  <td>{{ '%.3f'|format(o.arc_days) }}</td>
+  <td>{{ '%.2f'|format(o.not_seen_days) }}</td>
+</tr>
+<tr class="histrow" hidden data-desig="{{ o.desig }}">
+  <td colspan="10"></td>
+</tr>
+{% else %}
+<tr><td colspan="10" class="empty">
+  {% if q %}No objects match this filter.
+  {% else %}No history logged yet &mdash; has neocp_history.py run?{% endif %}
+</td></tr>
+{% endfor %}

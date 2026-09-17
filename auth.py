@@ -395,6 +395,24 @@ def _deny():
     return redirect(url_for("login", next=request.referrer or url_for("index")))
 
 
+def signed_in(view):
+    """Require an account (or the shared credential) for a route that changes
+    nothing.
+
+    Deliberately separate from required(): no CSRF check, because there is no
+    state to forge. This exists for reads that are expensive rather than
+    sensitive -- the bulk history download being the case in hand, where the
+    data is entirely public MPC material but the file grows to gigabytes and
+    an anonymous endpoint handing it out on demand is a cost, not a leak.
+    """
+    @wraps(view)
+    def wrapper(*a, **kw):
+        if current_user() is None and not _basic_valid(request.authorization):
+            return _deny()
+        return view(*a, **kw)
+    return wrapper
+
+
 def required(view):
     """Protect a state-changing route: a session or the shared credential,
     plus a matching CSRF token."""

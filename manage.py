@@ -25,6 +25,7 @@ history. Prefer it.
 
 import argparse
 import getpass
+import os
 import sqlite3
 import sys
 
@@ -221,6 +222,73 @@ def cmd_deluser(conn, args):
     return 0
 
 
+def cmd_ds42import(conn, args):
+    """Import ds42 scores from the banked run archive into ds42_scores.
+
+    Nights were scored by hand before the updater did it itself, and those
+    objects have since left NEOCP -- so their scores exist only as TSV on
+    disk while their outcomes are still listed in MPC's archive. Importing
+    them turns a pile of files into the labelled set the research note needs,
+    and it is the one direction the data cannot be recovered from: the
+    astrometry behind those scores is already unfetchable.
+
+    INSERT OR IGNORE, so a score the updater has since produced itself always
+    wins over a hand-run one.
+    """
+    import csv
+    import glob
+    import json
+
+    runs = sorted(glob.glob(os.path.join(args.runs, "*", "scores.tsv")))
+    if not runs:
+        print(f"no scores.tsv under {args.runs}", file=sys.stderr)
+        return 1
+    total = 0
+    for path in runs:
+        night = os.path.basename(os.path.dirname(path))
+        prov_path = os.path.join(os.path.dirname(path), "provenance.json")
+        try:
+            with open(prov_path) as f:
+                p = json.load(f)
+        except OSError:
+            print(f"  {night}: no provenance.json, skipped", file=sys.stderr)
+            continue
+        prov = {"ds42_rev": p.get("ds42_git_head"),
+                "ds42_dirty": p.get("ds42_dirty"),
+                "model_sha256": p.get("model_sha256"),
+                "config": p.get("config") or {}}
+        scores = {}
+        with open(path) as f:
+            for r in csv.DictReader(f, delimiter="\t"):
+                scores[r["object_id"]] = {
+                    "p_neo": _num(r.get("p_neo")),
+                    "log_lr": _num(r.get("log_lr")),
+                    "status": r.get("status") or "",
+                    "n_obs": int(_num(r.get("n_obs")) or 0),
+                    "arc_h": _num(r.get("arc_h")),
+                    "obscode": r.get("obscode") or "",
+                    "vmag": _num(r.get("V")),
+                }
+        n = db.save_ds42_scores(conn, scores, prov)
+        total += n
+        print(f"  {night}: {len(scores)} in file, {n} new")
+    print(f"imported {total} score(s); ds42_scores now holds "
+          f"{db.count_ds42_scores(conn)}")
+    return 0
+
+
+def _num(s):
+    """Same nan-to-None conversion ds42score uses at its parse boundary: a
+    stored nan compares false against itself and can never be matched again."""
+    if s in (None, ""):
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    return None if v != v else v
+
+
 def cmd_mailtest(conn, args):
     """Send one message and let the exception through.
 
@@ -285,6 +353,10 @@ def main(argv=None):
 
     a = sub.add_parser("mailtest")
     a.add_argument("address")
+
+    a = sub.add_parser("ds42import")
+    a.add_argument("--runs", default=os.path.join(config.DS42_ROOT, "runs"),
+                   help="the ds42 run archive (default: %(default)s)")
 
     args = p.parse_args(argv)
     conn = db.connect()

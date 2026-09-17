@@ -4,18 +4,23 @@ Reads only from SQLite -- no astronomy and no network on page load, so
 rendering stays fast. The updater has already done all the work.
 """
 
+import csv
+import io
 import json
 import math
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import (Flask, Response, jsonify, redirect, render_template,
+                   request, send_file, url_for)
 
 import auth
 import config
 import db
 import ephemeris
+import history
+import history_plot
 import mailer
 import moonplot
 import observability
@@ -301,6 +306,47 @@ def archived_sky_view(conn, archived, now=None):
     except Exception:
         moon = None                       # never take the board down for this
     return {"svg": skymap.render_svg(marks, moon, localt=localt), "used": now}
+
+
+# Every metric a viewer can choose to plot for an object's polled history,
+# in the order their checkboxes appear. "default" picks what's plotted
+# before anyone touches a checkbox -- score and V mag, the two people ask
+# about most; the rest are opt-in so the page doesn't open cluttered.
+HISTORY_METRICS = [
+    # key, label, color, fmt, default_on, y_max
+    ("score", "digest2 score", "#f0a63c", "{:.0f}", True, 100),
+    ("vmag", "V magnitude", "#5fc9d4", "{:.1f}", True, None),
+    ("hmag", "H magnitude", "#f472b6", "{:.1f}", False, None),
+    ("nobs", "observations", "#a78bfa", "{:.0f}", False, None),
+    ("arc_days", "arc (days)", "#4ade80", "{:.3f}", False, None),
+]
+
+
+def history_charts(hist_rows, keys=None):
+    """One trend chart per HISTORY_METRICS entry that actually has enough
+    points to plot, for one object's polled history. Shared by the live
+    target page, the archived target page, and the history dashboard's
+    per-row preview -- an object's history looks the same everywhere, only
+    what else surrounds it (and, via `keys`, how much of it) differs. Which
+    ones start visible is a front-end (checkbox) concern on the pages that
+    offer all of them -- every requested chart is rendered here regardless,
+    since drawing an SVG server-side is cheap and toggling is instant only
+    if the markup is already on the page.
+
+    keys=None renders every metric; otherwise only HISTORY_METRICS entries
+    whose key is in it (order still follows HISTORY_METRICS, not keys)."""
+    if len(hist_rows) < 2:
+        return []
+    charts = []
+    for key, label, color, fmt, default_on, y_max in HISTORY_METRICS:
+        if keys is not None and key not in keys:
+            continue
+        pts = [(history.to_unix(r["snapshot_ts"]), r[key]) for r in hist_rows]
+        svg = history_plot.line_svg(pts, label, color=color, fmt=fmt, y_max=y_max)
+        if svg:
+            charts.append({"key": key, "label": label, "svg": svg,
+                           "default": default_on})
+    return charts
 
 
 def true_now(conn, desig, now=None):
@@ -752,7 +798,24 @@ def target_detail(desig):
                                            user_id=viewer_id())
                 if r["desig"] == desig]
         if not rows:
-            return f"Unknown target {desig}", 404
+            # Gone from the live board -- update_neocp.py rewrites `targets`
+            # to just the current NEOCP list every cycle, so a resolved
+            # object simply isn't there any more. Its polled history is a
+            # separate, append-only database and never loses it -- show
+            # what that still has rather than a bare 404, which is exactly
+            # the data loss this exists to avoid.
+            hconn = history.connect()
+            try:
+                obj = history.get_object(hconn, desig)
+                hist_rows = history.object_history(hconn, desig) if obj else []
+            finally:
+                hconn.close()
+            if not obj:
+                return f"Unknown target {desig}", 404
+            hist_charts = history_charts(hist_rows)
+            return render_template(
+                "target_archived.html", obj=obj,
+                hist_rows=hist_rows, hist_charts=hist_charts)
         # Drawn from points/rows already cached, so the page makes no network call.
         pts = db.load_offsets(conn, desig)
         cov = uncertainty.coverage(pts) if pts else None
@@ -792,6 +855,13 @@ def target_detail(desig):
             localt=localt, tzlabel=_tzabbr(), moon_track=moon_track
         ) if len(combined_rows) >= 2 else None
 
+        hconn = history.connect()
+        try:
+            hist_rows = history.object_history(hconn, desig)
+        finally:
+            hconn.close()
+        hist_charts = history_charts(hist_rows)
+
         return render_template(
             "target.html", row=rows[0],
             unc_svg=uncertainty.render_svg(pts) if pts else None,
@@ -802,6 +872,7 @@ def target_detail(desig):
             moon_svg=moon_svg,
             fov=config.FOV_ARCSEC,
             now_pos=true_now(conn, desig),
+            hist_rows=hist_rows, hist_charts=hist_charts,
             discovery_site=observatories.lookup(rows[0].get("discovery_code")),
             other_sites=[observatories.lookup(c)
                          for c in sorted((rows[0].get("obs_codes") or {}),
@@ -809,6 +880,150 @@ def target_detail(desig):
                          if c != rows[0].get("discovery_code")])
     finally:
         conn.close()
+
+
+def _history_query(conn, sort, asc, q):
+    """Shared by history_view (first paint) and history_rows_partial (every
+    later filter/sort change): apply q's filters, falling back to the
+    unfiltered list rather than an empty page if it doesn't parse -- a typo
+    in a bookmarked/hand-edited URL shouldn't make it look like there's no
+    data at all."""
+    try:
+        where_sql, params = history.parse_filters(q)
+        filter_error = None
+    except ValueError as e:
+        where_sql, params, filter_error = "", [], str(e)
+    objects = history.list_objects(conn, sort, asc, where_sql, params)
+    return objects, filter_error
+
+
+@app.route("/history")
+def history_view():
+    """Read-only dashboard over neocp_history.py's database. That script
+    owns writing to it (a separate background loop -- see its own
+    docstring); this route only reads."""
+    sort = request.args.get("sort")
+    asc = request.args.get("dir") != "desc"
+    q = request.args.get("q", "")
+    conn = history.connect()
+    try:
+        objects, filter_error = _history_query(conn, sort, asc, q)
+        try:
+            initial_filters = [{"field": f, "op": o, "value": v}
+                               for f, o, v in history.split_filter_tokens(q)]
+        except ValueError:
+            initial_filters = []
+        return render_template(
+            "history.html",
+            summary=history.summary(conn),
+            objects=objects,
+            mode=sort, asc=asc, q=q, filter_error=filter_error,
+            filter_fields=history.FILTER_FIELDS,
+            initial_filters=initial_filters)
+    finally:
+        conn.close()
+
+
+@app.route("/history/rows")
+def history_rows_partial():
+    """Server-rendered history table body, fetched by the dashboard's
+    filter-builder and sortable headers so changing either updates the
+    table instantly with no page reload."""
+    sort = request.args.get("sort")
+    asc = request.args.get("dir") != "desc"
+    q = request.args.get("q", "")
+    conn = history.connect()
+    try:
+        objects, _ = _history_query(conn, sort, asc, q)
+        return render_template("_history_rows.html", objects=objects, q=q)
+    finally:
+        conn.close()
+
+
+@app.route("/history/suggest")
+def history_suggest():
+    """Autocomplete for the filter bar's value field -- currently just
+    designations, the one free-text field where suggesting real values
+    (rather than making someone recall an exact desig) actually helps.
+    Everything else the filter bar can suggest (field names, operators,
+    status values) comes from FILTER_FIELDS client-side with no request."""
+    field = request.args.get("field", "")
+    prefix = request.args.get("q", "").strip()
+    if field != "desig" or not prefix:
+        return jsonify([])
+    conn = history.connect()
+    try:
+        rows = conn.execute(
+            "SELECT desig FROM objects WHERE desig LIKE ? ORDER BY desig LIMIT 8",
+            (f"{prefix}%",)).fetchall()
+    finally:
+        conn.close()
+    return jsonify([r["desig"] for r in rows])
+
+
+@app.route("/history/charts/<desig>")
+def history_charts_fragment(desig):
+    """digest2/V-mag charts for one object's row on the history dashboard,
+    rendered only when that row's dropdown is actually opened -- rendering
+    every row's charts up front (as this used to do) made /history slow to
+    load with dozens of objects on it for charts most visits never open."""
+    conn = history.connect()
+    try:
+        hist_rows = history.object_history(conn, desig)
+    finally:
+        conn.close()
+    charts = history_charts(hist_rows, keys=("score", "vmag"))
+    return render_template("_history_mini_charts.html", charts=charts)
+
+
+@app.route("/history/download.db")
+@auth.signed_in
+def history_download_db():
+    """The raw neocp_history.py database, exactly as stored -- full
+    fidelity, no export step, and every relation (objects to their
+    snapshots) intact for anyone who wants to query it directly.
+
+    Behind a login, unlike the dashboard and the CSV. Reading the board is
+    open and should stay open, but this is not a page: one row per object per
+    five minutes grows to gigabytes, and an unauthenticated endpoint handing
+    out the whole file on demand is a bandwidth commitment rather than a
+    read. Nothing in here is secret -- it is all public MPC data -- so this
+    is about cost, not confidentiality, and it is one decorator to reverse.
+    """
+    return send_file(history.DB_PATH, as_attachment=True,
+                     download_name="neocp_history.db",
+                     mimetype="application/x-sqlite3")
+
+
+@app.route("/history/download.csv")
+def history_download_csv():
+    """Same data as history_download_db, flattened to one row per snapshot
+    for anyone who'd rather open it in a spreadsheet than a SQL client --
+    each object's eventual outcome is repeated on every one of its snapshot
+    rows rather than kept in a second file, so nothing needs joining back
+    together by hand."""
+    conn = history.connect()
+    try:
+        rows = conn.execute("""
+            SELECT s.desig, s.snapshot_ts, s.score, s.ra_deg, s.dec_deg,
+                   s.vmag, s.nobs, s.arc_days, s.hmag, s.not_seen_days,
+                   s.update_note, s.note_flag, s.is_new,
+                   o.first_seen_ts, o.last_seen_ts, o.status, o.resolved_at
+            FROM snapshots s JOIN objects o ON o.desig = s.desig
+            ORDER BY s.desig, s.snapshot_ts
+        """).fetchall()
+    finally:
+        conn.close()
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["desig", "snapshot_ts", "score", "ra_deg", "dec_deg", "vmag",
+                "nobs", "arc_days", "hmag", "not_seen_days", "update_note",
+                "note_flag", "is_new", "first_seen_ts", "last_seen_ts",
+                "status", "resolved_at"])
+    w.writerows(rows)
+    return Response(buf.getvalue(), mimetype="text/csv", headers={
+        "Content-Disposition": "attachment; filename=neocp_history.csv"})
 
 
 if __name__ == "__main__":

@@ -1,0 +1,52 @@
+<h2 class="sect">History on NEOCP</h2>
+{% if hist_charts %}
+<div class="histpicker">
+  {% for c in hist_charts %}
+  <label class="histtoggle">
+    <input type="checkbox" data-hist-toggle="{{ c.key }}" {{ 'checked' if c.default }}>
+    {{ c.label }}
+  </label>
+  {% endfor %}
+</div>
+<div class="histwrap">
+  {% for c in hist_charts %}
+  <div class="histchart" data-hist-chart="{{ c.key }}" {{ '' if c.default else 'hidden' }}>{{ c.svg|safe }}</div>
+  {% endfor %}
+  <div class="histtable">
+    <table class="mini">
+      <tr><th>Time (UT)</th><th>Score</th><th>V</th><th>NObs</th><th>Arc</th>
+          <th>H</th><th>Unseen</th><th>Note</th></tr>
+      {% for h in hist_rows %}
+      <tr><td style="color:var(--ink)">{{ h.snapshot_ts[:16] }}</td>
+          <td>{{ h.score }}</td><td>{{ '%.1f'|format(h.vmag) }}</td>
+          <td>{{ h.nobs }}</td><td>{{ '%.3f'|format(h.arc_days) }}</td>
+          <td>{{ '%.1f'|format(h.hmag) }}</td>
+          <td>{{ '%.2f'|format(h.not_seen_days) }}</td>
+          <td class="dim">{{ h.update_note }}</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+<p class="note">
+  Every value NEOCP has reported for this object since <code>neocp_history.py</code>
+  started polling &mdash; {{ hist_rows|length }} snapshot{{ 's' if hist_rows|length != 1 }}
+  so far. MPC's own confirmation page keeps no such record; this is built by
+  polling it on a schedule and keeping every reading rather than overwriting
+  the last one.
+</p>
+<script>
+document.querySelectorAll('[data-hist-toggle]').forEach(cb => {
+  cb.addEventListener('change', () => {
+    const chart = document.querySelector(
+      '[data-hist-chart="' + cb.dataset.histToggle + '"]');
+    if (chart) chart.hidden = !cb.checked;
+  });
+});
+</script>
+{% else %}
+<p class="note">
+  No polled history for this target yet &mdash; either it appeared before
+  <code>neocp_history.py</code> started tracking, or hasn't been picked up
+  by a poll yet.
+</p>
+{% endif %}
