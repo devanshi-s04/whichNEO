@@ -2066,6 +2066,59 @@ def test_archived_run_import():
         H.DB_PATH = prev
 
 
+def test_history_page_survives_missing_columns():
+    """A NULL in any polled column must not take /history down.
+
+    NEOCP omits columns for an object it knows little about, and a snapshot
+    reconstructed from an archive carries only the fields that archive kept --
+    a retrospective row has no not_seen_days at all. Jinja's format filter
+    raises TypeError on None, so one missing number became a 500 for the whole
+    page. It did, in production, the moment the archived runs were imported.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import neocp_history as H
+
+    prev_db, prev_hist = config.DB_PATH, H.DB_PATH
+    d = tempfile.mkdtemp()
+    config.DB_PATH = os.path.join(d, "targets.db")
+    H.DB_PATH = os.path.join(d, "neocp_history.db")
+    try:
+        importlib.reload(appmod)
+        con = H.ensure_db()
+        now = H._now()
+        # One fully-populated object, and one with every optional column NULL
+        # -- which is exactly the shape import_archived_run writes.
+        con.execute("INSERT INTO objects (desig, first_seen_ts, last_seen_ts) "
+                    "VALUES ('FULL', ?, ?)", (now, now))
+        con.execute("INSERT INTO objects (desig, first_seen_ts, last_seen_ts, "
+                    "retrospective) VALUES ('SPARSE', ?, ?, 1)", (now, now))
+        con.execute("INSERT INTO snapshots (desig, snapshot_ts, score, vmag, "
+                    "nobs, arc_days, not_seen_days) "
+                    "VALUES ('FULL', ?, 100, 20.1, 5, 0.03, 0.4)", (now,))
+        con.execute("INSERT INTO snapshots (desig, snapshot_ts, score, vmag, "
+                    "nobs, arc_days, retrospective) "
+                    "VALUES ('SPARSE', ?, 77, 21.4, 6, 0.05, 1)", (now,))
+        con.commit()
+        con.close()
+
+        c = appmod.app.test_client()
+        r = c.get("/history")
+        check("/history renders with a NULL in a formatted column",
+              r.status_code == 200, r.status_code)
+        check("/history/rows too", c.get("/history/rows").status_code == 200)
+        body = r.data.decode()
+        check("the sparse row is shown, not skipped", "SPARSE" in body)
+        check("and its missing value reads as a dash", "&mdash;" in body
+              or "\u2014" in body)
+        check("the complete row still formats normally", "0.40" in body)
+    finally:
+        config.DB_PATH, H.DB_PATH = prev_db, prev_hist
+        importlib.reload(appmod)
+
+
 def test_history_backfill_and_resolution():
     """Backfill recovers labels that already exist, and never overwrites.
 
@@ -2939,6 +2992,7 @@ def main():
                test_cache_schema_forces_one_refetch,
                test_prevdes_parsing_keeps_what_ground_truth_needs,
                test_archived_run_import,
+               test_history_page_survives_missing_columns,
                test_history_backfill_and_resolution,
                test_history_bulk_download_needs_an_account,
                test_ds42_column,

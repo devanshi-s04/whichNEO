@@ -12,11 +12,17 @@
     {% else %}<span class="pill no">{{ o.status|replace('_',' ') }}</span>{% endif %}
   </td>
   <td class="l dim">{{ o.resolved_at[:16] if o.resolved_at else '&mdash;'|safe }}</td>
-  <td>{{ o.score }}</td>
-  <td>{{ '%.1f'|format(o.vmag) }}</td>
-  <td>{{ o.nobs }}</td>
-  <td>{{ '%.3f'|format(o.arc_days) }}</td>
-  <td>{{ '%.2f'|format(o.not_seen_days) }}</td>
+  {# Every one of these is nullable and must be rendered as such. NEOCP
+     itself omits columns for an object it knows little about, and a snapshot
+     reconstructed from an archive carries only the fields that archive kept
+     -- a retrospective row has no not_seen_days at all. Jinja's format filter
+     raises TypeError on None, which turns one missing number into a 500 for
+     the whole page. #}
+  <td>{{ o.score if o.score is not none else '&mdash;'|safe }}</td>
+  <td>{{ '%.1f'|format(o.vmag) if o.vmag is not none else '&mdash;'|safe }}</td>
+  <td>{{ o.nobs if o.nobs is not none else '&mdash;'|safe }}</td>
+  <td>{{ '%.3f'|format(o.arc_days) if o.arc_days is not none else '&mdash;'|safe }}</td>
+  <td>{{ '%.2f'|format(o.not_seen_days) if o.not_seen_days is not none else '&mdash;'|safe }}</td>
 </tr>
 <tr class="histrow" hidden data-desig="{{ o.desig }}">
   <td colspan="10"></td>
