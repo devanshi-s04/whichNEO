@@ -16,12 +16,21 @@
     <table class="mini">
       <tr><th>Time (UT)</th><th>Score</th><th>V</th><th>NObs</th><th>Arc</th>
           <th>H</th><th>Unseen</th><th>Note</th></tr>
+      {# Same rule as _history_rows.html on the dashboard: every polled column
+         is nullable on its own terms. NEOCP omits values for an object it
+         knows little about, and a snapshot reconstructed from an archive
+         carries only the fields that archive kept -- 150 rows across 90
+         designations currently have no hmag or not_seen_days. Jinja's format
+         filter raises TypeError on None, so one missing number takes the
+         whole target page down. #}
       {% for h in hist_rows %}
       <tr><td style="color:var(--ink)">{{ h.snapshot_ts[:16] }}</td>
-          <td>{{ h.score }}</td><td>{{ '%.1f'|format(h.vmag) }}</td>
-          <td>{{ h.nobs }}</td><td>{{ '%.3f'|format(h.arc_days) }}</td>
-          <td>{{ '%.1f'|format(h.hmag) }}</td>
-          <td>{{ '%.2f'|format(h.not_seen_days) }}</td>
+          <td>{{ h.score if h.score is not none else '&mdash;'|safe }}</td>
+          <td>{{ '%.1f'|format(h.vmag) if h.vmag is not none else '&mdash;'|safe }}</td>
+          <td>{{ h.nobs if h.nobs is not none else '&mdash;'|safe }}</td>
+          <td>{{ '%.3f'|format(h.arc_days) if h.arc_days is not none else '&mdash;'|safe }}</td>
+          <td>{{ '%.1f'|format(h.hmag) if h.hmag is not none else '&mdash;'|safe }}</td>
+          <td>{{ '%.2f'|format(h.not_seen_days) if h.not_seen_days is not none else '&mdash;'|safe }}</td>
           <td class="dim">{{ h.update_note }}</td></tr>
       {% endfor %}
     </table>
