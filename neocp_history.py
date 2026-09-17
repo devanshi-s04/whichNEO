@@ -70,7 +70,12 @@ CREATE TABLE IF NOT EXISTS snapshots (
     not_seen_days  REAL,
     update_note    TEXT,
     note_flag      TEXT,
-    is_new         INTEGER
+    is_new         INTEGER,
+    -- 1 for a row reconstructed from an archived run rather than observed by
+    -- this poller. Those are daily samples, not five-minute polls, and they
+    -- carry only the fields the archive kept -- so anything reasoning about
+    -- cadence, or about a column they do not have, must exclude them.
+    retrospective  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_desig ON snapshots(desig, snapshot_ts);
 
@@ -116,6 +121,10 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+_ADDED_SNAPSHOT_COLUMNS = [
+    ("retrospective", "INTEGER NOT NULL DEFAULT 0"),
+]
+
 _ADDED_COLUMNS = [
     ("linked_desig", "TEXT"),
     ("mpec", "TEXT"),
@@ -142,6 +151,10 @@ def ensure_db():
     for name, decl in _ADDED_COLUMNS:
         if name not in have:
             con.execute(f"ALTER TABLE objects ADD COLUMN {name} {decl}")
+    have = {r[1] for r in con.execute("PRAGMA table_info(snapshots)")}
+    for name, decl in _ADDED_SNAPSHOT_COLUMNS:
+        if name not in have:
+            con.execute(f"ALTER TABLE snapshots ADD COLUMN {name} {decl}")
     con.commit()
     return con
 
@@ -328,6 +341,51 @@ def backfill_from_scores(con, score_desigs, now=None):
     con.commit()
     resolved = apply_resolutions(con, fetch_prevdes_entries(), now)
     return len(fresh), resolved
+
+
+def import_archived_run(con, night, meta, snapshot_ts):
+    """Reconstruct one poll from a banked ds42 run's view of the board.
+
+    The runs under ds42/runs/<night>/ carry meta.json: the board's own score,
+    V, nobs, arc and observability for every object it considered that night.
+    That is a genuine observation of NEOCP state at a known time, and it is
+    the only record of those nights that exists -- this poller was not running
+    then, and MPC keeps no archive of past listings.
+
+    Marked retrospective, because it is one daily sample rather than a
+    five-minute poll and carries only the fields the run kept. Anything
+    reasoning about cadence has to exclude these, and anything reading
+    ra_deg or note_flag will find them NULL.
+
+    Idempotent: a night already imported is skipped, so this can be re-run.
+    """
+    already = con.execute(
+        "SELECT count(*) FROM snapshots WHERE snapshot_ts = ?",
+        (snapshot_ts,)).fetchone()[0]
+    if already:
+        return 0, 0
+
+    inserted = tracked = 0
+    for desig, m in sorted(meta.items()):
+        con.execute(
+            "INSERT INTO snapshots (desig, snapshot_ts, score, vmag, nobs, "
+            "arc_days, retrospective) VALUES (?,?,?,?,?,?,1)",
+            (desig, snapshot_ts, m.get("score"), m.get("vmag"),
+             m.get("nobs"), m.get("arc")))
+        inserted += 1
+        # first_seen only moves earlier; last_seen only later. A night
+        # imported out of order must not make an object look younger than it
+        # is, and the live poller has been writing these since today.
+        cur = con.execute(
+            "INSERT INTO objects (desig, first_seen_ts, last_seen_ts, status, "
+            "retrospective) VALUES (?,?,?,'pending',1) "
+            "ON CONFLICT(desig) DO UPDATE SET "
+            "  first_seen_ts = min(first_seen_ts, excluded.first_seen_ts),"
+            "  last_seen_ts  = max(last_seen_ts,  excluded.last_seen_ts)",
+            (desig, snapshot_ts, snapshot_ts))
+        tracked += cur.rowcount
+    con.commit()
+    return inserted, tracked
 
 
 def poll_once():
