@@ -96,7 +96,7 @@
       <tr><th>Inclination</th><td>{{ '%.1f'|format(row.incl) ~ '&deg;'|safe if row.incl is not none else '—' }}</td></tr>
       <tr><th>NEO-like</th><td>
         {% if row.q is none %}<span class="dim">no orbit data</span>
-        {% elif row.q < config.NEO_Q_MAX or row.e > config.NEO_E_MIN %}yes
+        {% elif row.q < site.neo_q_max or row.e > site.neo_e_min %}yes
         {% else %}no{% endif %}</td></tr>
       <tr><th>Scatteredness</th><td>
         {% if row.scatteredness %}{{ row.scatteredness[0] }}&Prime; &times; {{ row.scatteredness[1] }}&Prime;
@@ -148,7 +148,7 @@
         {% if now_pos and now_pos.up %}
           {{ '%.1f'|format(now_pos.alt) }}&deg; / {{ '%.1f'|format(now_pos.az) }}&deg;
         {% elif now_pos and now_pos.next_ts %}
-          <span class="dim">below {{ config.MPC_SERVER_MIN_ALT|int }}&deg; &mdash; not up</span>
+          <span class="dim">below {{ site.mpc_server_min_alt|int }}&deg; &mdash; not up</span>
         {% elif now_pos %}
           <span class="dim">not up again tonight</span>
         {% else %}<span class="dim">no ephemeris cached</span>{% endif %}</td></tr>
@@ -161,7 +161,7 @@
       <tr><th>Pointing row</th><td>
         {% if row.cur_alt is not none %}{{ '%.1f'|format(row.cur_alt) }}&deg; / {{ '%.1f'|format(row.cur_az) }}&deg;
           <span class="dim">&mdash; the nearest usable ephemeris row, interpolated
-          {{ config.INTERPOLATE_AHEAD_S // 60 }} min ahead for slewing</span>
+          {{ site.interpolate_ahead_s // 60 }} min ahead for slewing</span>
         {% else %}—{% endif %}</td></tr>
       <tr><th>Sky motion</th><td>{{ '%.2f'|format(row.cur_motion) ~ '&Prime;/min'|safe if row.cur_motion is not none else '—' }}</td></tr>
       <tr><th>Moon separation</th><td>{{ '%.0f'|format(row.cur_moon_dist) ~ '&deg;'|safe if row.cur_moon_dist is not none else '—' }}</td></tr>
@@ -186,7 +186,7 @@
   In the staralt style: the object's altitude (solid) and the Moon's altitude
   (dashed), across dusk to dawn. The shaded band is the window
   <code>pipeline.py</code> judged actually usable; the red dashed line is the
-  {{ config.MPC_SERVER_MIN_ALT|int }}&deg; floor below which MPC's normal
+  {{ site.mpc_server_min_alt|int }}&deg; floor below which MPC's normal
   fetch never sends a row at all.
   <br><br>
   <strong>Any remaining "no data" span is a real hole</strong>, not a bug: it

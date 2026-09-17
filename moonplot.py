@@ -25,6 +25,11 @@ import time
 import config
 
 
+def _site(site):
+    """The site to work on. None means the deployment's default."""
+    return config.DEFAULT_SITE if site is None else site
+
+
 def _y_ticks(lo, hi):
     for step in (10, 15, 30, 45, 60, 90):
         if (hi - lo) / step <= 6:
@@ -45,15 +50,15 @@ def _crossing_ts(a, b, thresh):
     return a.ts + frac * (b.ts - a.ts) if 0.0 <= frac <= 1.0 else None
 
 
-def _twilight_bounds(pts):
+def _twilight_bounds(pts, site=None):
     """Evening twilight (dusk) and morning twilight (dawn), i.e. where the
     Sun crosses the observatory's own dark-enough-to-observe threshold
-    (config.SUN_ALT_MAX) -- found from sun_alt, which every cached row
+    (the site's sun_alt_max) -- found from sun_alt, which every cached row
     already carries, rather than a fresh astropy call on page load. Falls
     back to the data's own first/last timestamp when a crossing isn't
     bracketed by any two rows (an ephemeris that never reaches daylight).
     """
-    thresh = config.SUN_ALT_MAX
+    thresh = _site(site).sun_alt_max
     dusk = dawn = None
     for a, b in zip(pts, pts[1:]):
         if a.sun_alt > thresh >= b.sun_alt and dusk is None:
@@ -68,7 +73,7 @@ def _twilight_bounds(pts):
 
 def render_svg(rows, window_start_ts=None, window_end_ts=None,
                 size_w=560, size_h=320, localt=None, tzlabel=None,
-                moon_track=None):
+                moon_track=None, site=None):
     """Inline SVG: object altitude and Moon altitude vs. time, with the
     angular separation to the Moon printed under every point.
 
@@ -101,12 +106,13 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
     horizontal slot, so the plot widens automatically once there are enough
     points that a fixed width would run them into each other.
     """
+    s = _site(site)
     fmt = localt or (lambda ts: time.strftime("%H:%M", time.gmtime(ts)))
     pts = sorted(rows, key=lambda r: r.ts) if rows else []
     if len(pts) < 2:
         return None
 
-    dusk_ts, dawn_ts = _twilight_bounds(pts)
+    dusk_ts, dawn_ts = _twilight_bounds(pts, s)
     in_night = [r for r in pts if dusk_ts <= r.ts <= dawn_ts]
     if len(in_night) >= 2:
         pts = in_night
@@ -213,13 +219,14 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
                      f'font-family="monospace">{label}</text>')
 
     # The dashed cutoff line, in the staralt convention. It draws MPC's own
-    # floor rather than config.MIN_ALT: we pass oalt=20 in ephemeris._post, so
-    # MPC never returns a row below 20 degrees and the curve physically cannot
-    # go under this line. MIN_ALT is 15 and therefore dead -- drawing it would
-    # imply a dome limit that never actually applies, and leave empty space
-    # beneath the curve that no data could ever occupy. Which of the two the
-    # observatory really wants is open question 4 in TBD.md.
-    floor = config.MPC_SERVER_MIN_ALT
+    # floor rather than the site's min_alt: we pass oalt=20 in
+    # ephemeris._post, so MPC never returns a row below 20 degrees and the
+    # curve physically cannot go under this line. min_alt is 15 and therefore
+    # dead -- drawing it would imply a dome limit that never actually applies,
+    # and leave empty space beneath the curve that no data could ever occupy.
+    # Which of the two the observatory really wants is open question 4 in
+    # TBD.md.
+    floor = s.mpc_server_min_alt
     if lo <= floor <= hi:
         yy = py(floor)
         parts.append(f'<line x1="{pad_l}" y1="{yy:.1f}" x2="{pad_l + inner_w}" '
@@ -260,7 +267,7 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
     # shaded usable window above.
     label_y0 = pad_t + inner_h + 13 + 6   # below the tick-label row
     for r in pts:
-        clear = r.moon_dist > config.MOON_SEP_MIN
+        clear = r.moon_dist > s.moon_sep_min
         color = "var(--go)" if clear else "var(--warn)"
         cx = px(r.ts)
         # Local on the axis, both here: UT is what MPC, the plan file and the
@@ -272,7 +279,7 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
                      f' &#8212; object {r.alt:.0f}&#176;, Moon {r.moon_alt:.0f}&#176;, '
                      f'{r.moon_dist:.0f}&#176; apart '
                      f'({"clears" if clear else "within"} the '
-                     f'{config.MOON_SEP_MIN:g}&#176; limit)</title></circle>')
+                     f'{s.moon_sep_min:g}&#176; limit)</title></circle>')
         # Angular separation, written vertically under its point -- rotating
         # turns the label's reading direction downward instead of sideways,
         # so points spaced only ~11px apart still get a legible label each.
@@ -322,10 +329,10 @@ def render_svg(rows, window_start_ts=None, window_end_ts=None,
                  f'font-size="9" font-family="monospace">Moon</text>')
     parts.append(f'<circle cx="{lx + 8}" cy="{ly + 26}" r="2.2" fill="var(--go)"/>')
     parts.append(f'<text x="{lx + 20}" y="{ly + 29}" fill="#9fb0c3" font-size="9" '
-                 f'font-family="monospace">&gt;{config.MOON_SEP_MIN:g}&#176; from Moon</text>')
+                 f'font-family="monospace">&gt;{s.moon_sep_min:g}&#176; from Moon</text>')
     parts.append(f'<circle cx="{lx + 8}" cy="{ly + 39}" r="2.2" fill="var(--warn)"/>')
     parts.append(f'<text x="{lx + 20}" y="{ly + 42}" fill="#9fb0c3" font-size="9" '
-                 f'font-family="monospace">&#8804;{config.MOON_SEP_MIN:g}&#176; '
+                 f'font-family="monospace">&#8804;{s.moon_sep_min:g}&#176; '
                  f'from Moon</text>')
 
     parts.append(f'<text x="{size_w / 2:.0f}" y="{size_h - 4}" fill="#556074" '

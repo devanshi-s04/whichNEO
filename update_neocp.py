@@ -42,19 +42,20 @@ def setup_logging(verbose=False):
                   logging.StreamHandler(sys.stdout)])
 
 
-def cheap_reject(t):
+def cheap_reject(t, site=None):
     """Filters needing no network. Ordered cheapest first."""
+    s = config.DEFAULT_SITE if site is None else site
     out = []
-    if t["score"] < config.MIN_SCORE:
+    if t["score"] < s.min_score:
         out.append("LOW_SCORE")
-    if t["arc_days"] < config.MIN_ARC_DAYS:
+    if t["arc_days"] < s.min_arc_days:
         out.append("SHORT_ARC")
-    if t["not_seen_days"] > config.MAX_NOT_SEEN_DAYS:
+    if t["not_seen_days"] > s.max_not_seen_days:
         out.append("NOT_SEEN")
-    if t["desig"] in config.BLACKLIST:
+    if t["desig"] in s.blacklist:
         out.append("BLACKLISTED")
-    if config.NEO_ONLY and t.get("q") is not None and t.get("e") is not None:
-        if not (t["q"] < config.NEO_Q_MAX or t["e"] > config.NEO_E_MIN):
+    if s.neo_only and t.get("q") is not None and t.get("e") is not None:
+        if not (t["q"] < s.neo_q_max or t["e"] > s.neo_e_min):
             out.append("NOT_NEO")
     return out
 
@@ -172,7 +173,12 @@ def _backfill_history_once(conn, hist_conn):
         logging.exception("history backfill failed; will retry next cycle")
 
 
-def run_update(conn, hist_conn=None, source=None):
+def run_update(conn, hist_conn=None, source=None, site=None):
+    # One site per cycle, resolved once and threaded through everything
+    # below. The NEOCP list, the ds42 scoring and the history are about the
+    # object rather than the observatory, so when this loop grows to several
+    # sites they stay outside it -- see multisite.md.
+    site = config.DEFAULT_SITE if site is None else site
     timings = {}
     t0 = time.perf_counter()
 
@@ -188,7 +194,7 @@ def run_update(conn, hist_conn=None, source=None):
     # after they do there is no other record of where a resolved-and-removed
     # object actually was.
     outgoing_night = db.get_meta(conn, "night")
-    incoming_night = pipeline.night_label(time.time())
+    incoming_night = pipeline.night_label(time.time(), site)
     if outgoing_night and outgoing_night != incoming_night:
         try:
             db.archive_night(conn, outgoing_night)
@@ -227,14 +233,14 @@ def run_update(conn, hist_conn=None, source=None):
     for t in targets:
         o = orbits.get(t["desig"]) or {}
         t["q"], t["e"], t["incl"] = o.get("q"), o.get("e"), o.get("incl")
-        t["cheap_reject"] = cheap_reject(t)
+        t["cheap_reject"] = cheap_reject(t, site)
 
     now = time.time()
     cache = db.load_cache(conn)
     candidates = [t for t in targets if not t["cheap_reject"]]
 
     stale = [t for t in candidates if needs_refetch(cache.get(t["desig"]), t, now)]
-    fresh = ephemeris.fetch_many(t["desig"] for t in stale)
+    fresh = ephemeris.fetch_many((t["desig"] for t in stale), site=site)
     mark("fetch_ephemerides")
 
     # Auxiliary pages, only for objects we just refetched. Three more
@@ -251,11 +257,11 @@ def run_update(conn, hist_conn=None, source=None):
         # discovering observatory, and -- since the records were being parsed
         # and thrown away anyway -- the records themselves, which are what
         # ds42 scores and the only copy we will ever have of them.
-        obs = ephemeris.observations(e.observations_url) or {}
+        obs = ephemeris.observations(e.observations_url, site=site) or {}
         # No altitude floor, scoped only to filling holes in the altitude
         # plot -- see fetch_gap_fill's own docstring for why this is safe
         # to loosen here without touching the normal fetch above.
-        gap_fill = ephemeris.fetch_gap_fill(t["desig"])
+        gap_fill = ephemeris.fetch_gap_fill(t["desig"], site=site)
         return t["desig"], (ephemeris.signature(t), {
             "lines": [r.line for r in e.rows],
             "gap_fill_lines": [r.line for r in gap_fill.rows],
@@ -323,14 +329,14 @@ def run_update(conn, hist_conn=None, source=None):
         t["observed_from_site"] = payload.get("observed_from_site")
         t["discovery_code"] = payload.get("discovery_code")
         t["obs_codes"] = payload.get("obs_codes")
-        pipeline.analyze(t, eph, orbits.get(t["desig"]), now=now)
+        pipeline.analyze(t, eph, orbits.get(t["desig"]), now=now, site=site)
     mark("analyze")
 
-    pipeline.crosscheck_all(targets, now + config.INTERPOLATE_AHEAD_S)
+    pipeline.crosscheck_all(targets, now + site.interpolate_ahead_s, site)
     mark("crosscheck")
 
-    ranking.rank(targets)
-    ordered = ranking.sort_targets(targets)
+    ranking.rank(targets, site)
+    ordered = ranking.sort_targets(targets, site=site)
     for t in ordered:
         t["max_alt_utc"] = (time.strftime("%Y-%m-%d %H:%M",
                                           time.gmtime(t["max_alt_ts"]))
@@ -346,7 +352,7 @@ def run_update(conn, hist_conn=None, source=None):
         t["plan_block"] = output.plan_entry(t) if t.get("observable") else None
     mark("rank")
 
-    night = pipeline.night_label(now)
+    night = pipeline.night_label(now, site)
     plan_path = None
     if config.WRITE_NIGHTLY_PLAN:
         plan_path = output.write_plan(ordered, night)

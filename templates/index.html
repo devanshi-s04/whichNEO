@@ -78,7 +78,7 @@
           <td class="n">&mdash;</td></tr>
       <tr><td><span class="sw poll"></span></td><td>In poor sky now</td>
           <td class="n">{{ sky.flagged }}</td></tr>
-      {% for start, end, minalt, reason in config.KEEPOUT_WEDGES %}
+      {% for start, end, minalt, reason in site.keepout_wedges %}
       <tr><td><span class="sw keepout"></span></td>
           <td>Keep out &mdash; below {{ minalt|int }}&deg;,
               {{ start|int }}&deg;&ndash;{{ end|int }}&deg;</td>
@@ -92,7 +92,7 @@
     </table>
     <p class="cap">
       {% if sky.moon and sky.moon.alt > 0 %}
-        The dashed line is {{ config.MOON_SEP_MIN|int }}&deg; from the moon.
+        The dashed line is {{ site.moon_sep_min|int }}&deg; from the moon.
         It is not a circle: a fixed angular separation projects to a
         distorted shape, so it is drawn from the real locus.
       {% else %}
@@ -231,9 +231,9 @@
                  value="{{ '%g'|format(range[1]) if range and range[1] is not none else '' }}">
         </div>
         {% if key == 'alt' %}
-        {% set below_floor = range and ((range[0] is not none and range[0] < config.MIN_ALT) or (range[1] is not none and range[1] < config.MIN_ALT)) %}
+        {% set below_floor = range and ((range[0] is not none and range[0] < site.min_alt) or (range[1] is not none and range[1] < site.min_alt)) %}
         <div class="filter-warn" id="warn-alt" {{ 'hidden' if not below_floor }}>
-          Below {{ config.MIN_ALT|int }}&deg; cannot be observed from here
+          Below {{ site.min_alt|int }}&deg; cannot be observed from here
         </div>
         {% endif %}
       </div>
@@ -241,9 +241,9 @@
     </div>
   </details>
   <span class="rules">
-    score&nbsp;&ge;&nbsp;{{ config.MIN_SCORE }} &middot; V&nbsp;&le;&nbsp;{{ config.MAX_MAG }} &middot;
-    motion&nbsp;&ge;&nbsp;{{ config.MIN_MOTION }}&Prime;/min &middot; moon&nbsp;&ge;&nbsp;{{ config.MOON_SEP_MIN }}&deg; &middot;
-    sun&nbsp;&lt;&nbsp;{{ config.SUN_ALT_MAX }}&deg;
+    score&nbsp;&ge;&nbsp;{{ site.min_score }} &middot; V&nbsp;&le;&nbsp;{{ site.max_mag }} &middot;
+    motion&nbsp;&ge;&nbsp;{{ site.min_motion }}&Prime;/min &middot; moon&nbsp;&ge;&nbsp;{{ site.moon_sep_min }}&deg; &middot;
+    sun&nbsp;&lt;&nbsp;{{ site.sun_alt_max }}&deg;
   </span>
 </div>
 
@@ -279,8 +279,8 @@
   <div class="folded">
     <table class="mini">
       <tr><th>Sector</th><th>Azimuth</th><th>Prefer above</th><th>Effect</th></tr>
-      {% for start, end, minalt, hardness in config.HORIZON_MASK %}
-      <tr><td style="color:var(--ink)">{{ config.SECTOR_NAMES[loop.index0] }}</td>
+      {% for start, end, minalt, hardness in site.horizon_mask %}
+      <tr><td style="color:var(--ink)">{{ site.sector_names[loop.index0] }}</td>
           <td>{{ start }}&ndash;{{ end }}&deg;</td>
           <td style="{{ 'color:var(--warn)' if minalt is none }}">{{ 'any altitude' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td>
           <td style="{{ 'color:var(--no)' if hardness == 'hard' else 'color:var(--warn)' }}">{{ 'rejected' if hardness == 'hard' else 'warned' }}</td></tr>
@@ -292,7 +292,7 @@
       carrying a badge. The north is avoided because Trieste sits 41 km away
       at bearing 3&deg; and lights that sky, not because anything obstructs
       it &mdash; and an impactor found in the north has to appear on this
-      board. Mark a sector <em>hard</em> in <code>config.HORIZON_MASK</code>
+      board. Mark a sector <em>hard</em> in <code>site.horizon_mask</code>
       only once it is confirmed as a physical obstruction. The observatory's
       own planner has no azimuth mask at all, only a flat altitude floor.
       <br><br>
@@ -303,23 +303,23 @@
       &mdash; read as compass, five of 579 targets fall in the north; read
       raw, north would be the busiest sector on the sky.
       <br><br>
-      <strong>Shoot</strong> is {{ config.EXPOSURE_FRAMES }} frames for every
+      <strong>Shoot</strong> is {{ site.exposure_frames }} frames for every
       target, with the frame length set by how fast the object is moving at its
       best altitude &mdash; the observatory's own table:
-      {% for limit, secs in config.EXPOSURE_SPEED_BANDS %}&le;{{ limit|int }}&Prime;/min
+      {% for limit, secs in site.exposure_speed_bands %}&le;{{ limit|int }}&Prime;/min
       &rarr; {{ secs }}s{{ ', ' if not loop.last }}{% endfor %},
-      faster &rarr; {{ config.EXPOSURE_FASTEST_SEC }}s.
+      faster &rarr; {{ site.exposure_fastest_sec }}s.
       <br><br>
       The plan file also still carries <code>obsExposure</code>, the legacy
       figure from <code>planets-new.py</code>: total integration in minutes
       from magnitude alone,
-      <code>{{ config.EXPOSURE_BASE_MIN|int }} + (V &minus; {{ config.EXPOSURE_REF_MAG|int }}) &times; {{ config.EXPOSURE_MIN_PER_MAG|int }}</code>,
-      floored at {{ config.EXPOSURE_FLOOR_MIN|int }} (unfloored it goes
+      <code>{{ site.exposure_base_min|int }} + (V &minus; {{ site.exposure_ref_mag|int }}) &times; {{ site.exposure_min_per_mag|int }}</code>,
+      floored at {{ site.exposure_floor_min|int }} (unfloored it goes
       negative for bright targets, and the observatory's own files contain
       <code>obsExposure=-2.0min</code>). It ignores sky motion entirely, so it
       will not agree with <em>Shoot</em> &mdash; a slow target is
-      {{ config.EXPOSURE_FRAMES }}&times;{{ config.EXPOSURE_SPEED_BANDS[0][1] }}s
-      = {{ (config.EXPOSURE_FRAMES * config.EXPOSURE_SPEED_BANDS[0][1] / 60)|int }}
+      {{ site.exposure_frames }}&times;{{ site.exposure_speed_bands[0][1] }}s
+      = {{ (site.exposure_frames * site.exposure_speed_bands[0][1] / 60)|int }}
       minutes on sky against an obsExposure nearer 27.
       <strong>Shoot is the instruction.</strong>
       <br><br>
@@ -342,7 +342,7 @@
   <p>Positions come from MPC ephemerides generated for L01 and are recomputed
   independently with astropy each cycle, so a disagreement is flagged rather
   than hidden. The pointing line is interpolated
-  {{ config.INTERPOLATE_AHEAD_S // 60 }} minutes ahead to allow for slewing.</p>
+  {{ site.interpolate_ahead_s // 60 }} minutes ahead to allow for slewing.</p>
   <p>Clock times on this page are <em>{{ tzname }}</em>, local to the
   observatory; hover any of them for UT. The plan file and the ephemeris lines
   inside it stay in <em>UT</em>, because that is what MPC and the 80-column
@@ -583,7 +583,7 @@ function applyRangeFilters() {
 // The horizon floor is a physical limit (pipeline.row_rejections), not a
 // preference -- no target can ever have an altitude below it, so warn
 // immediately rather than let someone wait on an empty table wondering why.
-const MIN_ALT_DEG = {{ config.MIN_ALT }};
+const MIN_ALT_DEG = {{ site.min_alt }};
 function checkAltWarning() {
   const warn = document.getElementById('warn-alt');
   if (!warn) return;

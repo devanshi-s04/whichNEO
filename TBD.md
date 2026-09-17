@@ -10,7 +10,7 @@ they are still what you actually use rather than what the code drifted to.
 ## 1. Dome / horizon geometry — which sectors are real obstructions?
 
 **The question has changed shape.** The mask no longer removes anything. Every
-sector is now marked `"soft"` in `config.HORIZON_MASK`, meaning a target in
+sector is now marked `"soft"` in the site's `horizon_mask`, meaning a target in
 poor sky stays in the queue carrying a warning badge rather than vanishing.
 
 That change was made because the reason for avoiding the north is Trieste's

@@ -122,18 +122,19 @@ def fetch_neocp_info(timeout=None):
     return r.text
 
 
-def ephemeris_url(desig):
-    """MPC ephemeris CGI URL for one NEOCP object, generated for L01."""
+def ephemeris_url(desig, site=None):
+    """MPC ephemeris CGI URL for one NEOCP object, generated for a site."""
+    obscode = (config.DEFAULT_SITE if site is None else site).obscode
     return (
         "https://cgi.minorplanetcenter.net/cgi-bin/confirmeph2.cgi"
-        f"?Obj={desig}&obscode={config.MPC_CODE}"
+        f"?Obj={desig}&obscode={obscode}"
     )
 
 
-def fetch_ephemeris(desig, timeout=30):
+def fetch_ephemeris(desig, timeout=30, site=None):
     """On-demand per-object ephemeris. Only called when an observer opens a
     target, so the 5-minute update loop stays a single HTTP request."""
-    url = ephemeris_url(desig)
+    url = ephemeris_url(desig, site)
     if not url.startswith(config.ALLOWED_HOSTS):
         raise ValueError(f"refusing to fetch disallowed URL: {url}")
     r = requests.get(url, timeout=timeout, headers=_UA)

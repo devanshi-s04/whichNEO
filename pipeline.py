@@ -3,12 +3,15 @@
 Sources per object:
   * neocp.txt      -- designation, digest2 score, arc, not-seen, nobs
   * neocp_info     -- q, e, a, inclination
-  * confirmeph2    -- the night's ephemeris rows, computed by MPC for L01
+  * confirmeph2    -- the night's ephemeris rows, computed by MPC for the site
 
 Ordering matters: ephemeris rows are screened for observability first, and the
 maximum-altitude row is then the best *observable* moment, not the object's
 astronomical peak (which is often in daylight). The legacy planner does the
 same thing; getting it backwards would schedule targets for noon.
+
+Everything here is relative to one observatory, so every entry point takes a
+`site`; passing none means the deployment's default.
 """
 
 import time
@@ -18,96 +21,104 @@ import ephemeris
 import observability
 
 
-def night_bounds(now=None):
+def _site(site):
+    """The site to work on. None means the deployment's default."""
+    return config.DEFAULT_SITE if site is None else site
+
+
+def night_bounds(now=None, site=None):
     """The observing night containing `now`, as (start_ts, end_ts) UTC.
 
-    A night runs from NIGHT_ROLLOVER_HOUR_UT to the same hour the next day, so
-    a session spanning midnight stays a single unit.
+    A night runs from the site's rollover hour to the same hour the next day,
+    so a session spanning midnight stays a single unit.
     """
     now = now if now is not None else time.time()
     t = time.gmtime(now)
     day_start = now - (t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec)
-    start = day_start + config.NIGHT_ROLLOVER_HOUR_UT * 3600
+    start = day_start + _site(site).night_rollover_hour_ut * 3600
     if now < start:
         start -= 86400
     return start, start + 86400
 
 
-def night_label(now=None):
-    start, _ = night_bounds(now)
+def night_label(now=None, site=None):
+    start, _ = night_bounds(now, site)
     return time.strftime("%Y-%m-%d", time.gmtime(start))
 
 
-def row_rejections(row, night_end_ts):
+def row_rejections(row, night_end_ts, site=None):
     """Why this ephemeris row cannot be observed. Empty means it can.
 
     These are hard limits only -- physics and the clock. The horizon mask is
-    deliberately NOT here: see row_mask_flags below and the HARDNESS note in
-    config.HORIZON_MASK. A sector that is merely light-polluted must never
+    deliberately NOT here: see row_mask_flags below and the HARDNESS note on
+    the site's horizon mask. A sector that is merely light-polluted must never
     delete a target, because an object discovered there would then never
     appear on the board at all.
     """
+    s = _site(site)
     out = []
-    if row.sun_alt > config.SUN_ALT_MAX:
+    if row.sun_alt > s.sun_alt_max:
         out.append("nearSun")
-    if row.alt < config.MIN_ALT:
+    if row.alt < s.min_alt:
         out.append("altLow")
-    if row.moon_dist < config.MOON_SEP_MIN:
+    if row.moon_dist < s.moon_sep_min:
         out.append("nearMoon")
     if row.ts > night_end_ts:
         out.append("tooLate")
-    if row.motion < config.MIN_MOTION:
+    if row.motion < s.min_motion:
         out.append("tooSlow")
 
     # Equipment safety first, and unconditionally: a row inside a keep-out
     # wedge can never become usable, so it can never be the peak, the pointing
     # row, or a line in the plan file. Nothing downstream has to remember to
     # re-check it.
-    if observability.keepout_violation(row.az, row.alt):
+    if observability.keepout_violation(row.az, row.alt, s):
         out.append("keepOut")
 
-    reason, hard = observability.mask_violation(row.az, row.alt)
+    reason, hard = observability.mask_violation(row.az, row.alt, s)
     if reason and hard:
         out.append(reason)
-    if config.MAX_ALTITUDE is not None and row.alt > config.MAX_ALTITUDE:
+    if s.max_altitude is not None and row.alt > s.max_altitude:
         out.append("tooHigh")
     return out
 
 
-def row_mask_flags(row):
+def row_mask_flags(row, site=None):
     """Soft horizon-mask warnings for one row. Empty means clear sky.
 
     A flagged row stays perfectly usable. The flag exists so the board can
     say 'this one is down the light dome' rather than quietly losing it.
     """
-    reason, hard = observability.mask_violation(row.az, row.alt)
+    s = _site(site)
+    reason, hard = observability.mask_violation(row.az, row.alt, s)
     if reason and not hard:
         idx = int(observability.sector_index(row.az))
-        return [f"{reason}:{config.SECTOR_NAMES[idx]}"]
+        return [f"{reason}:{s.sector_names[idx]}"]
     return []
 
 
-def usable_rows(eph, night_end_ts):
+def usable_rows(eph, night_end_ts, site=None):
     """Rows we can actually observe, plus a count of why the rest were cut.
 
     Soft mask warnings are counted in the same report under a `soft:` prefix,
     so the detail page can show how much of a night sits in poor sky without
     those rows having been removed.
     """
+    s = _site(site)
     keep, report = [], {}
     for r in eph.rows:
-        reasons = row_rejections(r, night_end_ts)
+        reasons = row_rejections(r, night_end_ts, s)
         if reasons:
             report[reasons[0]] = report.get(reasons[0], 0) + 1
             continue
         keep.append(r)
-        for f in row_mask_flags(r):
+        for f in row_mask_flags(r, s):
             key = "soft:" + f
             report[key] = report.get(key, 0) + 1
     return keep, report
 
 
-def _best_row(rows):
+def _best_row(rows, site=None):
     """Highest row, preferring sky that carries no soft warning.
 
     Without the preference an object could advertise a fine 60-degree peak
@@ -115,16 +126,18 @@ def _best_row(rows):
     but clean moment went unmentioned. Only if every row is flagged does the
     peak come from a flagged one -- and then the target is badged.
     """
-    clean = [r for r in rows if not row_mask_flags(r)]
+    s = _site(site)
+    clean = [r for r in rows if not row_mask_flags(r, s)]
     pool = clean or rows
     return max(pool, key=lambda r: r.alt), not clean
 
 
-def analyze(target, eph, orbit, now=None):
+def analyze(target, eph, orbit, now=None, site=None):
     """Annotate one target in place with ephemeris-derived fields and the
-    reasons, if any, that it should not be observed tonight."""
+    reasons, if any, that it should not be observed from this site tonight."""
+    s = _site(site)
     now = now if now is not None else time.time()
-    _, night_end = night_bounds(now)
+    _, night_end = night_bounds(now, s)
     discard = []
 
     target["q"] = orbit.get("q") if orbit else None
@@ -135,34 +148,34 @@ def analyze(target, eph, orbit, now=None):
     target["map_url"] = eph.map_url if eph else None
     target["offsets_url"] = eph.offsets_url if eph else None
 
-    rows, report = usable_rows(eph, night_end) if eph else ([], {})
+    rows, report = usable_rows(eph, night_end, s) if eph else ([], {})
     target["eph_rows_total"] = len(eph.rows) if eph else 0
     target["eph_rows_usable"] = len(rows)
     target["eph_report"] = report
 
     # --- object-level filters, cheapest first ---
-    if target["score"] < config.MIN_SCORE:
+    if target["score"] < s.min_score:
         discard.append("LOW_SCORE")
-    if target["arc_days"] < config.MIN_ARC_DAYS:
+    if target["arc_days"] < s.min_arc_days:
         discard.append("SHORT_ARC")
-    if target["not_seen_days"] > config.MAX_NOT_SEEN_DAYS:
+    if target["not_seen_days"] > s.max_not_seen_days:
         discard.append("NOT_SEEN")
-    if target["desig"] in config.BLACKLIST:
+    if target["desig"] in s.blacklist:
         discard.append("BLACKLISTED")
 
-    if config.NEO_ONLY and target["q"] is not None and target["e"] is not None:
-        if not (target["q"] < config.NEO_Q_MAX or target["e"] > config.NEO_E_MIN):
+    if s.neo_only and target["q"] is not None and target["e"] is not None:
+        if not (target["q"] < s.neo_q_max or target["e"] > s.neo_e_min):
             discard.append("NOT_NEO")
 
     sc = target.get("scatteredness")
     if sc:
-        target["scattered_warn"] = (sc[0] > config.SCATTEREDNESS_WARN[0]
-                                    or sc[1] > config.SCATTEREDNESS_WARN[1])
-        if (sc[0] > config.MAX_SCATTEREDNESS[0]
-                or sc[1] > config.MAX_SCATTEREDNESS[1]):
+        target["scattered_warn"] = (sc[0] > s.scatteredness_warn[0]
+                                    or sc[1] > s.scatteredness_warn[1])
+        if (sc[0] > s.max_scatteredness[0]
+                or sc[1] > s.max_scatteredness[1]):
             discard.append("TOO_SCATTERED")
 
-    if config.SKIP_ALREADY_OBSERVED and target.get("observed_from_site"):
+    if s.skip_already_observed and target.get("observed_from_site"):
         discard.append("ALREADY_OBSERVED")
 
     # --- ephemeris-level ---
@@ -183,23 +196,23 @@ def analyze(target, eph, orbit, now=None):
                               else "!" if any(r.flag == "!" for r in rows)
                               else None)
 
-        best, all_flagged = _best_row(rows)
+        best, all_flagged = _best_row(rows, s)
         target["max_alt_row"] = best
         target["max_alt_ts"] = best.ts
         target["max_alt"] = best.alt
         # Azimuth at the peak, so the board can say which way to point and the
         # mask badge can name the sector the best moment actually falls in.
         target["max_alt_az"] = best.az
-        target["exposure_min"] = best.exposure_minutes()
+        target["exposure_min"] = best.exposure_minutes(s)
         # Frames are set by the speed at the SAME row obsExposure uses -- the
         # best-altitude moment -- so both figures on a plan line refer to one
         # instant, and neither changes under the observer as the night runs.
-        target["frames"], target["frame_sec"] = best.frame_plan()
+        target["frames"], target["frame_sec"] = best.frame_plan(s)
         target["frame_motion"] = best.motion
 
         # Soft mask state for the object as a whole: what the peak moment sits
         # in, and whether every usable moment tonight is compromised.
-        flags = list(row_mask_flags(best))
+        flags = list(row_mask_flags(best, s))
         if all_flagged and flags:
             flags.append("allNight")
         target["mask_flags"] = flags
@@ -208,10 +221,10 @@ def analyze(target, eph, orbit, now=None):
         target["window_start_ts"] = min(r.ts for r in rows)
         target["window_end_ts"] = max(r.ts for r in rows)
 
-        if best.vmag > config.MAX_MAG:
+        if best.vmag > s.max_mag:
             discard.append("TOO_FAINT")
 
-        at = now + config.INTERPOLATE_AHEAD_S
+        at = now + s.interpolate_ahead_s
         target["nearest_row"] = min(rows, key=lambda r: abs(r.ts - at))
         # Interpolate within the observable rows only. Interpolating over the
         # raw set clamps to the first row of the ephemeris, which is often in
@@ -245,7 +258,7 @@ def _contiguous_window(rows, now):
     return round(len(ordered) * step / 60.0, 1)
 
 
-def crosscheck_all(targets, at_ts):
+def crosscheck_all(targets, at_ts, site=None):
     """Recompute MPC's alt/az/moon with astropy and flag disagreements.
 
     MPC stays the source of truth; this exists so a silent change in their
@@ -267,7 +280,7 @@ def crosscheck_all(targets, at_ts):
     try:
         ours = observability.altaz_batch(
             [t["interp_row"].ra_deg for t in todo],
-            [t["interp_row"].dec_deg for t in todo], at_ts)
+            [t["interp_row"].dec_deg for t in todo], at_ts, _site(site))
     except Exception as e:
         for t in todo:
             t["crosscheck"] = {"error": f"{type(e).__name__}: {e}"}

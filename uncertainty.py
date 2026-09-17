@@ -15,7 +15,12 @@ existed to provide.
 import config
 
 
-def coverage(points, fov_arcsec=None):
+def _site(site):
+    """The site to work on. None means the deployment's default."""
+    return config.DEFAULT_SITE if site is None else site
+
+
+def coverage(points, fov_arcsec=None, site=None):
     """Fraction of the uncertainty cloud inside one centred pointing.
 
     The field is square and centred on the nominal position, matching how the
@@ -23,7 +28,7 @@ def coverage(points, fov_arcsec=None):
     """
     if not points:
         return None
-    half = (fov_arcsec or config.FOV_ARCSEC) / 2.0
+    half = (fov_arcsec or _site(site).fov_arcsec) / 2.0
     inside = sum(1 for x, y in points if abs(x) <= half and abs(y) <= half)
     return inside / len(points)
 
@@ -57,7 +62,7 @@ def _ticks(half):
     return sorted(out)
 
 
-def render_svg(points, fov_arcsec=None, size=420, title=None):
+def render_svg(points, fov_arcsec=None, size=420, title=None, site=None):
     """Inline SVG scatter of the uncertainty cloud.
 
     Scaled to the cloud, not to the field: for a well-constrained object the
@@ -68,7 +73,7 @@ def render_svg(points, fov_arcsec=None, size=420, title=None):
     if not points:
         return None
 
-    fov = fov_arcsec or config.FOV_ARCSEC
+    fov = fov_arcsec or _site(site).fov_arcsec
     ex, ey = extent(points)
     cloud_half = max(ex, ey, 1.0) * 1.18
     fov_half = fov / 2.0
