@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings &mdash; {{ site.obscode }} {{ site.name }}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+<div class="top">
+  <div class="brand">
+    <h1>{{ site.obscode }} <b>settings</b></h1>
+    <div class="where">{{ site.name }} &middot; {{ site.coords_text }}{% if telescope %} &middot; {{ telescope }}{% endif %}</div>
+  </div>
+  <div class="live">
+    <div class="stat"><div class="k">Site</div>
+      <div class="v">{{ site.obscode }}</div></div>
+    <div class="stat"><div class="k">Timezone</div>
+      <div class="v">{{ site.display_tz }}</div></div>
+    <div class="stat"><div class="k">&nbsp;</div>
+      <div class="v"><a class="chip" href="{{ url_for('index') }}">&larr; sequence</a></div></div>
+  </div>
+</div>
+
+<p class="note">
+  Everything this observatory is configured to do. <strong>Read-only for
+  now</strong> &mdash; these values come from <code>sites/{{ site.obscode }}.toml</code>.
+  Editing them in the browser is the second half of this stage, and the
+  keep-out wedge below is the reason it is being done carefully rather than
+  quickly.
+</p>
+
+<h2 class="sect">Where the telescope can point</h2>
+
+<p class="note">
+  Two different kinds of restriction live here, and collapsing them into one
+  &ldquo;minimum altitude per direction&rdquo; would be the easiest mistake
+  on this page to make. An observatory with a light dome to the north types a
+  high number, and either its northern targets vanish or its telescope is
+  pointed into a wall. So they are kept apart, and each entry says
+  <strong>why</strong> it exists &mdash; which is what tells you, six months
+  from now, whether it is safe to relax.
+</p>
+
+<div class="folded">
+  <div>{{ sky_svg|safe }}</div>
+  <div>
+    <h3 class="sub">Horizon mask &mdash; soft. Warns, never removes.</h3>
+    <table class="mini">
+      <tr><th>Sector</th><th>Azimuth</th><th>Prefer above</th><th>Effect</th><th>Why</th></tr>
+      {% for start, end, minalt, hardness, why in site.horizon_mask %}
+      <tr>
+        <td style="color:var(--ink)">{{ site.sector_names[loop.index0] }}</td>
+        <td>{{ start }}&ndash;{{ end }}&deg;</td>
+        <td style="{{ 'color:var(--warn)' if minalt is none }}">{{ 'any altitude' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td>
+        <td style="{{ 'color:var(--no)' if hardness == 'hard' else 'color:var(--warn)' }}">{{ 'rejected' if hardness == 'hard' else 'warned' }}</td>
+        <td class="dim">{{ why }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <h3 class="sub">Keep-out wedges &mdash; hard. Removes, with no override.</h3>
+    <table class="mini">
+      <tr><th>Arc (clockwise)</th><th>Below</th><th>Why</th></tr>
+      {% for start, end, minalt, reason in site.keepout_wedges %}
+      <tr>
+        <td style="color:var(--ink)">{{ '%.1f'|format(start) }}&deg; &rarr; {{ '%.1f'|format(end) }}&deg;</td>
+        <td style="color:var(--no)">{{ '%.0f'|format(minalt) }}&deg;</td>
+        <td class="dim">{{ reason }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="3" class="dim">none &mdash; no sky is refused outright</td></tr>
+      {% endfor %}
+    </table>
+    <p class="note">
+      The arc runs <strong>clockwise</strong> from the first azimuth. So
+      248&deg;&nbsp;&rarr;&nbsp;45&deg; is west through north to north-east,
+      the northern half &mdash; not the southern one. Reading it the other way
+      round would cut most of a night's rows rather than a tenth of them.
+    </p>
+
+    <table class="mini">
+      <tr><th>Flat altitude floor</th><td>{{ '%.0f'|format(site.min_alt) }}&deg;</td></tr>
+      <tr><th>Zenith blind spot</th><td>{{ 'none' if site.max_altitude is none else '%.0f&deg;'|format(site.max_altitude)|safe }}</td></tr>
+      <tr><th>Floor asked of MPC</th><td>{{ '%.0f'|format(site.mpc_server_min_alt) }}&deg;</td></tr>
+    </table>
+    <p class="note">
+      MPC is asked for nothing below {{ '%.0f'|format(site.mpc_server_min_alt) }}&deg;,
+      so that floor dominates the flat one: no row below it is ever sent, and
+      the {{ '%.0f'|format(site.min_alt) }}&deg; limit can never fire.
+    </p>
+  </div>
+</div>
+
+<h2 class="sect">What gets onto the board</h2>
+<div class="folded">
+  <table class="mini">
+    <tr><th>Faintest magnitude</th><td>V &le; {{ site.max_mag }}</td></tr>
+    <tr><th>Sun below</th><td>{{ site.sun_alt_max }}&deg;</td></tr>
+    <tr><th>Moon at least</th><td>{{ site.moon_sep_min }}&deg; away</td></tr>
+    <tr><th>digest2 score at least</th><td>{{ site.min_score }}</td></tr>
+    <tr><th>Arc at least</th><td>{{ site.min_arc_days }} d</td></tr>
+    <tr><th>Not seen for at most</th><td>{{ site.max_not_seen_days }} d</td></tr>
+    <tr><th>Moving at least</th><td>{{ site.min_motion }}&Prime;/min</td></tr>
+  </table>
+  <table class="mini">
+    <tr><th>Uncertainty discarded above</th><td>{{ site.max_scatteredness[0] }}&Prime; &times; {{ site.max_scatteredness[1] }}&Prime;</td></tr>
+    <tr><th>&hellip;and warned about above</th><td>{{ site.scatteredness_warn[0] }}&Prime; &times; {{ site.scatteredness_warn[1] }}&Prime;</td></tr>
+    <tr><th>NEO-like orbits only</th><td>{{ 'yes' if site.neo_only else 'no' }}</td></tr>
+    <tr><th>&hellip;meaning q &lt;</th><td>{{ site.neo_q_max }} AU or e &gt; {{ site.neo_e_min }}</td></tr>
+    <tr><th>Skip what this site already shot</th><td>{{ 'yes' if site.skip_already_observed else 'no' }}</td></tr>
+    <tr><th>Blacklist</th><td>{{ site.blacklist|join(', ') if site.blacklist else 'empty' }}</td></tr>
+  </table>
+</div>
+
+<h2 class="sect">How long to shoot for</h2>
+<div class="folded">
+  <div>
+    <table class="mini">
+      <tr><th>Total integration</th>
+          <td>{{ site.exposure_base_min|int }} + (V &minus; {{ site.exposure_ref_mag|int }}) &times; {{ site.exposure_min_per_mag|int }} minutes</td></tr>
+      <tr><th>&hellip;floored at</th><td>{{ site.exposure_floor_min|int }} min</td></tr>
+      <tr><th>Frames per target</th><td>{{ site.exposure_frames }}</td></tr>
+      <tr><th>Field of view</th><td>{{ site.fov_arcsec }}&Prime;</td></tr>
+      <tr><th>Interpolated ahead</th><td>{{ site.interpolate_ahead_s // 60 }} min, for slewing</td></tr>
+    </table>
+  </div>
+  <div>
+    <table class="mini">
+      <tr><th>Moving up to</th><th>Seconds per frame</th></tr>
+      {% for limit, secs in site.exposure_speed_bands %}
+      <tr><td>{{ limit }}&Prime;/min</td><td>{{ secs }} s</td></tr>
+      {% endfor %}
+      <tr><td>faster</td><td>{{ site.exposure_fastest_sec }} s</td></tr>
+    </table>
+  </div>
+</div>
+<p class="note">
+  These two are separate quantities and are not meant to agree. The first is
+  total integration from magnitude; the second is the per-frame instruction
+  from how fast the object is moving, so that it does not trail across the
+  detector.
+</p>
+
+<h2 class="sect">How the list is ordered</h2>
+<div class="folded">
+  <table class="mini">
+    <tr><th>Default order</th><td>{{ site.default_sort }}</td></tr>
+    {% for k, v in site.rank_weights.items() %}
+    <tr><th>Weight &mdash; {{ k }}</th><td>{{ v }}</td></tr>
+    {% endfor %}
+    <tr><th>Arc saturates at</th><td>{{ site.arc_saturate_days }} d</td></tr>
+    <tr><th>Counted as bright at</th><td>V {{ site.mag_bright }}</td></tr>
+  </table>
+  <p class="note">
+    The weights are this observatory's, not a universal judgement: a 0.4-m
+    telescope weighs magnitude differently from a 1-m. They are shown here so
+    a site can see what its sort is optimising rather than inherit somebody
+    else's.
+  </p>
+</div>
+
+<h2 class="sect">The night, and where the plan goes</h2>
+<div class="folded">
+  <table class="mini">
+    <tr><th>Night runs from</th><td>{{ '%02d'|format(site.night_rollover_hour_ut) }}:00 UT to {{ '%02d'|format(site.night_rollover_hour_ut) }}:00 UT</td></tr>
+    <tr><th>Times shown in</th><td>{{ site.display_tz }}</td></tr>
+    <tr><th>Plan files</th><td><code>{{ site.plan_dir }}/</code></td></tr>
+    <tr><th>Site id</th><td>{{ site.id }}</td></tr>
+  </table>
+  <p class="note">
+    A night is one unit from that hour to the same hour the next day, so a
+    session spanning midnight stays one night and names one file. The hour
+    wants to sit near local noon, which is why it belongs to the site rather
+    than to the deployment.
+  </p>
+</div>
+
+</div>
+</body>
+</html>

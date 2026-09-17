@@ -73,9 +73,15 @@ class Site:
     night_rollover_hour_ut: int
 
     # --- Horizon / dome mask -----------------------------------------------
-    # (az_start, az_end, minimum observable altitude or None, hardness).
-    # "soft" keeps the target and flags it; "hard" rejects it outright. See
-    # config.py for why L01's are all soft.
+    # (az_start, az_end, minimum observable altitude or None, hardness,
+    # reason). "soft" keeps the target and flags it; "hard" rejects it
+    # outright.
+    #
+    # The reason is not decoration. In six months "light pollution" versus
+    # "the dome is there" is what tells someone whether a limit is safe to
+    # relax, and that is exactly the judgement a settings page has to show
+    # instead of losing. It used to live only as a comment beside the value,
+    # and a comment is the one thing a settings form cannot edit.
     horizon_mask: tuple
     sector_names: tuple
     # (az_from, az_to, min_altitude, reason), the arc running CLOCKWISE from
@@ -156,14 +162,17 @@ class Site:
         """Mask floor per sector, as an array. inf means the whole sector is
         discouraged at every altitude."""
         import numpy as np
-        return np.array([np.inf if m is None else m
-                         for (_, _, m, _h) in self.horizon_mask])
+        # Indexed rather than unpacked: the entry grew a reason in stage D
+        # and will grow again, and a positional unpack turns that into a
+        # crash in the middle of an update cycle.
+        return np.array([np.inf if e[2] is None else e[2]
+                         for e in self.horizon_mask])
 
     @cached_property
     def hard_by_sector(self):
         """Whether violating a sector's limit refuses or merely warns."""
         import numpy as np
-        return np.array([h == "hard" for (_, _, _m, h) in self.horizon_mask])
+        return np.array([e[3] == "hard" for e in self.horizon_mask])
 
     @cached_property
     def earth_location(self):
@@ -252,8 +261,8 @@ def from_dict(data, source="<dict>"):
     # altitude is good enough" is a real answer; TOML has no null, so a
     # sector writes -1 and means it.
     d["horizon_mask"] = tuple(
-        (a, b, None if m is not None and m < 0 else m, h)
-        for a, b, m, h in d["horizon_mask"])
+        (a, b, None if m is not None and m < 0 else m, h, r)
+        for a, b, m, h, r in d["horizon_mask"])
     for key in ("keepout_wedges", "exposure_speed_bands"):
         d[key] = _as_tuples(d[key])
     for key in ("sector_names", "max_scatteredness", "scatteredness_warn",

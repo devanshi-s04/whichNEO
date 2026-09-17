@@ -295,12 +295,13 @@
   <summary>Dome mask, exposure rule and what still needs confirming</summary>
   <div class="folded">
     <table class="mini">
-      <tr><th>Sector</th><th>Azimuth</th><th>Prefer above</th><th>Effect</th></tr>
-      {% for start, end, minalt, hardness in site.horizon_mask %}
+      <tr><th>Sector</th><th>Azimuth</th><th>Prefer above</th><th>Effect</th><th>Why</th></tr>
+      {% for start, end, minalt, hardness, why in site.horizon_mask %}
       <tr><td style="color:var(--ink)">{{ site.sector_names[loop.index0] }}</td>
           <td>{{ start }}&ndash;{{ end }}&deg;</td>
           <td style="{{ 'color:var(--warn)' if minalt is none }}">{{ 'any altitude' if minalt is none else '%.0f&deg;'|format(minalt)|safe }}</td>
-          <td style="{{ 'color:var(--no)' if hardness == 'hard' else 'color:var(--warn)' }}">{{ 'rejected' if hardness == 'hard' else 'warned' }}</td></tr>
+          <td style="{{ 'color:var(--no)' if hardness == 'hard' else 'color:var(--warn)' }}">{{ 'rejected' if hardness == 'hard' else 'warned' }}</td>
+          <td class="dim">{{ why }}</td></tr>
       {% endfor %}
     </table>
     <p class="note">
@@ -309,9 +310,11 @@
       carrying a badge. The north is avoided because Trieste sits 41 km away
       at bearing 3&deg; and lights that sky, not because anything obstructs
       it &mdash; and an impactor found in the north has to appear on this
-      board. Mark a sector <em>hard</em> in <code>site.horizon_mask</code>
-      only once it is confirmed as a physical obstruction. The observatory's
-      own planner has no azimuth mask at all, only a flat altitude floor.
+      board. Each sector says <em>why</em> above, which is what tells you
+      whether a limit is safe to relax; mark one <em>hard</em>
+      (<a href="{{ url_for('settings') }}">settings</a>) only once it is
+      confirmed as a physical obstruction. The observatory's own planner has
+      no azimuth mask at all, only a flat altitude floor.
       <br><br>
       Azimuths are compass bearings from north. MPC reports azimuth from
       <em>south</em>; it is converted on parse and verified against an
