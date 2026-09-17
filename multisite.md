@@ -20,6 +20,10 @@ changes, so the decisions survive the conversation that produced them.
 | keep-out wedges | **editable by the observatory**, since the value genuinely differs between sites — but protected, see below |
 | night boundary | **ask the site** for its timezone |
 | exposure table | **per site.** Luka's 36-frame speed table is Višnjan's, not a general rule |
+| wedge safety | **edit in the UI, confirm by typing the obscode** — the pattern GitHub uses for deleting a repository |
+| new sites | **immediate, with a cap** on total active sites |
+| permissions | **owner edits settings, members observe** |
+| L01 | **becomes site number one**, like any other |
 
 That is the most ambitious option on every axis, and worth naming plainly:
 **it makes whichNEO a service, and you the operator.** Other observatories'
@@ -132,14 +136,18 @@ targets or let them point into a wall.
 ### Protecting the keep-out wedge
 
 It must be editable — the value genuinely differs between observatories — but
-it is the one setting where a typo points a telescope at a wall. Protections,
-to be confirmed:
+it is the one setting where a typo points a telescope at a wall.
+
+**Decided: saving a wedge change requires typing the observatory code**, the
+pattern GitHub uses for deleting a repository. It makes an accidental save
+nearly impossible without adding a second permissions layer on top of
+owner-only editing.
+
+Alongside that:
 
 - the mask and wedges drawn live on the sky map as they are edited, so the
   shape is seen before it is saved
-- a typed confirmation, not just a button
 - the previous value kept, so it can be restored
-- possibly restricted to a site owner rather than any member
 
 ---
 
@@ -179,15 +187,33 @@ account observe at several, and caps limit MPC exposure.
 
 ---
 
+## Permissions and sign-up
+
+**Owner edits, members observe.** Whoever created a site owns it; everyone
+else marks targets and reads the board. One role boundary, simple to explain.
+
+**Sign-up is immediate, capped.** A new observatory starts working straight
+away, and the deployment refuses new sites past a limit. That bounds MPC load
+without making a legitimate observatory in another timezone wait for a human.
+The trade is that the cap is reached by whoever signs up first rather than by
+who most needs it — acceptable while the number is small and the operator can
+raise it.
+
+**L01 becomes site number one.** The migration turns today's `config.py` into
+the first row of the sites table and nothing knows L01 by name afterwards.
+Višnjan therefore runs the same code path as everyone else, so a bug in it is
+found rather than hidden.
+
 ## Open questions
 
-1. **Who may edit a site's settings** — any member, or only an owner? The
-   keep-out wedge is the reason this matters.
-2. **Do new sites need approval**, given the MPC load numbers above?
-3. **What does "a more secure config file" mean in practice** for the
-   wedges — a separate file the UI writes, a second confirmation, an
-   owner-only control, or something else?
-4. **Does L01 stay special** during the migration, or become site number one
-   like any other?
-5. **Ranking weights** — per site, or global? They encode what an observatory
+1. **What is the cap**, concretely? The measured load says tens of sites are
+   fine and hundreds are not.
+2. **How does someone become a member** of an existing site — invited by the
+   owner, or requests access?
+3. **What does an anonymous visitor see?** Today whichneo.juriclab.org is
+   L01's board. With many sites it has to be a default site, a picker, or a
+   landing page.
+4. **Ranking weights** — per site, or global? They encode what an observatory
    thinks is worth pointing at, which is arguably a local judgement.
+5. **The plan file format** is the legacy Višnjan planner's. Does another
+   observatory get the same format, their own, or a choice?
