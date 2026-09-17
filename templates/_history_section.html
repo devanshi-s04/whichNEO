@@ -1,4 +1,5 @@
 <h2 class="sect">History on NEOCP</h2>
+{% if hist_rows %}
 {% if hist_charts %}
 <div class="histpicker">
   {% for c in hist_charts %}
@@ -8,6 +9,13 @@
   </label>
   {% endfor %}
 </div>
+{% else %}
+<p class="note">
+  Only {{ hist_rows|length }} snapshot recorded for this object so far &mdash;
+  not enough to plot a trend (needs at least two), but every value it does
+  have is listed below.
+</p>
+{% endif %}
 <div class="histwrap">
   {% for c in hist_charts %}
   <div class="histchart" data-hist-chart="{{ c.key }}" {{ '' if c.default else 'hidden' }}>{{ c.svg|safe }}</div>
@@ -16,13 +24,11 @@
     <table class="mini">
       <tr><th>Time (UT)</th><th>Score</th><th>V</th><th>NObs</th><th>Arc</th>
           <th>H</th><th>Unseen</th><th>Note</th></tr>
-      {# Same rule as _history_rows.html on the dashboard: every polled column
-         is nullable on its own terms. NEOCP omits values for an object it
-         knows little about, and a snapshot reconstructed from an archive
-         carries only the fields that archive kept -- 150 rows across 90
-         designations currently have no hmag or not_seen_days. Jinja's format
-         filter raises TypeError on None, so one missing number takes the
-         whole target page down. #}
+      {# Every polled column is nullable on its own terms. NEOCP omits values
+         for an object it knows little about, and a snapshot reconstructed
+         from an archive carries only the fields that archive kept. Jinja's
+         format filter raises TypeError on None, so one missing number would
+         otherwise take the whole target page down. #}
       {% for h in hist_rows %}
       <tr><td style="color:var(--ink)">{{ h.snapshot_ts[:16] }}</td>
           <td>{{ h.score if h.score is not none else '&mdash;'|safe }}</td>
@@ -43,6 +49,7 @@
   polling it on a schedule and keeping every reading rather than overwriting
   the last one.
 </p>
+{% if hist_charts %}
 <script>
 document.querySelectorAll('[data-hist-toggle]').forEach(cb => {
   cb.addEventListener('change', () => {
@@ -52,6 +59,7 @@ document.querySelectorAll('[data-hist-toggle]').forEach(cb => {
   });
 });
 </script>
+{% endif %}
 {% else %}
 <p class="note">
   No polled history for this target yet &mdash; either it appeared before

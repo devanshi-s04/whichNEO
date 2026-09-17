@@ -2768,6 +2768,66 @@ def test_target_history_section_survives_missing_columns():
         importlib.reload(appmod)
 
 
+def test_single_snapshot_history_still_shown():
+    """One recorded snapshot is not the same as none, so the object's real
+    data must still be shown even though there is nothing to plot a trend
+    from.
+
+    _history_section.html gated its entire "History on NEOCP" section --
+    the raw data table included -- on hist_charts, which needs at least two
+    points to draw a line. An object resolved after only ever being caught
+    by a single poll (routine for the ds42-imported nights, where many
+    objects appear on exactly one archived night before resolving) has
+    hist_rows of length 1: hist_charts comes back empty, and the template's
+    {% if hist_charts %} then hid the table along with the chart, showing
+    "No polled history for this target yet" even though one real row of
+    data existed the whole time.
+
+    Exercised on the archived-object path (no live `targets` row at all),
+    since that is exactly the shape of a resolved, single-snapshot object.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import neocp_history as H
+
+    prev_db, prev_hist = config.DB_PATH, H.DB_PATH
+    d = tempfile.mkdtemp()
+    config.DB_PATH = os.path.join(d, "targets.db")
+    H.DB_PATH = os.path.join(d, "neocp_history.db")
+    try:
+        con = H.ensure_db()
+        hnow = H._now()
+        con.execute(
+            "INSERT INTO objects (desig, first_seen_ts, last_seen_ts, "
+            "status, resolved_at) VALUES ('ONESNAP', ?, ?, 'confirmed', ?)",
+            (hnow, hnow, hnow))
+        con.execute(
+            "INSERT INTO snapshots (desig, snapshot_ts, score, vmag, nobs, "
+            "arc_days, retrospective) "
+            "VALUES ('ONESNAP', ?, 91, 19.7, 4, 0.08, 1)", (hnow,))
+        con.commit()
+        con.close()
+
+        importlib.reload(appmod)
+        r = appmod.app.test_client().get("/target/ONESNAP")
+        check("the archived page renders for a single-snapshot object",
+              r.status_code == 200, r.status_code)
+        body = r.data.decode()
+        check("it does not falsely claim there is no polled history",
+              "No polled history for this target" not in body)
+        check("the one real snapshot's score is shown",
+              "91" in body)
+        check("the one real snapshot's vmag is shown",
+              "19.7" in body)
+        check("a note explains why there is no trend chart, not silence",
+              "not enough to plot a trend" in body)
+    finally:
+        config.DB_PATH, H.DB_PATH = prev_db, prev_hist
+        importlib.reload(appmod)
+
+
 def test_history_backfill_and_resolution():
     """Backfill recovers labels that already exist, and never overwrites.
 
@@ -3652,6 +3712,7 @@ def main():
                test_archived_run_import,
                test_history_page_survives_missing_columns,
                test_target_history_section_survives_missing_columns,
+               test_single_snapshot_history_still_shown,
                test_history_backfill_and_resolution,
                test_history_bulk_download_needs_an_account,
                test_ds42_column,
