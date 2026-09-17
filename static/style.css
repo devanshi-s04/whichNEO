@@ -714,3 +714,45 @@ input.num:focus, input.why:focus { outline: 1px solid var(--amber); }
   margin: 22px 0 6px; display: flex; gap: 14px; align-items: center;
   flex-wrap: wrap;
 }
+
+/* --- shared header: the observatory switcher ---------------------------- */
+/* A <details> menu rather than a script: the dome screen should not need
+   JavaScript to change observatory, and a <select> cannot hold a separator
+   or an "add" action without pretending one of its options is a verb. */
+.brand h1 a.home { color: inherit; text-decoration: none; }
+.brand h1 a.home:hover { color: var(--amber); }
+.nav-btn.current { color: var(--ink); border-color: var(--faint); }
+
+.sitemenu { position: relative; flex: 0 0 auto; margin-bottom: 2px; }
+.sitemenu > summary {
+  display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 9px 14px; border-radius: 7px; list-style: none;
+  background: var(--raised); border: 1px solid var(--line);
+  font-family: var(--ui); font-size: 12px; font-weight: 500;
+  color: var(--muted);
+}
+.sitemenu > summary::-webkit-details-marker { display: none; }
+.sitemenu > summary::after { content: "\25be"; color: var(--faint); }
+.sitemenu > summary:hover { color: var(--ink); border-color: var(--faint); }
+.sitemenu > summary .code { color: var(--ink); font-family: var(--mono); }
+.sitemenu-panel {
+  position: absolute; z-index: 40; top: calc(100% + 4px); left: 0;
+  min-width: 260px; padding: 6px; border-radius: 8px;
+  background: var(--raised); border: 1px solid var(--line);
+  box-shadow: 0 10px 28px rgba(0,0,0,.45);
+}
+.sitemenu-group {
+  padding: 7px 10px 4px; font-size: 9.5px; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--faint); font-weight: 600;
+}
+.sitemenu-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-radius: 6px; text-decoration: none;
+  color: var(--muted); font-family: var(--ui); font-size: 12px;
+}
+.sitemenu-item .code { font-family: var(--mono); color: var(--ink); }
+.sitemenu-item:hover { background: var(--panel); color: var(--ink); }
+.sitemenu-item.on { color: var(--ink); }
+.sitemenu-item.on .code::after { content: " \2713"; color: var(--go); }
+.sitemenu-item.add { color: var(--amber); }
+.sitemenu-sep { height: 1px; margin: 6px 4px; background: var(--line); }

@@ -9,18 +9,15 @@
 <body>
 <div class="wrap">
 
-<div class="top">
-  <div class="brand">
-    <h1>Add an <b>observatory</b></h1>
-    <div class="where">Immediate. Your account owns what it creates.</div>
-  </div>
+{% set page_heading %}Add an <b>observatory</b>{% endset %}
+{% set page_subtitle %}Immediate. Your account owns what it creates.{% endset %}
+{% set header_extra %}
   <div class="live">
     <div class="stat"><div class="k">Serving</div>
       <div class="v{{ ' amber' if at_capacity }}">{{ active }} / {{ cap }}</div></div>
-    <div class="stat"><div class="k">&nbsp;</div>
-      <div class="v"><a class="chip" href="{{ url_for('sites_list') }}">&larr; observatories</a></div></div>
   </div>
-</div>
+{% endset %}
+{% include "_header.html" %}
 
 {% if errors %}
 <div class="banner bad">

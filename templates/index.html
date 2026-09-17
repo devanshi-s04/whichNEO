@@ -9,28 +9,10 @@
 <body>
 <div class="wrap">
 
-<div class="top">
-  <div class="brand">
-    <h1>Which<b>NEO</b></h1>
-    {# Built from the site rather than written out, because a second
-       observatory showing this one's coordinates would not be a cosmetic
-       bug -- it would be a wrong statement about where the telescope is. #}
-    <div class="where">{{ site.obscode }} &middot; {{ site.name }} &middot;
-      {{ site.coords_text }}{% if site_telescope %} &middot; {{ site_telescope }}{% endif %}</div>
-  </div>
-  {# Only when there is somewhere to switch to. With one observatory
-     configured the board looks exactly as it did before several were
-     possible -- no empty control, no spare row. #}
-  {% if sites|length > 1 %}
-  <form method="get" class="siteswitch" title="Which observatory this board is for">
-    <select name="site" onchange="this.form.submit()" aria-label="Observatory">
-      {% for s in sites.values() %}
-      <option value="{{ s.obscode }}"{{ ' selected' if s.obscode == site.obscode }}>{{ s.obscode }} &middot; {{ s.name }}</option>
-      {% endfor %}
-    </select>
-    <noscript><button type="submit" class="chip">Go</button></noscript>
-  </form>
-  {% endif %}
+{% set page_heading %}Which<b>NEO</b>{% endset %}
+{% set page_subtitle %}{{ site.obscode }} &middot; {{ site.name }} &middot;
+      {{ site.coords_text }}{% if site_telescope %} &middot; {{ site_telescope }}{% endif %}{% endset %}
+{% set header_extra %}
   {# The plan file, and the control that keeps a copy of it current on this
      computer. They sit together because they are the same thing seen two
      ways -- read it here, or have it written to disk beside the telescope.
@@ -40,12 +22,6 @@
   <button type="button" id="planSyncBtn" class="chip"
           title="Keep a local .txt file on this computer in sync with the plan file, updated on every refresh">sync to file</button>
   <span id="planSyncStatus" class="syncstatus"></span>
-  {# Promoted out of the toolbar chips, where it sat next to a plan-file link
-     that has since moved up here. It leads to a different page rather than
-     changing this one, which is what the other chips do -- so it belongs
-     beside Plan file, the board's other exit, not among the filters. #}
-  <a class="nav-btn" href="{{ url_for('history_view') }}"
-     title="Every NEOCP object this board has polled, what its digest2 score and magnitude did over time, and how it eventually resolved">History</a>
   <div class="live">
     <div class="stat"><div class="k">Night</div>
       <div class="v">{{ status.night }}</div></div>
@@ -76,7 +52,8 @@
       </div>
     </div>
   </div>
-</div>
+{% endset %}
+{% include "_header.html" %}
 
 {% if sky %}
 <section class="sky">
@@ -359,7 +336,7 @@
   intrinsic score from digest2, arc length and magnitude; it excludes altitude
   on purpose so it stays meaningful in daylight, and it does not drive this
   order.</p>
-  <p>Positions come from MPC ephemerides generated for L01 and are recomputed
+  <p>Positions come from MPC ephemerides generated for {{ site.obscode }} and are recomputed
   independently with astropy each cycle, so a disagreement is flagged rather
   than hidden. The pointing line is interpolated
   {{ site.interpolate_ahead_s // 60 }} minutes ahead to allow for slewing.</p>

@@ -9,12 +9,9 @@
 <body>
 <div class="wrap">
 
-<div class="top">
-  <div class="brand">
-    <h1>Which<b>NEO</b></h1>
-    <div class="where">L01 &middot; TI&#268;AN STATION, VI&#352;NJAN</div>
-  </div>
-</div>
+{% set page_heading %}Which<b>NEO</b>{% endset %}
+{% set page_subtitle %}{{ site.obscode }} &middot; {{ site.name }}{% endset %}
+{% include "_header.html" %}
 
 <div class="authbox">
   <h2>Sign in</h2>
