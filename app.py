@@ -29,7 +29,9 @@ import moonplot
 import observability
 import observatories
 import ranking
+import registry
 import siteconf
+import sites
 import skymap
 import uncertainty
 
@@ -50,12 +52,38 @@ app.config.update(
 )
 
 
+def visible_sites():
+    """Every observatory this request may switch between, edits applied.
+
+    Resolved once per request: the switcher, the board and the settings page
+    all ask, and each ask would otherwise be another pass over the sites
+    table.
+    """
+    cached = getattr(g, "_sites_all", None)
+    if cached is not None:
+        return cached
+    out = config.SITES
+    try:
+        conn = db.connect()
+        try:
+            out = registry.all_sites(conn)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        # Before the database exists there are no signed-up sites by
+        # definition, so the files are the whole answer rather than a reason
+        # to fail the request.
+        pass
+    g._sites_all = out
+    return out
+
+
 def site_by_code(code):
-    """Resolve an observatory code to a Site, or None."""
+    """Resolve an observatory code to a configured site, or None."""
     code = (code or "").strip().upper()
     if not code:
         return None
-    for s in config.SITES.values():
+    for s in visible_sites().values():
         if s.obscode.upper() == code:
             return s
     return None
@@ -64,54 +92,77 @@ def site_by_code(code):
 def current_site():
     """The observatory this request is about.
 
-    Named by `?site=<obscode>` and then remembered for the session, so the
-    choice survives the next click without every link on the board having to
-    carry it. An unknown or absent code falls back to the deployment's
-    default -- which is the lowest-numbered site -- so a visitor who never
-    touches the switcher sees exactly the board they saw before several
-    observatories existed.
+    Answered in order of how explicitly it was asked for:
 
-    Also called outside a request (the template filters below are reachable
-    from one, but the module is imported by tools that are not), hence the
-    context check rather than a bare request.args.
+      1. `?site=<obscode>` in the URL, which is then remembered
+      2. what this browser last switched to
+      3. where the signed-in account actually works -- the one it owns, or
+         the lowest-numbered one it belongs to
+      4. the deployment's default, which is the lowest-numbered site
+
+    So a member goes straight to their own observatory, and a stranger sees
+    the board this deployment was built for, exactly as before any of this
+    existed.
     """
-    base = requested_base_site()
     if not has_request_context():
-        return base
-    # Settings edited through this page live in the database, layered over
-    # the site's file. Resolved once per request and cached on `g`, because
-    # this is called many times while rendering one board.
+        return config.DEFAULT_SITE
     cached = getattr(g, "_site_effective", None)
-    if cached is not None and cached.id == base.id:
+    if cached is not None:
         return cached
-    site = base
-    try:
-        conn = db.connect()
-        try:
-            site = siteconf.effective(conn, base)
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        # A database that has not been created or migrated yet has no edits
-        # in it by definition, so the file's own values are the right answer
-        # rather than a reason to fail the request.
-        pass
+    site = _resolve_site()
     g._site_effective = site
     return site
 
 
-def requested_base_site():
-    """The site this request names, before any edited settings are applied."""
-    if has_request_context():
-        chosen = site_by_code(request.args.get("site"))
-        if chosen is not None:
-            if session.get("site") != chosen.obscode:
-                session["site"] = chosen.obscode
-            return chosen
-        remembered = site_by_code(session.get("site"))
-        if remembered is not None:
-            return remembered
-    return config.DEFAULT_SITE
+def _resolve_site():
+    sites = visible_sites()
+    chosen = site_by_code(request.args.get("site"))
+    if chosen is not None:
+        if session.get("site") != chosen.obscode:
+            session["site"] = chosen.obscode
+        return chosen
+    remembered = site_by_code(session.get("site"))
+    if remembered is not None:
+        return remembered
+
+    user = auth.current_user()
+    if user is not None:
+        try:
+            conn = db.connect()
+            try:
+                mine = db.sites_for_user(conn, user["id"])
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            mine = []
+        # Owned first, then lowest id, so somebody who belongs to several
+        # lands somewhere stable until they switch -- and the switch is then
+        # remembered for the session.
+        for want in (db.OWNER, db.MEMBER):
+            for site_id, role in mine:
+                if role == want and site_id in sites:
+                    return sites[site_id]
+
+    return sites.get(config.DEFAULT_SITE.id, config.DEFAULT_SITE)
+
+
+def may_edit_settings(conn, site):
+    """Whether this request may change this observatory's configuration.
+
+    The owner created the site and configures it; everyone else observes.
+    One role boundary, which is all the plan asks for and all that can be
+    explained in a sentence.
+
+    A site defined by a file has no owner row -- nobody signed it up -- so it
+    falls to the deployment's admins. Without that, the observatory this
+    board was built for would be the one nobody could configure.
+    """
+    user = auth.current_user()
+    if user is None:
+        return False
+    if db.site_role(conn, site.id, user["id"]) == db.OWNER:
+        return True
+    return bool(user["is_admin"])
 
 
 # One zone per site, resolved on demand rather than once at import: the board
@@ -138,7 +189,7 @@ def inject_config():
     the sort logic never drift apart."""
     site = current_site()
     telescope = (observatories.lookup(site.obscode) or {}).get("telescope")
-    return {"config": config, "site": site, "sites": config.SITES,
+    return {"config": config, "site": site, "sites": visible_sites(),
             "site_telescope": telescope,
             "tzname": _tzabbr(), "ranking": ranking,
             "current_user": auth.current_user(),
@@ -654,6 +705,143 @@ def api_targets():
         conn.close()
 
 
+@app.route("/sites")
+def sites_list():
+    """Every observatory this deployment serves, and your place in each."""
+    conn = get_conn()
+    try:
+        user = auth.current_user()
+        roles = dict(db.sites_for_user(conn, user["id"])) if user else {}
+        rows = [{"site": s, "role": roles.get(sid),
+                 "members": db.site_members(conn, sid)}
+                for sid, s in registry.all_sites(conn).items()]
+        return render_template(
+            "sites.html", rows=rows, cap=config.ACTIVE_SITE_CAP,
+            active=registry.active_count(conn),
+            at_capacity=registry.at_capacity(conn))
+    finally:
+        conn.close()
+
+
+def _render_new_site(errors=None, form=None, status_code=200):
+    conn = get_conn()
+    try:
+        page = render_template(
+            "site_new.html", errors=errors or [], form=form or {},
+            cap=config.ACTIVE_SITE_CAP, active=registry.active_count(conn),
+            at_capacity=registry.at_capacity(conn),
+            named_account=auth.current_user() is not None)
+    finally:
+        conn.close()
+    return (page, status_code) if status_code != 200 else page
+
+
+@app.get("/sites/new")
+def site_new_form():
+    """Add an observatory. Reading the form is open; creating needs an
+    account, and the page says so rather than hiding behind a login wall."""
+    return _render_new_site()
+
+
+@app.get("/sites/lookup")
+def site_lookup():
+    """What MPC knows about an observatory code, for the form to fill in.
+
+    The position comes from MPC's own table rather than from anything typed:
+    it is the position every ephemeris will be computed for, so a typo here
+    would not be a cosmetic error but a board describing a different patch of
+    sky.
+    """
+    code = (request.args.get("obscode") or "").strip().upper()
+    where = observatories.geometry(code)
+    if not where:
+        return jsonify({"known": False, "obscode": code})
+    info = observatories.lookup(code) or {}
+    return jsonify({
+        "known": True, "obscode": code,
+        "name": info.get("name") or "",
+        "telescope": info.get("telescope") or "",
+        "rollover_hour_ut": sites.rollover_hour_for_longitude(
+            where["lon_deg"]),
+        **where,
+    })
+
+
+@app.post("/sites/new")
+@auth.required
+def site_create():
+    """Register an observatory. Immediate, and capped.
+
+    An observatory code is not optional and cannot be invented: MPC computes
+    an ephemeris for a code, so a site without one has no ephemeris and
+    therefore no board. The code is checked against MPC's own table, which is
+    also where its position comes from.
+    """
+    if auth.current_user() is None:
+        return _render_new_site(
+            errors=["Adding an observatory needs a named account, so that "
+                    "somebody owns it and can configure it afterwards."],
+            form=request.form, status_code=403)
+
+    form = request.form
+    code = (form.get("obscode") or "").strip().upper()
+    name = " ".join((form.get("name") or "").split())
+    tzname = (form.get("display_tz") or "").strip()
+
+    conn = get_conn()
+    try:
+        errors = []
+        where = observatories.geometry(code)
+        if not code:
+            errors.append("Give the observatory code MPC assigned you.")
+        elif not where:
+            errors.append(
+                f"MPC's table has no position for “{code}”. An ephemeris is "
+                "computed for an observatory code, so a site without one "
+                "cannot be served. If the code is new, the table in mpcdata/ "
+                "may simply predate it.")
+        elif site_by_code(code) is not None or db.site_by_obscode(conn, code):
+            errors.append(f"{code} is already on this deployment.")
+
+        if not name:
+            name = observatories.site_name(code) or code
+        if len(name) > 80:
+            errors.append("Keep the observatory's name under 80 characters.")
+
+        try:
+            tzname = siteconf._timezone(
+                siteconf.Spec("display_tz", "Timezone", "tz", "night"),
+                tzname)
+        except siteconf.SettingsError as e:
+            errors.append(str(e))
+
+        if registry.at_capacity(conn):
+            errors.append(
+                f"This deployment is serving its limit of "
+                f"{config.ACTIVE_SITE_CAP} observatories. The cap is what "
+                "keeps its load on MPC to a few requests a minute; ask the "
+                "operator before it is raised.")
+
+        if errors:
+            return _render_new_site(errors=errors, form=form,
+                                    status_code=400)
+
+        site_id = registry.next_id(conn)
+        definition = sites.new_definition(code, name, tzname, site_id, where)
+        # Built through the same loader every file goes through, so a
+        # definition that would not load is refused here rather than
+        # discovered later by the update cycle.
+        sites.from_dict(definition, source=f"new site {code}")
+        db.create_site(conn, site_id, code,
+                       json.dumps(definition, sort_keys=True),
+                       auth.current_user()["id"])
+        siteconf.forget(site_id)
+        session["site"] = code
+        return redirect(url_for("settings", created=code))
+    finally:
+        conn.close()
+
+
 @app.route("/settings")
 def settings():
     """Everything this observatory is configured to do.
@@ -675,17 +863,20 @@ def _settings_groups():
 
 def _render_settings(errors=None, form=None, saved=False, status_code=200):
     site = current_site()
-    base = config.SITES.get(site.id, site)
     conn = get_conn()
     try:
+        base = registry.base_site(conn, site.id) or site
         edited = db.site_settings_rows(conn, site.id)
+        # Decided while the connection is still open. Reading it out of the
+        # render call below put the query after the `finally` that closes it.
+        can_edit = may_edit_settings(conn, site)
     finally:
         conn.close()
     page = render_template(
         "settings.html", site=site, file_site=base, edited=edited,
         groups=_settings_groups(), siteconf=siteconf,
         errors=errors or [], form=form or {}, saved=saved,
-        can_edit=auth.current_user() is not None,
+        can_edit=can_edit,
         telescope=(observatories.lookup(site.obscode) or {}).get("telescope"),
         # The mask and the wedges as shapes rather than as numbers. A wedge
         # whose arc runs the wrong way round the sky is obvious here and
@@ -748,18 +939,17 @@ def settings_save():
     nobody, but a change to where a telescope may point should have a person
     attached to it.
     """
-    if auth.current_user() is None:
-        return _render_settings(
-            errors=["Changing settings needs a named account. The shared "
-                    "credential can mark targets, but a change to where the "
-                    "telescope may point should have a person attached."],
-            form=request.form, status_code=403)
-
     site = current_site()
-    base = config.SITES.get(site.id, site)
-    uid = auth.current_user()["id"]
     conn = get_conn()
     try:
+        if not may_edit_settings(conn, site):
+            return _render_settings(
+                errors=[f"Only {site.obscode}'s owner can change its "
+                        "settings. Everyone else marks targets and reads the "
+                        "board. If you work here, ask the owner to add you."],
+                form=request.form, status_code=403)
+        base = registry.base_site(conn, site.id) or site
+        uid = auth.current_user()["id"]
         # The restore buttons sit inside the same form as everything else --
         # a nested form is not valid HTML -- so which field to restore rides
         # in the button's own value.

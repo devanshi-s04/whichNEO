@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add an observatory &mdash; WhichNEO</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+<div class="top">
+  <div class="brand">
+    <h1>Add an <b>observatory</b></h1>
+    <div class="where">Immediate. Your account owns what it creates.</div>
+  </div>
+  <div class="live">
+    <div class="stat"><div class="k">Serving</div>
+      <div class="v{{ ' amber' if at_capacity }}">{{ active }} / {{ cap }}</div></div>
+    <div class="stat"><div class="k">&nbsp;</div>
+      <div class="v"><a class="chip" href="{{ url_for('sites_list') }}">&larr; observatories</a></div></div>
+  </div>
+</div>
+
+{% if errors %}
+<div class="banner bad">
+  {% for e in errors %}<p>{{ e }}</p>{% endfor %}
+  <p class="dim">Nothing was created.</p>
+</div>
+{% endif %}
+
+{% if not named_account %}
+<div class="banner">
+  <strong>You are signed out.</strong> Adding an observatory needs an account,
+  so that somebody owns it and can configure it afterwards.
+  <a href="{{ url_for('login') }}">Sign in</a> or
+  <a href="{{ url_for('register') }}">create an account</a>.
+</div>
+{% endif %}
+
+<p class="note">
+  <strong>An observatory code is not optional.</strong> MPC computes an
+  ephemeris for a code, so a site without one has no ephemeris and therefore
+  no board. The code is also where the position comes from &mdash; MPC's own
+  table, not anything typed here, because it is the position every ephemeris
+  will be computed for.
+</p>
+
+<form method="post" action="{{ url_for('site_create') }}">
+<input type="hidden" name="csrf" value="{{ csrf_token() }}">
+<table class="mini">
+  <tr>
+    <th>Observatory code</th>
+    <td><input class="num" name="obscode" id="obscode" maxlength="4"
+               autocomplete="off" value="{{ form.get('obscode', '') }}"
+               placeholder="e.g. L01">
+      <span id="codenote" class="dim"></span></td>
+  </tr>
+  <tr>
+    <th>Name</th>
+    <td><input class="why" name="name" id="name" maxlength="80"
+               value="{{ form.get('name', '') }}"
+               placeholder="filled in from MPC once the code is known"></td>
+  </tr>
+  <tr>
+    <th>Times shown in</th>
+    <td><input class="why" name="display_tz" id="display_tz"
+               value="{{ form.get('display_tz', '') }}"
+               placeholder="e.g. Europe/Zagreb">
+      <div class="dim">The board shows times as the people standing in that
+        dome read them. The night boundary is derived from the longitude.</div></td>
+  </tr>
+</table>
+
+<div class="savebar">
+  <button class="plan-btn" type="submit" {{ 'disabled' if at_capacity or not named_account }}>Add observatory</button>
+  <span class="dim">You will land on its settings page.</span>
+</div>
+</form>
+
+<h2 class="sect">What it starts with</h2>
+<p class="note">
+  A new observatory does <strong>not</strong> inherit another one's limits.
+  Two of these settings describe physical obstructions, and copying one
+  dome's limits onto another telescope is the one mistake here that could
+  point it at a wall.
+</p>
+<div class="folded">
+  <table class="mini">
+    <tr><th>Keep-out wedges</th>
+        <td style="color:var(--go)">none &mdash; no sky refused until you say so</td></tr>
+    <tr><th>Horizon mask</th>
+        <td>eight soft sectors above 20&deg;, every one marked unconfirmed</td></tr>
+    <tr><th>Night boundary</th><td>near local noon, from your longitude</td></tr>
+    <tr><th>Everything else</th>
+        <td>the thresholds recovered from Vi&scaron;njan's legacy planner</td></tr>
+  </table>
+  <p class="note">
+    All of it is editable on the settings page from the moment the site
+    exists, and the mask and wedges are drawn on the sky map as you change
+    them. Changing a wedge asks you to type the observatory code, because a
+    wedge removes sky outright.
+  </p>
+</div>
+
+<script>
+// Fill in what MPC already knows, as soon as there is a code to look up.
+(function () {
+  const code = document.getElementById('obscode');
+  const name = document.getElementById('name');
+  const tz = document.getElementById('display_tz');
+  const note = document.getElementById('codenote');
+  if (!code) return;
+
+  function lookup() {
+    const value = (code.value || '').trim().toUpperCase();
+    if (value.length < 3) { note.textContent = ''; return; }
+    fetch('{{ url_for("site_lookup") }}?obscode=' + encodeURIComponent(value))
+      .then(r => r.json())
+      .then(d => {
+        if (!d.known) {
+          note.textContent = 'MPC has no position for this code.';
+          return;
+        }
+        note.textContent = d.name
+          ? d.name + (d.telescope ? ' — ' + d.telescope : '')
+          : 'known to MPC';
+        if (!name.value && d.name) name.value = d.name;
+      })
+      .catch(() => { note.textContent = ''; });
+  }
+  code.addEventListener('change', lookup);
+  code.addEventListener('blur', lookup);
+})();
+</script>
+
+</div>
+</body>
+</html>

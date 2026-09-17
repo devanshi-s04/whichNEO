@@ -36,6 +36,7 @@ import output
 import pipeline
 import ranking
 import moonplot
+import registry
 import siteconf
 import sites as sitesmod
 import skymap
@@ -1902,12 +1903,25 @@ def test_the_settings_page_keeps_soft_and_hard_apart():
         importlib.reload(appmod)
 
 
-def _settings_client(appmod):
-    """A test client signed in as a real account, plus its CSRF token."""
+def _settings_client(appmod, username="keeper", admin=True):
+    """A client signed in as an account that may configure L01.
+
+    Admin by default, because L01 comes from a file and so has no owner row:
+    nobody signed it up. That is the deployment's own observatory, and if
+    admins could not configure it, it would be the one site nobody could.
+    """
     c = appmod.app.test_client()
-    c.post("/register", data={"username": "keeper",
+    c.post("/register", data={"username": username,
                               "password": "correct-horse-7",
                               "confirm": "correct-horse-7"})
+    if admin:
+        conn = db.connect(config.DB_PATH)
+        try:
+            with conn:
+                conn.execute("UPDATE users SET is_admin=1 WHERE username=?",
+                             (username,))
+        finally:
+            conn.close()
     with c.session_transaction() as s:
         return c, s.get("csrf")
 
@@ -2260,6 +2274,279 @@ def test_the_settings_preview_is_drawn_by_the_board_s_own_code():
     finally:
         config.DB_PATH = prev_db
         siteconf.forget()
+        importlib.reload(appmod)
+
+
+def _fresh_board(appmod):
+    """An empty database and a reloaded app, for the sign-up tests."""
+    import importlib
+    import tempfile
+
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    conn = db.connect(config.DB_PATH)
+    db.init(conn)
+    conn.close()
+    importlib.reload(appmod)
+
+
+def test_a_new_observatory_inherits_nobody_elses_dome_limits():
+    """The one mistake on the sign-up path that could point a telescope at a
+    wall.
+
+    A keep-out wedge means "the mount will hit something here", which is a
+    fact about one particular building. Seeding a new observatory with
+    another's would be worse than useless: it would refuse sky that is
+    perfectly safe for them and say nothing about the sky that is not. So a
+    new site starts refusing nothing, and its horizon mask says in every
+    sector that it has not been confirmed.
+    """
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    try:
+        _fresh_board(appmod)
+        c, tok = _settings_client(appmod, username="newowner", admin=False)
+        r = c.post("/sites/new", data={"csrf": tok, "obscode": "F51",
+                                       "name": "Test Pan-STARRS",
+                                       "display_tz": "Pacific/Honolulu"})
+        check("the observatory is created", r.status_code == 302,
+              r.status_code)
+
+        conn = db.connect(config.DB_PATH)
+        try:
+            made = registry.by_obscode(conn, "F51")
+            check("and appears in the registry", made is not None)
+            check("refusing no sky at all", made.keepout_wedges == (),
+                  made.keepout_wedges)
+            check("which is NOT the first site's wedge",
+                  made.keepout_wedges != config.DEFAULT_SITE.keepout_wedges)
+            check("its mask says every sector is unconfirmed",
+                  all("not yet confirmed" in e[4] for e in made.horizon_mask),
+                  [e[4] for e in made.horizon_mask])
+            check("and every sector only warns",
+                  all(e[3] == "soft" for e in made.horizon_mask))
+
+            # Position comes from MPC's table, not from the form.
+            check("its position is MPC's own",
+                  abs(made.lon_deg - 203.74409) < 1e-5, made.lon_deg)
+            check("its night boundary follows its longitude, not Croatia's",
+                  made.night_rollover_hour_ut
+                  != config.DEFAULT_SITE.night_rollover_hour_ut,
+                  made.night_rollover_hour_ut)
+            check("and its plan files do not land in another site's directory",
+                  made.plan_dir != config.DEFAULT_SITE.plan_dir, made.plan_dir)
+        finally:
+            conn.close()
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
+        import importlib
+        importlib.reload(appmod)
+
+
+def test_an_observatory_code_is_not_optional_and_cannot_be_invented():
+    """MPC computes an ephemeris for a code. No code, no ephemeris, no board.
+
+    So the code is checked against MPC's own table rather than accepted as
+    typed -- and that table is also where the position comes from, because a
+    position typed into a form is a board describing a different patch of sky.
+    """
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    try:
+        _fresh_board(appmod)
+        c, tok = _settings_client(appmod, username="hopeful", admin=False)
+
+        r = c.post("/sites/new", data={"csrf": tok, "obscode": "",
+                                       "name": "No code", "display_tz": "UTC"})
+        check("a missing code is refused",
+              r.status_code == 400 and b"code MPC assigned" in r.data)
+
+        r = c.post("/sites/new", data={"csrf": tok, "obscode": "ZZZ",
+                                       "name": "Invented",
+                                       "display_tz": "UTC"})
+        check("a code MPC does not know is refused", r.status_code == 400)
+        check("and the refusal explains why it cannot be served",
+              b"no position" in r.data)
+
+        r = c.post("/sites/new", data={"csrf": tok, "obscode": "F51",
+                                       "name": "Fine",
+                                       "display_tz": "Nowhere/Nothing"})
+        check("an unknown timezone is refused",
+              r.status_code == 400 and b"not a timezone" in r.data)
+
+        c.post("/sites/new", data={"csrf": tok, "obscode": "F51",
+                                   "name": "First", "display_tz": "UTC"})
+        r = c.post("/sites/new", data={"csrf": tok, "obscode": "F51",
+                                       "name": "Again", "display_tz": "UTC"})
+        check("the same code cannot be added twice",
+              r.status_code == 400 and b"already on this deployment" in r.data)
+
+        # L01 comes from a file rather than the table, and must be just as
+        # taken.
+        r = c.post("/sites/new", data={"csrf": tok, "obscode": "L01",
+                                       "name": "Clash", "display_tz": "UTC"})
+        check("nor can a code a file already claims",
+              r.status_code == 400 and b"already on this deployment" in r.data)
+
+        anon = appmod.app.test_client()
+        r = anon.post("/sites/new", data={"obscode": "F52", "name": "Anon",
+                                          "display_tz": "UTC"})
+        check("and a signed-out visitor cannot add one at all",
+              r.status_code in (400, 401, 403), r.status_code)
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
+        import importlib
+        importlib.reload(appmod)
+
+
+def test_the_observatory_cap_is_enforced():
+    """The cap is what bounds this deployment's load on MPC.
+
+    Only the ephemeris fetch is per-observatory, so the number of sites is
+    the number that matters -- and a file-defined site costs exactly as much
+    as a signed-up one, so both count towards it.
+    """
+    import app as appmod
+
+    prev_db, prev_cap = config.DB_PATH, config.ACTIVE_SITE_CAP
+    try:
+        _fresh_board(appmod)
+        c, tok = _settings_client(appmod, username="capper", admin=False)
+
+        conn = db.connect(config.DB_PATH)
+        try:
+            check("the file-defined site counts towards the cap",
+                  registry.active_count(conn) == len(config.SITES),
+                  registry.active_count(conn))
+        finally:
+            conn.close()
+
+        config.ACTIVE_SITE_CAP = len(config.SITES)
+        r = c.post("/sites/new", data={"csrf": tok, "obscode": "F51",
+                                       "name": "Over", "display_tz": "UTC"})
+        check("adding one past the cap is refused", r.status_code == 400)
+        check("and the refusal says what the cap is for",
+              b"load on MPC" in r.data or b"requests a minute" in r.data)
+
+        config.ACTIVE_SITE_CAP = len(config.SITES) + 1
+        r = c.post("/sites/new", data={"csrf": tok, "obscode": "F51",
+                                       "name": "Fits", "display_tz": "UTC"})
+        check("raising the cap by one lets exactly one more in",
+              r.status_code == 302, r.status_code)
+        r = c.post("/sites/new", data={"csrf": tok, "obscode": "F52",
+                                       "name": "One too many",
+                                       "display_tz": "UTC"})
+        check("and no more than one", r.status_code == 400)
+    finally:
+        config.DB_PATH, config.ACTIVE_SITE_CAP = prev_db, prev_cap
+        siteconf.forget()
+        import importlib
+        importlib.reload(appmod)
+
+
+def test_owner_edits_and_members_observe():
+    """One role boundary, and it has to hold on somebody else's observatory.
+
+    The owner created the site and configures it. Everyone else -- including
+    another observatory's owner, who is a perfectly ordinary signed-in
+    account here -- marks targets and reads the board.
+    """
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    try:
+        _fresh_board(appmod)
+        owner, otok = _settings_client(appmod, username="owner1", admin=False)
+        owner.post("/sites/new", data={"csrf": otok, "obscode": "F51",
+                                       "name": "Owned", "display_tz": "UTC"})
+
+        conn = db.connect(config.DB_PATH)
+        try:
+            made = registry.by_obscode(conn, "F51")
+            uid = db.user_by_name(conn, "owner1")["id"]
+            check("whoever created it owns it",
+                  db.site_role(conn, made.id, uid) == db.OWNER)
+        finally:
+            conn.close()
+
+        page = owner.get("/settings?site=F51").data.decode()
+        check("the owner gets a form on their own observatory",
+              'name="max_mag"' in page)
+
+        stranger, stok = _settings_client(appmod, username="stranger",
+                                          admin=False)
+        page = stranger.get("/settings?site=F51").data.decode()
+        check("another account can read it", "Owned" in page)
+        check("but is offered nothing to change",
+              'name="max_mag"' not in page)
+        r = stranger.post("/settings", data={"csrf": stok, "action": "save",
+                                             "max_mag": "1"})
+        check("and a save from them is refused", r.status_code == 403,
+              r.status_code)
+        check("with a refusal that says who may",
+              b"owner" in r.data)
+
+        conn = db.connect(config.DB_PATH)
+        try:
+            made = registry.by_obscode(conn, "F51")
+            check("nothing was changed by the attempt",
+                  made.max_mag == sitesmod.STARTING_POINT["max_mag"],
+                  made.max_mag)
+
+            # A member observes; they still do not configure.
+            sid = made.id
+            uid = db.user_by_name(conn, "stranger")["id"]
+            db.add_site_member(conn, sid, uid, db.MEMBER)
+            check("a member is recorded as one",
+                  db.site_role(conn, sid, uid) == db.MEMBER)
+        finally:
+            conn.close()
+
+        page = stranger.get("/settings?site=F51").data.decode()
+        check("and a member is still offered nothing to change",
+              'name="max_mag"' not in page)
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
+        import importlib
+        importlib.reload(appmod)
+
+
+def test_you_land_on_the_observatory_you_work_at():
+    """A member goes to their own board; a stranger sees the default."""
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    try:
+        _fresh_board(appmod)
+        owner, otok = _settings_client(appmod, username="lander", admin=False)
+        owner.post("/sites/new", data={"csrf": otok, "obscode": "F51",
+                                       "name": "Home", "display_tz": "UTC"})
+
+        anon = appmod.app.test_client()
+        check("a signed-out visitor still lands on the default board",
+              config.DEFAULT_SITE.obscode
+              in anon.get("/status").data.decode())
+
+        fresh = appmod.app.test_client()
+        fresh.post("/login", data={"username": "lander",
+                                   "password": "correct-horse-7"})
+        check("signing in lands you on the observatory you work at",
+              "F51" in fresh.get("/status").data.decode(),
+              fresh.get("/status").data.decode()[:200])
+
+        check("and the switcher can still take you elsewhere",
+              config.DEFAULT_SITE.obscode in fresh.get(
+                  "/status?site=" + config.DEFAULT_SITE.obscode
+              ).data.decode())
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
+        import importlib
         importlib.reload(appmod)
 
 
@@ -4098,6 +4385,11 @@ def main():
                test_a_keepout_wedge_cannot_be_changed_by_accident,
                test_an_edited_limit_reaches_the_update_cycle,
                test_the_settings_preview_is_drawn_by_the_board_s_own_code,
+               test_a_new_observatory_inherits_nobody_elses_dome_limits,
+               test_an_observatory_code_is_not_optional_and_cannot_be_invented,
+               test_the_observatory_cap_is_enforced,
+               test_owner_edits_and_members_observe,
+               test_you_land_on_the_observatory_you_work_at,
                test_ranking_bounds, test_row_rejection_reasons,
                test_replay_ts_never_takes_the_map_down,
                test_night_archive_survives_per_account_state,
