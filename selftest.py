@@ -13,6 +13,7 @@ Two of these guard against mistakes that would otherwise be invisible:
 Run: python3 selftest.py
 """
 
+import dataclasses
 import importlib
 import json
 import os
@@ -54,7 +55,7 @@ def check(name, condition, detail=""):
 
 
 def test_site():
-    loc = observability.site()
+    loc = observability.earth_location()
     check("site latitude ~45.2909 N", abs(loc.lat.deg - 45.2909) < 0.001,
           f"got {loc.lat.deg:.4f}")
     check("site longitude ~13.7493 E", abs(loc.lon.deg - 13.74930) < 0.001,
@@ -73,7 +74,7 @@ def test_horizon_mask():
 
 
 def test_analytic_matches_astropy():
-    loc = observability.site()
+    loc = observability.earth_location()
     t = Time("2026-09-08 22:48:00")
     lst = t.sidereal_time("apparent", longitude=loc.lon).deg
     rng = np.random.default_rng(0)
@@ -172,7 +173,8 @@ def test_exposure_rule():
     r = ephemeris.Row(SAMPLE_EPH)
     r.vmag = 12.5  # would be -17.5 minutes unclamped
     check("bright target clamped to the floor, not negative",
-          r.exposure_minutes() == config.EXPOSURE_FLOOR_MIN, r.exposure_minutes())
+          r.exposure_minutes() == config.DEFAULT_SITE.exposure_floor_min,
+          r.exposure_minutes())
 
 
 def test_night_bounds():
@@ -1234,8 +1236,8 @@ def test_schema_migration_from_older_db():
 
 
 def test_ranking_bounds():
-    rows = [dict(score=100, arc_days=0.0, vmag=config.MAG_BRIGHT),
-            dict(score=0, arc_days=99.0, vmag=config.MAX_MAG)]
+    rows = [dict(score=100, arc_days=0.0, vmag=config.DEFAULT_SITE.mag_bright),
+            dict(score=0, arc_days=99.0, vmag=config.DEFAULT_SITE.max_mag)]
     ranking.rank(rows)
     check("best possible target scores the maximum",
           abs(rows[0]["score_total"] - ranking.max_possible_score()) < 1e-9,
@@ -1292,18 +1294,19 @@ def test_row_rejection_reasons():
 
     # ...but a sector marked hard still refuses, which is the whole point of
     # keeping the distinction configurable.
-    saved = config.HORIZON_MASK[:]
-    try:
-        config.HORIZON_MASK[0] = (337.5, 22.5, None, "hard")
-        importlib.reload(observability)
-        importlib.reload(pipeline)
-        check("a sector marked hard does reject",
-              "azBlocked" in pipeline.row_rejections(r5, far_future),
-              pipeline.row_rejections(r5, far_future))
-    finally:
-        config.HORIZON_MASK[:] = saved
-        importlib.reload(observability)
-        importlib.reload(pipeline)
+    #
+    # This used to mutate the global mask and reload two modules to make the
+    # change visible, because the sector arrays were built once at import.
+    # A site is passed in instead now, which is what stage A was for -- and
+    # the default site is never touched, so a hard north cannot leak out of
+    # this test into whatever runs after it.
+    hard_north = dataclasses.replace(
+        config.DEFAULT_SITE,
+        horizon_mask=((337.5, 22.5, None, "hard"),)
+        + tuple(config.DEFAULT_SITE.horizon_mask[1:]))
+    check("a sector marked hard does reject",
+          "azBlocked" in pipeline.row_rejections(r5, far_future, hard_north),
+          pipeline.row_rejections(r5, far_future, hard_north))
     check("mask restored to soft after the test",
           pipeline.row_rejections(r5, far_future) == [])
 
@@ -1573,16 +1576,16 @@ def test_skymap_orientation():
 def test_skymap_mask_wedges():
     """Every sector wedge must cover the sector it claims, and no other."""
     svg = skymap.render_svg([], None, size=400)
-    for name in config.SECTOR_NAMES:
+    for name in config.DEFAULT_SITE.sector_names:
         check(f"{name} wedge present in the map",
               f">{name} &mdash;" in svg or f">{name}</text>" in svg)
 
-    idx = {n: i for i, n in enumerate(config.SECTOR_NAMES)}
+    idx = {n: i for i, n in enumerate(config.DEFAULT_SITE.sector_names)}
     for name, az in [("N", 0), ("NE", 45), ("E", 90), ("SE", 135),
                      ("S", 180), ("SW", 225), ("W", 270), ("NW", 315)]:
         got = int(observability.sector_index(az))
         check(f"azimuth {az:3d} falls in sector {name}", got == idx[name],
-              f"got {config.SECTOR_NAMES[got]}")
+              f"got {config.DEFAULT_SITE.sector_names[got]}")
 
     # Sector boundaries: 337.5 is the first degree of N, 22.5 the first of NE.
     check("337.5 is the start of the north sector",
@@ -1601,12 +1604,12 @@ def test_moon_exclusion_locus():
     for alt, az in [(70.0, 10.0), (35.0, 200.0), (5.0, 300.0)]:
         bearings = [360.0 * k / 72 for k in range(72)]
         alts, azs = observability.offset_position(
-            alt, az, config.MOON_SEP_MIN, bearings)
+            alt, az, config.DEFAULT_SITE.moon_sep_min, bearings)
         seps = observability.angular_separation(alt, az, np.array(alts),
                                                 np.array(azs))
-        worst = float(np.abs(seps - config.MOON_SEP_MIN).max())
+        worst = float(np.abs(seps - config.DEFAULT_SITE.moon_sep_min).max())
         check(f"locus around alt={alt:.0f} is exactly "
-              f"{config.MOON_SEP_MIN:.0f} deg wide", worst < 1e-8,
+              f"{config.DEFAULT_SITE.moon_sep_min:.0f} deg wide", worst < 1e-8,
               f"worst error {worst:.2e} deg")
 
     # Radius is linear in zenith distance, so distance from the CENTRE is the
@@ -1619,7 +1622,7 @@ def test_moon_exclusion_locus():
 
     def projected_spread(moon_alt):
         alts, azs = observability.offset_position(
-            moon_alt, 0.0, config.MOON_SEP_MIN, bearings)
+            moon_alt, 0.0, config.DEFAULT_SITE.moon_sep_min, bearings)
         mx, my = skymap.project(0.0, moon_alt, cx, cy, radius)
         d = []
         for a_l, a_z in zip(list(alts), list(azs)):
@@ -1858,8 +1861,8 @@ def test_offsets_parse_with_the_fast_motion_flag():
     check("spread over the real ZTF10G9 sample is enormous",
           spread == (13502, 9274), spread)
     check("and a cloud that size dwarfs the telescope's field",
-          spread[0] > config.FOV_ARCSEC * 4,
-          "%d\" vs %d\" field" % (spread[0], config.FOV_ARCSEC))
+          spread[0] > config.DEFAULT_SITE.fov_arcsec * 4,
+          "%d\" vs %d\" field" % (spread[0], config.DEFAULT_SITE.fov_arcsec))
 
 
 def test_cache_schema_forces_one_refetch():
@@ -2532,7 +2535,8 @@ def test_frame_speed_table():
     r = ephemeris.Row(SAMPLE_EPH)
     r.motion = 8.5
     check("frame count is fixed for every target",
-          r.frame_plan() == (config.EXPOSURE_FRAMES, 15), r.frame_plan())
+          r.frame_plan() == (config.DEFAULT_SITE.exposure_frames, 15),
+          r.frame_plan())
 
     # Real values from the night this was specified.
     for desig, motion, expected in [("P22pZo5", 5.03, 15), ("A11GP9t", 64.45, 5),
@@ -2585,7 +2589,7 @@ def test_keepout_wedge():
     # already moved once and will move again when the observatory gives us the
     # real mount limit; what must never change is the INVARIANT -- north is
     # inside, south is outside, and a low row in there is refused.
-    start, end, min_alt, _reason = config.KEEPOUT_WEDGES[0]
+    start, end, min_alt, _reason = config.DEFAULT_SITE.keepout_wedges[0]
     inside_az = (start + end) / 2.0 if start < end else ((start + 360.0 + end) / 2.0) % 360.0
 
     check("the arc runs clockwise and swallows the north",
@@ -2734,9 +2738,9 @@ def test_altitude_plot():
     # MIN_ALT is dead -- oalt=20 means MPC never sends a row below 20, so a
     # line at 15 would imply a limit that can never apply.
     check("floor line draws MPC's real cutoff",
-          f"MPC cutoff {config.MPC_SERVER_MIN_ALT:g}" in svg)
+          f"MPC cutoff {config.DEFAULT_SITE.mpc_server_min_alt:g}" in svg)
     check("and not the dead MIN_ALT threshold",
-          f"min {config.MIN_ALT:g}&#176;" not in svg)
+          f"min {config.DEFAULT_SITE.min_alt:g}&#176;" not in svg)
 
     check("the usable window is shaded", "observable window" in svg)
     check("too few rows renders nothing rather than a broken axis",

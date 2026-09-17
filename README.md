@@ -152,7 +152,8 @@ which is what correctness requires, costs it 218 s and costs us about 2.
 
 | File | Role |
 |---|---|
-| `config.py` | Site, dome mask, every threshold. All TBDs live here. |
+| `sites.py` | The `Site` type: one observatory and its thresholds. |
+| `config.py` | The deployment, plus `DEFAULT_SITE` — L01. All TBDs live here. |
 | `neocp.py` | NEOCP list + `neocp_info` orbital parameters. |
 | `ephemeris.py` | Per-object MPC ephemeris, scatteredness, observation history. |
 | `pipeline.py` | Night model, filter cascade, row selection, cross-check. |

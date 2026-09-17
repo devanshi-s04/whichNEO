@@ -1,9 +1,14 @@
-"""Observability calculations for L01 (Tican Station, Visnjan Observatory)."""
+"""Observability calculations for one observatory.
+
+Every function that depends on where the telescope is takes a `site`. Passing
+none means the deployment's default site, which is how the single-observatory
+board calls it -- see sites.py.
+"""
 
 import numpy as np
 import astropy.units as u
 from astropy.time import Time
-from astropy.coordinates import EarthLocation, SkyCoord, AltAz, TETE, get_body
+from astropy.coordinates import SkyCoord, AltAz, TETE, get_body
 from astropy.utils import iers
 
 import config
@@ -15,57 +20,54 @@ iers.conf.auto_download = False
 iers.conf.auto_max_age = None
 iers.conf.iers_degraded_accuracy = "ignore"
 
-_A_EARTH_M = 6378137.0
 _SIDEREAL_RATE = 1.0027379093
 
-_MIN_ALT_BY_SECTOR = np.array(
-    [np.inf if m is None else m for (_, _, m, _h) in config.HORIZON_MASK]
-)
-# Whether violating a sector's limit is a refusal or a warning. See the
-# HARDNESS note in config.HORIZON_MASK: soft sectors never remove a target.
-_HARD_BY_SECTOR = np.array(
-    [h == "hard" for (_, _, _m, h) in config.HORIZON_MASK]
-)
+
+def _site(site):
+    """The site to work on. None means the deployment's default.
+
+    This is the one place in the module that still reaches for a global, so
+    when several sites exist it is the one line to delete.
+    """
+    return config.DEFAULT_SITE if site is None else site
 
 
-def site():
-    """L01 as an EarthLocation, built from its MPC parallax constants."""
-    lon = np.radians(config.SITE_LON_DEG)
-    return EarthLocation.from_geocentric(
-        config.SITE_RHO_COS_PHI * _A_EARTH_M * np.cos(lon) * u.m,
-        config.SITE_RHO_COS_PHI * _A_EARTH_M * np.sin(lon) * u.m,
-        config.SITE_RHO_SIN_PHI * _A_EARTH_M * u.m,
-    )
+def earth_location(site=None):
+    """The site as an EarthLocation, built from its MPC parallax constants."""
+    return _site(site).earth_location
 
 
 def sector_index(az_deg):
-    """Index into config.HORIZON_MASK for an azimuth.
+    """Index into a site's horizon mask for an azimuth.
 
-    Sectors are 45 deg wide starting at 337.5, matching config.HORIZON_MASK
-    order, so the lookup is direct arithmetic rather than a search.
+    Sectors are 45 deg wide starting at 337.5, matching the mask's own order,
+    so the lookup is direct arithmetic rather than a search. That layout is a
+    property of the mask format rather than of any one observatory, so this
+    needs no site.
     """
     return np.floor(((np.asarray(az_deg) - 337.5) % 360.0) / 45.0).astype(int)
 
 
-def min_altitude_for_azimuth(az_deg):
+def min_altitude_for_azimuth(az_deg, site=None):
     """Horizon-mask floor for a given azimuth. inf means the whole sector is
     discouraged at every altitude."""
-    return _MIN_ALT_BY_SECTOR[sector_index(az_deg)]
+    return _site(site).min_alt_by_sector[sector_index(az_deg)]
 
 
-def sector_is_hard(az_deg):
+def sector_is_hard(az_deg, site=None):
     """True where the sector is a real obstruction rather than a preference."""
-    return _HARD_BY_SECTOR[sector_index(az_deg)]
+    return _site(site).hard_by_sector[sector_index(az_deg)]
 
 
-def hard_min_altitude(az_deg):
+def hard_min_altitude(az_deg, site=None):
     """The altitude floor that actually rejects, per azimuth.
 
     Soft sectors impose none (-inf), so a discouraged direction never
     shortens a computed observing window -- it only earns a warning.
     """
+    s = _site(site)
     idx = sector_index(az_deg)
-    return np.where(_HARD_BY_SECTOR[idx], _MIN_ALT_BY_SECTOR[idx], -np.inf)
+    return np.where(s.hard_by_sector[idx], s.min_alt_by_sector[idx], -np.inf)
 
 
 def in_arc(az_deg, start_deg, end_deg):
@@ -77,29 +79,30 @@ def in_arc(az_deg, start_deg, end_deg):
     return ((np.asarray(az_deg) - start_deg) % 360.0) <= ((end_deg - start_deg) % 360.0)
 
 
-def keepout_violation(az_deg, alt_deg):
+def keepout_violation(az_deg, alt_deg, site=None):
     """The keep-out wedge this position falls in, or None.
 
-    Unlike the horizon mask this is never advisory: config.KEEPOUT_WEDGES
-    describes sky that would put the telescope somewhere it can be damaged,
+    Unlike the horizon mask this is never advisory: a site's keep-out wedges
+    describe sky that would put the telescope somewhere it can be damaged,
     so a hit here is a refusal with no override.
     """
-    for start, end, min_alt, reason in config.KEEPOUT_WEDGES:
+    for start, end, min_alt, reason in _site(site).keepout_wedges:
         if bool(in_arc(az_deg, start, end)) and alt_deg < min_alt:
             return reason
     return None
 
 
-def mask_violation(az_deg, alt_deg):
+def mask_violation(az_deg, alt_deg, site=None):
     """How a single position sits against the mask.
 
     Returns (reason, hard) where reason is None when the position is clear.
     A soft violation is information, not a rejection -- it must never be used
     to drop a target, only to warn about one.
     """
+    s = _site(site)
     idx = int(sector_index(az_deg))
-    floor = float(_MIN_ALT_BY_SECTOR[idx])
-    hard = bool(_HARD_BY_SECTOR[idx])
+    floor = float(s.min_alt_by_sector[idx])
+    hard = bool(s.hard_by_sector[idx])
     if np.isinf(floor):
         return "azBlocked", hard
     if alt_deg < floor:
@@ -141,7 +144,7 @@ def moon_illumination(t, loc):
     return float((1 + np.cos(phase)) / 2.0)
 
 
-def moon_state(unix_ts=None):
+def moon_state(unix_ts=None, site=None):
     """Where the moon is and how full it is, for the sky map.
 
     Azimuth is returned as a compass bearing, the same convention the horizon
@@ -149,7 +152,7 @@ def moon_state(unix_ts=None):
     moon's altitude for the filter cascade and used to discard the azimuth;
     the map needs both, so this returns the pair.
     """
-    loc = site()
+    loc = _site(site).earth_location
     t = Time(float(unix_ts), format="unix") if unix_ts is not None else Time.now()
     moon = get_body("moon", t, loc)
     aa = moon.transform_to(AltAz(obstime=t, location=loc))
@@ -157,7 +160,7 @@ def moon_state(unix_ts=None):
             "illum": moon_illumination(t, loc), "ts": float(t.unix)}
 
 
-def moon_altitudes(unix_ts_list):
+def moon_altitudes(unix_ts_list, site=None):
     """Moon altitude at each of several instants, in one vectorised call.
 
     Used to draw a gap-free Moon curve on the altitude plot: the object's
@@ -170,7 +173,7 @@ def moon_altitudes(unix_ts_list):
     """
     if not unix_ts_list:
         return []
-    loc = site()
+    loc = _site(site).earth_location
     t = Time(np.asarray(unix_ts_list, dtype=float), format="unix")
     aa = get_body("moon", t, loc).transform_to(AltAz(obstime=t, location=loc))
     alts = np.atleast_1d(aa.alt.deg)
@@ -210,7 +213,7 @@ def offset_position(alt_deg, az_deg, sep_deg, bearing_deg):
     return np.degrees(lat2), (az_deg + np.degrees(d_lon)) % 360.0
 
 
-def altaz_batch(ra_degs, dec_degs, unix_ts):
+def altaz_batch(ra_degs, dec_degs, unix_ts, site=None):
     """Alt/az and lunar separation for many positions at one instant.
 
     Used to verify MPC's ephemeris independently. Vectorised deliberately:
@@ -218,7 +221,7 @@ def altaz_batch(ra_degs, dec_degs, unix_ts):
     """
     if not len(ra_degs):
         return []
-    loc = site()
+    loc = _site(site).earth_location
     t = Time(float(unix_ts), format="unix")
     frame = AltAz(obstime=t, location=loc)
     coords = SkyCoord(ra=np.asarray(ra_degs) * u.deg,
@@ -233,8 +236,8 @@ def altaz_batch(ra_degs, dec_degs, unix_ts):
             for i in range(len(alt))]
 
 
-def compute(rows, when=None, scan_hours=24, scan_step_min=2):
-    """Annotate each NEOCP row with observability for L01.
+def compute(rows, when=None, scan_hours=24, scan_step_min=2, site=None):
+    """Annotate each NEOCP row with observability from a given site.
 
     Instantaneous values use a full astropy transform; the forward scan that
     yields observing windows uses the analytic path so the whole update stays
@@ -243,7 +246,8 @@ def compute(rows, when=None, scan_hours=24, scan_step_min=2):
     if not rows:
         return rows
 
-    loc = site()
+    s = _site(site)
+    loc = s.earth_location
     lat = loc.lat.deg
     now = Time(when) if when is not None else Time.now()
 
@@ -290,7 +294,7 @@ def compute(rows, when=None, scan_hours=24, scan_step_min=2):
     sun_alt_grid = np.atleast_1d(
         get_body("sun", grid_times, loc).transform_to(
             AltAz(obstime=grid_times, location=loc)).alt.deg)
-    dark_grid = sun_alt_grid < config.SUN_ALT_MAX
+    dark_grid = sun_alt_grid < s.sun_alt_max
 
     for i, r in enumerate(rows):
         a, z = float(alt_now[i]), float(az_now[i])
@@ -319,15 +323,15 @@ def compute(rows, when=None, scan_hours=24, scan_step_min=2):
             ((lst_grid - ra_app[i] + 180.0) % 360.0) - 180.0, dec_app[i], lat)
         # Only hard limits close a window. A soft sector is poor sky, not
         # unreachable sky, so it must not shorten what we report as available.
-        ok_grid = (alt_grid >= hard_min_altitude(az_grid)) & dark_grid
+        ok_grid = (alt_grid >= hard_min_altitude(az_grid, s)) & dark_grid
         # Keep-out wedges do close it: time the telescope cannot be pointed is
         # not time available, so it must not be counted as a window.
-        for start, end, min_alt, _reason in config.KEEPOUT_WEDGES:
+        for start, end, min_alt, _reason in s.keepout_wedges:
             ok_grid &= ~(in_arc(az_grid, start, end) & (alt_grid < min_alt))
-        if config.MAX_ALTITUDE is not None:
-            ok_grid &= alt_grid <= config.MAX_ALTITUDE
+        if s.max_altitude is not None:
+            ok_grid &= alt_grid <= s.max_altitude
 
-        flags = evaluate_flags(r)
+        flags = evaluate_flags(r, s)
         r["flags"] = flags
         r["observable"] = not flags
 
@@ -344,29 +348,30 @@ def compute(rows, when=None, scan_hours=24, scan_step_min=2):
     return rows
 
 
-def evaluate_flags(r):
+def evaluate_flags(r, site=None):
     """Reasons this target cannot be observed right now. Empty means go."""
+    s = _site(site)
     flags = []
-    if r["vmag"] > config.MAX_MAG:
+    if r["vmag"] > s.max_mag:
         flags.append("TOO_FAINT")
-    if r["sun_alt_deg"] >= config.SUN_ALT_MAX:
+    if r["sun_alt_deg"] >= s.sun_alt_max:
         flags.append("SUN_UP")
 
-    if keepout_violation(r["az_deg"], r["alt_deg"]):
+    if keepout_violation(r["az_deg"], r["alt_deg"], s):
         flags.append("KEEP_OUT")
 
     # A mask violation only refuses when the sector is hard. Soft sectors
     # record a warning instead, so nothing is ever dropped for poor sky.
-    reason, hard = mask_violation(r["az_deg"], r["alt_deg"])
+    reason, hard = mask_violation(r["az_deg"], r["alt_deg"], s)
     if reason and hard:
         flags.append("AZ_BLOCKED" if reason == "azBlocked" else "TOO_LOW")
     elif reason:
         r["mask_warning"] = reason
-    if config.MAX_ALTITUDE is not None and r["alt_deg"] > config.MAX_ALTITUDE:
+    if s.max_altitude is not None and r["alt_deg"] > s.max_altitude:
         flags.append("TOO_HIGH")
 
-    if r["moon_sep_deg"] < config.MOON_SEP_MIN and r["moon_alt_deg"] > 0:
+    if r["moon_sep_deg"] < s.moon_sep_min and r["moon_alt_deg"] > 0:
         flags.append("MOON_CLOSE")
-    if r["desig"] in config.BLACKLIST:
+    if r["desig"] in s.blacklist:
         flags.append("BLACKLISTED")
     return flags

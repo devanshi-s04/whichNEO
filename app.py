@@ -46,9 +46,20 @@ app.config.update(
 )
 
 
+def current_site():
+    """The observatory this request is about.
+
+    One deployment serves one observatory today, so this is the default site.
+    When the site switcher arrives (stage C in multisite.md) this is the one
+    function that has to start reading the request instead, and every caller
+    below already asks it rather than reaching for a global.
+    """
+    return config.DEFAULT_SITE
+
+
 try:
     from zoneinfo import ZoneInfo
-    _TZ = ZoneInfo(config.DISPLAY_TZ)
+    _TZ = ZoneInfo(current_site().display_tz)
 except Exception:                                    # no tzdata on the host
     _TZ = timezone.utc
 
@@ -58,7 +69,8 @@ def inject_config():
     """Templates read limits and the horizon mask straight from config, and
     the sortable-column registry straight from ranking so the sort bar and
     the sort logic never drift apart."""
-    return {"config": config, "tzname": _tzabbr(), "ranking": ranking,
+    return {"config": config, "site": current_site(),
+            "tzname": _tzabbr(), "ranking": ranking,
             "current_user": auth.current_user(),
             "csrf_token": auth.csrf_token,
             "min_password": auth.MIN_PASSWORD,
@@ -67,7 +79,7 @@ def inject_config():
 
 def _tzabbr(ts=None):
     d = datetime.fromtimestamp(ts if ts is not None else time.time(), _TZ)
-    return d.strftime("%Z") or config.DISPLAY_TZ
+    return d.strftime("%Z") or current_site().display_tz
 
 
 @app.template_filter("localt")
@@ -133,7 +145,7 @@ def load_sorted(conn, show_observed=False, show_hidden=False, mode=None,
                            include_observed=show_observed,
                            user_id=viewer_id())
     rows = ranking.apply_range_filters(rows, range_filters)
-    return ranking.sort_targets(rows, mode)
+    return ranking.sort_targets(rows, mode, site=current_site())
 
 
 def status(conn):
@@ -257,13 +269,14 @@ def sky_view(conn, rows, now=None):
     tracks = {d: ephemeris.track(lines)
               for d, lines in db.load_tracks(
                   conn, [r["desig"] for r in shown]).items()}
+    site = current_site()
     marks = skymap.target_marks(shown, tracks, now)
     try:
-        moon = observability.moon_state(now)
+        moon = observability.moon_state(now, site)
     except Exception:
         moon = None                       # never take the board down for this
     return {
-        "svg": skymap.render_svg(marks, moon, localt=localt),
+        "svg": skymap.render_svg(marks, moon, localt=localt, site=site),
         "moon": moon,
         "up": sum(1 for m in marks if m["up"]),
         "pending": sum(1 for m in marks if not m["up"]),
@@ -300,12 +313,14 @@ def archived_sky_view(conn, archived, now=None):
         rows.append({"desig": t["desig"], "observed": mine,
                      "vmag": t["vmag"], "score": t["score"]})
     tracks = {t["desig"]: ephemeris.track(t["lines"]) for t in archived["targets"]}
+    site = current_site()
     marks = skymap.target_marks(rows, tracks, now)
     try:
-        moon = observability.moon_state(now)
+        moon = observability.moon_state(now, site)
     except Exception:
         moon = None                       # never take the board down for this
-    return {"svg": skymap.render_svg(marks, moon, localt=localt), "used": now}
+    return {"svg": skymap.render_svg(marks, moon, localt=localt, site=site),
+            "used": now}
 
 
 # Every metric a viewer can choose to plot for an object's polled history,
@@ -381,7 +396,7 @@ def _view_args():
     # meant first finding the row again in a separate view.
     return dict(show_observed=True,
                 show_hidden=request.args.get("hidden") == "1",
-                mode=request.args.get("sort") or config.DEFAULT_SORT,
+                mode=request.args.get("sort") or current_site().default_sort,
                 range_filters=ranking.parse_range_filters(request.args.get("range")))
 
 
@@ -416,7 +431,7 @@ def index():
             "index.html", rows=rows, strip=strip,
             upcoming=upcoming, status=status(conn), sky=sky_view(conn, rows),
             archived_nights=archived_nights, replay_default=replay_default,
-            max_score=ranking.max_possible_score(),
+            max_score=ranking.max_possible_score(current_site()),
             poll_interval=config.WEB_POLL_INTERVAL_S, **v)
     finally:
         conn.close()
@@ -536,7 +551,7 @@ def rows_partial():
         return render_template(
             "_rows.html",
             rows=load_sorted(conn, v["show_observed"], v["show_hidden"], v["mode"], v["range_filters"]),
-            max_score=ranking.max_possible_score(), **v)
+            max_score=ranking.max_possible_score(current_site()), **v)
     finally:
         conn.close()
 
@@ -818,7 +833,7 @@ def target_detail(desig):
                 hist_rows=hist_rows, hist_charts=hist_charts)
         # Drawn from points/rows already cached, so the page makes no network call.
         pts = db.load_offsets(conn, desig)
-        cov = uncertainty.coverage(pts) if pts else None
+        cov = uncertainty.coverage(pts, site=current_site()) if pts else None
 
         # Same cached lines the sky map reads; full Row objects this time,
         # because the altitude plot needs moon_alt and sun_alt per row, not
@@ -846,13 +861,15 @@ def target_detail(desig):
             n = max(2, int((t1 - t0) / step_s) + 1)
             sample_ts = [t0 + (t1 - t0) * i / (n - 1) for i in range(n)]
             try:
-                moon_track = observability.moon_altitudes(sample_ts)
+                moon_track = observability.moon_altitudes(sample_ts,
+                                                          current_site())
             except Exception:
                 moon_track = None   # never take the page down for this
 
         moon_svg = moonplot.render_svg(
             combined_rows, rows[0]["window_start_ts"], rows[0]["window_end_ts"],
-            localt=localt, tzlabel=_tzabbr(), moon_track=moon_track
+            localt=localt, tzlabel=_tzabbr(), moon_track=moon_track,
+            site=current_site()
         ) if len(combined_rows) >= 2 else None
 
         hconn = history.connect()
@@ -864,13 +881,14 @@ def target_detail(desig):
 
         return render_template(
             "target.html", row=rows[0],
-            unc_svg=uncertainty.render_svg(pts) if pts else None,
+            unc_svg=(uncertainty.render_svg(pts, site=current_site())
+                     if pts else None),
             unc_points=len(pts) if pts else 0,
             unc_distinct=uncertainty.distinct(pts) if pts else 0,
             unc_coverage=cov,
             unc_extent=uncertainty.extent(pts) if pts else None,
             moon_svg=moon_svg,
-            fov=config.FOV_ARCSEC,
+            fov=current_site().fov_arcsec,
             now_pos=true_now(conn, desig),
             hist_rows=hist_rows, hist_charts=hist_charts,
             discovery_site=observatories.lookup(rows[0].get("discovery_code")),

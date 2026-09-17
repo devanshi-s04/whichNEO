@@ -68,7 +68,7 @@
 
   <td>{{ '%.0f'|format(r.cur_alt) ~ '&deg;'|safe if r.cur_alt is not none else '&mdash;'|safe }}</td>
   <td>{{ '%.0f'|format(r.cur_az) ~ '&deg;'|safe if r.cur_az is not none else '&mdash;'|safe }}</td>
-  <td class="{{ 'warn' if r.cur_moon_dist is not none and r.cur_moon_dist < config.MOON_SEP_MIN else '' }}">
+  <td class="{{ 'warn' if r.cur_moon_dist is not none and r.cur_moon_dist < site.moon_sep_min else '' }}">
     {{ '%.0f'|format(r.cur_moon_dist) ~ '&deg;'|safe if r.cur_moon_dist is not none else '&mdash;'|safe }}</td>
 
   <td class="{{ 'warn' if r.not_seen_days > 3 else '' }}">{{ '%.1f'|format(r.not_seen_days) }}</td>

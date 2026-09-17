@@ -13,37 +13,49 @@ stable through the day because it deliberately excludes altitude.
 import config
 
 
+def _site(site):
+    """The site to work on. None means the deployment's default.
+
+    The weights are per site: a 0.4-m telescope weighs magnitude differently
+    from a 1-m, and the magnitude component is normalised against the site's
+    own limiting magnitude.
+    """
+    return config.DEFAULT_SITE if site is None else site
+
+
 def _clip01(x):
     return max(0.0, min(1.0, x))
 
 
-def score_components(row):
+def score_components(row, site=None):
     """Each component normalised to 0..1, higher meaning better target."""
+    s = _site(site)
     digest2 = _clip01(row["score"] / 100.0)
 
     # A shorter arc means a less constrained orbit, so follow-up is worth more.
-    arc = _clip01(1.0 - row["arc_days"] / config.ARC_SATURATE_DAYS)
+    arc = _clip01(1.0 - row["arc_days"] / s.arc_saturate_days)
 
-    span = config.MAX_MAG - config.MAG_BRIGHT
-    magnitude = _clip01((config.MAX_MAG - row["vmag"]) / span) if span > 0 else 0.0
+    span = s.max_mag - s.mag_bright
+    magnitude = _clip01((s.max_mag - row["vmag"]) / span) if span > 0 else 0.0
 
     return {"digest2": digest2, "arc": arc, "magnitude": magnitude}
 
 
-def rank(rows):
+def rank(rows, site=None):
     """Attach score components and a weighted total to every row."""
+    s = _site(site)
     for r in rows:
-        comps = score_components(r)
+        comps = score_components(r, s)
         r["score_digest2"] = comps["digest2"]
         r["score_arc"] = comps["arc"]
         r["score_magnitude"] = comps["magnitude"]
         r["score_total"] = sum(
-            config.RANK_WEIGHTS[k] * v for k, v in comps.items())
+            s.rank_weights[k] * v for k, v in comps.items())
     return rows
 
 
-def max_possible_score():
-    return sum(config.RANK_WEIGHTS.values())
+def max_possible_score(site=None):
+    return sum(_site(site).rank_weights.values())
 
 
 # Targets with no observable window sort last; among those, keep a stable
@@ -201,8 +213,8 @@ def sort_key_compound(columns):
     return key
 
 
-def sort_targets(rows, mode=None):
-    mode = mode or config.DEFAULT_SORT
+def sort_targets(rows, mode=None, site=None):
+    mode = mode or _site(site).default_sort
     if mode == "chronological":
         key = sort_key_chronological
     elif mode == "score":

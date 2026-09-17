@@ -24,6 +24,15 @@ import config
 _UA = {"User-Agent": "visnjan_whichneo/0.2 "
                      "(Visnjan Observatory L01 follow-up planning)"}
 
+
+def _site(site):
+    """The site to work on. None means the deployment's default.
+
+    MPC computes an ephemeris for one observatory code, so every fetch here
+    is per-site -- it is the only per-site request the update cycle makes.
+    """
+    return config.DEFAULT_SITE if site is None else site
+
 # Version of the cached payload's CONTENT, not its shape. Bump it whenever a
 # parser changes what we would extract from the same page, so every cached
 # entry is refetched once.
@@ -107,32 +116,35 @@ class Row:
     def utc(self):
         return dt.datetime.fromtimestamp(self.ts, dt.timezone.utc)
 
-    def exposure_minutes(self):
+    def exposure_minutes(self, site=None):
         """The observatory's own rule, recovered from the legacy planner.
 
         Clamped at the floor: the formula is unbounded below and returns
         negative minutes for anything brighter than about V=16.
         """
-        mins = (config.EXPOSURE_BASE_MIN
-                + (self.vmag - config.EXPOSURE_REF_MAG)
-                * config.EXPOSURE_MIN_PER_MAG)
-        return round(max(mins, config.EXPOSURE_FLOOR_MIN), 2)
+        s = _site(site)
+        mins = (s.exposure_base_min
+                + (self.vmag - s.exposure_ref_mag)
+                * s.exposure_min_per_mag)
+        return round(max(mins, s.exposure_floor_min), 2)
 
-    def frame_seconds(self):
-        """Seconds per frame for this row's sky motion, from the observatory's
-        own table in config.EXPOSURE_SPEED_BANDS.
+    def frame_seconds(self, site=None):
+        """Seconds per frame for this row's sky motion, from the
+        observatory's own speed table.
 
         The faster an object moves, the shorter each frame must be to keep it
         from trailing across the detector. Bounds are upper-inclusive.
         """
-        for limit, seconds in config.EXPOSURE_SPEED_BANDS:
+        s = _site(site)
+        for limit, seconds in s.exposure_speed_bands:
             if self.motion <= limit:
                 return seconds
-        return config.EXPOSURE_FASTEST_SEC
+        return s.exposure_fastest_sec
 
-    def frame_plan(self):
+    def frame_plan(self, site=None):
         """(frames, seconds) -- the instruction for this row."""
-        return config.EXPOSURE_FRAMES, self.frame_seconds()
+        s = _site(site)
+        return s.exposure_frames, self.frame_seconds(s)
 
     def as_dict(self):
         return {k: getattr(self, k) for k in self.__slots__}
@@ -246,14 +258,15 @@ def signature(target):
     return f"{target['nobs']}|{target['arc_days']}"
 
 
-def _post(desig, timeout=None):
+def _post(desig, timeout=None, site=None):
+    s = _site(site)
     return requests.post(
         config.EPHEMERIS_URL,
         data={"mb": -30, "mf": 30, "dl": -90, "du": 90, "nl": 0, "nu": 100,
               "sort": "d", "W": "j", "obj": desig, "Parallax": 1,
-              "obscode": config.MPC_CODE, "int": 1, "start": 0, "raty": "a",
+              "obscode": s.obscode, "int": 1, "start": 0, "raty": "a",
               "mot": "m", "dmot": "p", "out": "f", "sun": "x",
-              "oalt": int(config.MPC_SERVER_MIN_ALT)},
+              "oalt": int(s.mpc_server_min_alt)},
         timeout=timeout or config.EPHEMERIS_TIMEOUT_S, headers=_UA)
 
 
@@ -292,24 +305,24 @@ def parse(desig, html_text):
     return ObjectEphemeris(desig, rows, offsets_url, map_url, obs_url)
 
 
-def fetch(desig):
+def fetch(desig, site=None):
     """Fetch and parse one object's ephemeris. Never raises."""
     try:
-        r = _post(desig)
+        r = _post(desig, site=site)
         r.raise_for_status()
         return parse(desig, r.text)
     except Exception as e:
         return ObjectEphemeris(desig, [], error=f"{type(e).__name__}: {e}")
 
 
-def _post_gap_fill(desig, timeout=None):
+def _post_gap_fill(desig, timeout=None, site=None):
     """Same request as _post(), but with no altitude floor at all.
 
     Scoped deliberately: this exists only to fill holes in moonplot.py's
-    chart when the object dips under MPC_SERVER_MIN_ALT for part of the
-    night (see update_neocp.py's _aux and app.py's target_detail, the only
-    two callers of this and fetch_gap_fill below). The filter cascade, the
-    sky map, and the uncertainty plot all keep reading the normal oalt=20
+    chart when the object dips under the site's mpc_server_min_alt for part
+    of the night (see update_neocp.py's _aux and app.py's target_detail, the
+    only two callers of this and fetch_gap_fill below). The filter cascade,
+    the sky map, and the uncertainty plot all keep reading the normal oalt=20
     fetch untouched, so loosening the floor here changes nothing about what
     gets filtered, ranked, or drawn anywhere else.
     """
@@ -317,30 +330,33 @@ def _post_gap_fill(desig, timeout=None):
         config.EPHEMERIS_URL,
         data={"mb": -30, "mf": 30, "dl": -90, "du": 90, "nl": 0, "nu": 100,
               "sort": "d", "W": "j", "obj": desig, "Parallax": 1,
-              "obscode": config.MPC_CODE, "int": 1, "start": 0, "raty": "a",
+              "obscode": _site(site).obscode, "int": 1, "start": 0,
+              "raty": "a",
               "mot": "m", "dmot": "p", "out": "f", "sun": "x", "oalt": -90},
         timeout=timeout or config.EPHEMERIS_TIMEOUT_S, headers=_UA)
 
 
-def fetch_gap_fill(desig):
+def fetch_gap_fill(desig, site=None):
     """The same object's ephemeris with no altitude floor. Never raises;
     an empty ObjectEphemeris on failure, exactly like fetch()."""
     try:
-        r = _post_gap_fill(desig)
+        r = _post_gap_fill(desig, site=site)
         r.raise_for_status()
         return parse(desig, r.text)
     except Exception as e:
         return ObjectEphemeris(desig, [], error=f"{type(e).__name__}: {e}")
 
 
-def fetch_many(desigs, workers=None):
+def fetch_many(desigs, workers=None, site=None):
     """Fetch several objects concurrently, politely."""
     desigs = list(desigs)
     if not desigs:
         return {}
+    s = _site(site)
     with ThreadPoolExecutor(
             max_workers=workers or config.EPHEMERIS_WORKERS) as pool:
-        return {e.desig: e for e in pool.map(fetch, desigs)}
+        return {e.desig: e
+                for e in pool.map(lambda d: fetch(d, site=s), desigs)}
 
 
 # --- auxiliary pages -------------------------------------------------------
@@ -404,7 +420,7 @@ def scatteredness(offsets_url):
     return spread(offsets(offsets_url))
 
 
-def observations(observations_url, mpc_code=None):
+def observations(observations_url, mpc_code=None, site=None):
     """Who has observed this object, from its 80-column astrometry.
 
     One fetch answers two questions: whether our own site is already among
@@ -414,7 +430,7 @@ def observations(observations_url, mpc_code=None):
     """
     if not observations_url:
         return None
-    code = mpc_code or config.MPC_CODE
+    code = mpc_code or _site(site).obscode
     try:
         r = requests.get(observations_url, timeout=config.NEOCP_TIMEOUT_S,
                          headers=_UA)
@@ -427,7 +443,7 @@ def observations(observations_url, mpc_code=None):
     return parse_observations(text, code)
 
 
-def parse_observations(text, mpc_code=None):
+def parse_observations(text, mpc_code=None, site=None):
     """Split out from the fetch so it can be tested without the network.
 
     Returns the records themselves alongside the summary. They cost nothing
@@ -439,7 +455,7 @@ def parse_observations(text, mpc_code=None):
 
     They are also exactly what ds42 needs as input. See ds42.md.
     """
-    code = mpc_code or config.MPC_CODE
+    code = mpc_code or _site(site).obscode
     counts, discovery, first = {}, None, None
     records = []
     for line in text.splitlines():
@@ -468,7 +484,7 @@ def parse_observations(text, mpc_code=None):
             "records": records}
 
 
-def observed_from_site(observations_url, mpc_code=None):
+def observed_from_site(observations_url, mpc_code=None, site=None):
     """Backwards-compatible helper."""
-    summary = observations(observations_url, mpc_code)
+    summary = observations(observations_url, mpc_code, site)
     return summary["observed_from_site"] if summary else None

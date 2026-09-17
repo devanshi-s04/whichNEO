@@ -14,7 +14,7 @@ true from L01, so it must land essentially at the top of the disc.
 
 Nothing here rejects anything. The horizon mask is drawn as tinted sky, and
 targets inside it are plotted exactly like any other -- see the HARDNESS note
-in config.HORIZON_MASK for why that matters.
+on the site's horizon mask for why that matters.
 """
 
 import math
@@ -23,6 +23,11 @@ import config
 import observability
 
 _SECTOR_WIDTH = 45.0
+
+
+def _site(site):
+    """The site to work on. None means the deployment's default."""
+    return config.DEFAULT_SITE if site is None else site
 
 
 # --- geometry ---------------------------------------------------------------
@@ -152,7 +157,7 @@ def target_marks(rows, tracks, now):
 
 # --- rendering --------------------------------------------------------------
 
-def _moon_locus(moon, cx, cy, radius, sep_deg=None):
+def _moon_locus(moon, cx, cy, radius, sep_deg=None, site=None):
     """The true locus of constant separation around the moon, as SVG paths.
 
     Radius here is linear in zenith distance, so distance from the centre is
@@ -163,7 +168,7 @@ def _moon_locus(moon, cx, cy, radius, sep_deg=None):
     it matters. Sampling the real locus gets the shape right. Segments that
     dip below the horizon are dropped rather than folded back over the disc.
     """
-    sep = config.MOON_SEP_MIN if sep_deg is None else sep_deg
+    sep = _site(site).moon_sep_min if sep_deg is None else sep_deg
     n = config.SKYMAP_MOON_RING_POINTS
     bearings = [360.0 * k / n for k in range(n + 1)]
     alts, azs = observability.offset_position(moon["alt"], moon["az"],
@@ -224,8 +229,9 @@ def _moon_glyph(mx, my, r, illum):
             f'{mx:.1f} {my - r:.1f} Z" fill="#e8ecf5" fill-opacity=".92"/>')
 
 
-def render_svg(marks, moon=None, size=None, localt=None):
+def render_svg(marks, moon=None, size=None, localt=None, site=None):
     """The whole map. `localt` formats a unix timestamp for rise labels."""
+    s = _site(site)
     size = size or config.SKYMAP_SIZE
     pad = 30
     radius = (size - 2 * pad) / 2.0
@@ -248,7 +254,7 @@ def render_svg(marks, moon=None, size=None, localt=None):
          f'stroke="#242b3a"/>']
 
     # --- horizon mask, drawn rather than enforced ---
-    for idx, (a0, a1, minalt, hardness) in enumerate(config.HORIZON_MASK):
+    for idx, (a0, a1, minalt, hardness) in enumerate(s.horizon_mask):
         r_in = 0.0 if minalt is None else _radius_for(minalt, radius)
         hard = hardness == "hard"
         fill = "rgba(207,97,84,.20)" if hard else (
@@ -257,11 +263,11 @@ def render_svg(marks, moon=None, size=None, localt=None):
                  "light pollution" if minalt is None else
                  f"below {minalt:.0f}&#176;")
         p.append(f'<path d="{_wedge_path(cx, cy, radius, r_in, a0, a0 + _SECTOR_WIDTH)}" '
-                 f'fill="{fill}"><title>{config.SECTOR_NAMES[idx]} &#8212; '
+                 f'fill="{fill}"><title>{s.sector_names[idx]} &#8212; '
                  f'{label}</title></path>')
 
     # --- keep-out wedges, over the advisory mask and under everything else ---
-    for start, end, min_alt, reason in config.KEEPOUT_WEDGES:
+    for start, end, min_alt, reason in s.keepout_wedges:
         span = (end - start) % 360.0
         r_in = _radius_for(min_alt, radius)
         p.append(f'<path d="{_wedge_path(cx, cy, radius, r_in, start, start + span)}" '
@@ -279,7 +285,7 @@ def render_svg(marks, moon=None, size=None, localt=None):
         p.append(f'<text x="{cx + 3:.1f}" y="{cy - rr + 10:.1f}" fill="#4a5468" '
                  f'font-size="8.5" font-family="monospace">{alt}&#176;</text>')
 
-    for idx, name in enumerate(config.SECTOR_NAMES):
+    for idx, name in enumerate(s.sector_names):
         az = idx * _SECTOR_WIDTH
         x0, y0 = _polar(cx, cy, radius, az)
         p.append(f'<line x1="{cx}" y1="{cy}" x2="{x0:.1f}" y2="{y0:.1f}" '
@@ -292,7 +298,7 @@ def render_svg(marks, moon=None, size=None, localt=None):
 
     # --- moon ---
     if moon and moon["alt"] > 0:
-        for pts in _moon_locus(moon, cx, cy, radius):
+        for pts in _moon_locus(moon, cx, cy, radius, site=s):
             p.append(f'<polyline points="{pts}" fill="none" stroke="#5fc9d4" '
                      f'stroke-opacity=".55" stroke-dasharray="4 4"/>')
         mx, my = project(moon["az"], moon["alt"], cx, cy, radius)
@@ -303,7 +309,7 @@ def render_svg(marks, moon=None, size=None, localt=None):
                  f'pointer-events="all"><title>Moon &#8212; '
                  f'{moon["illum"] * 100:.0f}% illuminated, altitude '
                  f'{moon["alt"]:.0f}&#176;, azimuth {moon["az"]:.0f}&#176;. '
-                 f'Dashed line is {config.MOON_SEP_MIN:.0f}&#176; separation.'
+                 f'Dashed line is {s.moon_sep_min:.0f}&#176; separation.'
                  f'</title></circle>')
 
     # --- targets ---
@@ -340,7 +346,7 @@ def render_svg(marks, moon=None, size=None, localt=None):
             p.append(f'<circle cx="{tx:.1f}" cy="{ty:.1f}" r="7" fill="none" '
                      f'pointer-events="all"/>')
             p.append(f'<title>{m["desig"]} &#8212; not yet up, first above '
-                     f'{config.MPC_SERVER_MIN_ALT:.0f}&#176; at '
+                     f'{s.mpc_server_min_alt:.0f}&#176; at '
                      f'{fmt(m["rise_ts"])} toward azimuth '
                      f'{m["az"]:.0f}&#176;</title>')
             p.append("</a>")
