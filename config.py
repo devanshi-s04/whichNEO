@@ -177,3 +177,14 @@ SITES = sites.load_dir(SITES_DIR)
 # signed-out visitor sees exactly the board they saw before several sites
 # existed.
 DEFAULT_SITE = SITES[min(SITES)]
+
+# How many observatories this deployment will serve at once, counting both
+# the ones defined by a file and the ones created through sign-up.
+#
+# A real number rather than a vague worry. Only the ephemeris fetch is
+# per-observatory, measured over 300 cycles on the live board at 1.1 fetches
+# per cycle -- about 306 a day per site. Twenty-five is therefore roughly 5
+# requests a minute and ~8,000 fetches a day against MPC: comfortably inside
+# what a small institutional service can justify without asking anyone's
+# permission, with headroom to raise it once real usage is visible.
+ACTIVE_SITE_CAP = int(os.environ.get("WHICHNEO_SITE_CAP", "25"))

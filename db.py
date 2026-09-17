@@ -254,6 +254,34 @@ CREATE TABLE IF NOT EXISTS site_settings (
     PRIMARY KEY (site_id, field)
 );
 
+-- Observatories created through sign-up. A site that comes from a file in
+-- sites/ is not in here: the registry serves both kinds and nothing
+-- downstream knows which kind it got, which is what keeps the first
+-- observatory on the same code path as the newest one.
+--
+-- The definition is stored as JSON rather than as forty columns because that
+-- is what it is -- one Site, whole -- and because a settings edit is already
+-- a JSON override layered on top of it.
+CREATE TABLE IF NOT EXISTS sites (
+    id              INTEGER PRIMARY KEY,
+    obscode         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    created_utc     TEXT NOT NULL,
+    created_by      INTEGER,
+    active          INTEGER NOT NULL DEFAULT 1,
+    definition_json TEXT NOT NULL
+);
+
+-- Who works at which observatory. One role boundary, deliberately: the
+-- owner created the site and may change what it does; everyone else marks
+-- targets and reads the board.
+CREATE TABLE IF NOT EXISTS site_members (
+    site_id   INTEGER NOT NULL,
+    user_id   INTEGER NOT NULL,
+    role      TEXT NOT NULL DEFAULT 'member',
+    added_utc TEXT NOT NULL,
+    PRIMARY KEY (site_id, user_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_targets_seq
     ON targets(site_id, observable DESC, max_alt_ts ASC);
 """
@@ -899,6 +927,94 @@ def update_password(conn, uid, password_hash):
 
 def count_users(conn):
     return conn.execute("SELECT count(*) FROM users").fetchone()[0]
+
+
+# --- observatories created through sign-up -----------------------------------
+
+OWNER, MEMBER = "owner", "member"
+
+
+def create_site(conn, site_id, obscode, definition_json, user_id):
+    """Register a new observatory, owned by whoever created it.
+
+    The owner row is written in the same transaction as the site. A site with
+    no owner is one nobody can configure, which on a self-service deployment
+    is a site nobody can fix.
+    """
+    with conn:
+        conn.execute(
+            "INSERT INTO sites (id, obscode, created_utc, created_by, active,"
+            " definition_json) VALUES (?,?,?,?,1,?)",
+            (site_id, obscode.upper(), utcnow(), user_id, definition_json))
+        conn.execute(
+            "INSERT INTO site_members (site_id, user_id, role, added_utc) "
+            "VALUES (?,?,?,?)", (site_id, user_id, OWNER, utcnow()))
+    return site_id
+
+
+def load_db_sites(conn, include_inactive=False):
+    """Every signed-up observatory, as stored rows."""
+    sql = "SELECT * FROM sites"
+    if not include_inactive:
+        sql += " WHERE active=1"
+    return [dict(r) for r in conn.execute(sql + " ORDER BY id")]
+
+
+def db_sites_stamp(conn):
+    """Cheap cache key: changes when a site is added or deactivated."""
+    row = conn.execute(
+        "SELECT count(*) AS n, max(created_utc) AS t, sum(active) AS a "
+        "FROM sites").fetchone()
+    return (row["n"], row["t"], row["a"]) if row else (0, None, None)
+
+
+def site_by_obscode(conn, obscode):
+    row = conn.execute(
+        "SELECT * FROM sites WHERE obscode = ? COLLATE NOCASE",
+        ((obscode or "").strip().upper(),)).fetchone()
+    return dict(row) if row else None
+
+
+def set_site_active(conn, site_id, active):
+    with conn:
+        conn.execute("UPDATE sites SET active=? WHERE id=?",
+                     (1 if active else 0, site_id))
+
+
+def add_site_member(conn, site_id, user_id, role=MEMBER):
+    with conn:
+        conn.execute(
+            "INSERT INTO site_members (site_id, user_id, role, added_utc) "
+            "VALUES (?,?,?,?) ON CONFLICT(site_id, user_id) DO UPDATE SET "
+            "role=excluded.role", (site_id, user_id, role, utcnow()))
+
+
+def site_role(conn, site_id, user_id):
+    """'owner', 'member', or None. None for a signed-out reader."""
+    if user_id is None:
+        return None
+    row = conn.execute(
+        "SELECT role FROM site_members WHERE site_id=? AND user_id=?",
+        (site_id, user_id)).fetchone()
+    return row["role"] if row else None
+
+
+def sites_for_user(conn, user_id):
+    """[(site_id, role)] for every observatory this account belongs to."""
+    if user_id is None:
+        return []
+    return [(r["site_id"], r["role"]) for r in conn.execute(
+        "SELECT site_id, role FROM site_members WHERE user_id=? "
+        "ORDER BY site_id", (user_id,))]
+
+
+def site_members(conn, site_id):
+    """Everyone at one observatory, owner first."""
+    return [dict(r) for r in conn.execute(
+        "SELECT m.user_id, m.role, m.added_utc, u.username, u.email "
+        "FROM site_members m LEFT JOIN users u ON u.id = m.user_id "
+        "WHERE m.site_id=? ORDER BY m.role='owner' DESC, u.username",
+        (site_id,))]
 
 
 # --- edited settings ---------------------------------------------------------

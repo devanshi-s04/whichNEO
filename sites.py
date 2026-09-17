@@ -227,6 +227,116 @@ def _field_names():
     return [f.name for f in fields(Site)]
 
 
+SECTOR_NAMES = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+_SECTOR_WIDTH = 45.0
+_SECTOR_START = 337.5
+
+# What a brand-new observatory starts with, before anyone has tuned it.
+#
+# Deliberately NOT a copy of whichever site happens to be first in this
+# deployment. Two of these settings describe physical obstructions, and
+# copying one observatory's dome limits onto another's telescope is the one
+# mistake on this path that could point a telescope at a wall:
+#
+#   * keep-out wedges start EMPTY. A wedge means "the mount will hit
+#     something here", which is a fact about one particular building. Nobody
+#     else's is a safe default, and an empty list refuses no sky rather than
+#     refusing the wrong sky.
+#   * the horizon mask starts uniform and soft, with every sector saying it
+#     is unconfirmed -- so a new board warns about nothing in particular
+#     until its observatory says what to warn about.
+#
+# The rest are the thresholds recovered from Visnjan's legacy planner, which
+# are a reasonable starting point for follow-up astrometry anywhere, and every
+# one of them is editable on the settings page from the moment the site
+# exists.
+_STARTING_REASON = "starting point — not yet confirmed for this observatory"
+
+STARTING_POINT = {
+    "horizon_mask": [
+        [(_SECTOR_START + i * _SECTOR_WIDTH) % 360.0,
+         (_SECTOR_START + (i + 1) * _SECTOR_WIDTH) % 360.0,
+         20.0, "soft", _STARTING_REASON]
+        for i in range(8)
+    ],
+    "sector_names": list(SECTOR_NAMES),
+    "keepout_wedges": [],
+    "min_alt": 15.0,
+    "max_altitude": None,
+    "mpc_server_min_alt": 20.0,
+    "fov_arcsec": 2600,
+    "interpolate_ahead_s": 600,
+    "night_rollover_hour_ut": 11,
+    "max_mag": 21.6,
+    "sun_alt_max": -15.0,
+    "moon_sep_min": 20.0,
+    "min_score": 25,
+    "min_arc_days": 0.01,
+    "max_not_seen_days": 4.0,
+    "min_motion": 0.7,
+    "max_scatteredness": [2000, 2000],
+    "scatteredness_warn": [1000, 800],
+    "neo_only": True,
+    "neo_q_max": 1.3,
+    "neo_e_min": 0.5,
+    "skip_already_observed": True,
+    "blacklist": [],
+    "high_priority_surveys": [],
+    "low_priority_surveys": [],
+    "exposure_base_min": 10.0,
+    "exposure_ref_mag": 18.0,
+    "exposure_min_per_mag": 5.0,
+    "exposure_floor_min": 1.0,
+    "exposure_frames": 36,
+    "exposure_speed_bands": [[5.0, 30], [25.0, 15], [50.0, 10],
+                             [100.0, 5], [200.0, 2]],
+    "exposure_fastest_sec": 1,
+    "default_sort": "chronological",
+    "rank_weights": {"digest2": 2.0, "arc": 1.5, "magnitude": 1.5},
+    "arc_saturate_days": 3.0,
+    "mag_bright": 15.0,
+}
+
+
+def rollover_hour_for_longitude(lon_deg):
+    """A night boundary near local noon, from the site's own longitude.
+
+    A fixed UT hour is right for one meridian and wrong for every other: it
+    is what makes "tonight" one thing, and an observatory a third of the way
+    round the world would have its night split in half by it.
+    """
+    lon = ((float(lon_deg) + 180.0) % 360.0) - 180.0
+    return int(round(12.0 - lon / 15.0)) % 24
+
+
+def new_definition(obscode, name, display_tz, site_id, geometry,
+                   plan_dir=None):
+    """A complete site definition for an observatory that has just signed up.
+
+    `geometry` is MPC's own longitude and parallax constants for the code --
+    the position every ephemeris will be computed for, so it comes from
+    MPC's table rather than from anything typed into a form.
+    """
+    import copy
+    code = obscode.strip().upper()
+    # Deep, not shallow: every new site would otherwise share one mask list
+    # with the template and with each other.
+    d = copy.deepcopy(STARTING_POINT)
+    d.update({
+        "id": site_id,
+        "obscode": code,
+        "name": name.strip(),
+        "plan_dir": plan_dir or os.path.join("plans", code),
+        "display_tz": display_tz,
+        "lon_deg": geometry["lon_deg"],
+        "rho_cos_phi": geometry["rho_cos_phi"],
+        "rho_sin_phi": geometry["rho_sin_phi"],
+        "night_rollover_hour_ut": rollover_hour_for_longitude(
+            geometry["lon_deg"]),
+    })
+    return d
+
+
 class SiteFileError(Exception):
     """A site file is missing, unreadable, or does not describe a site.
 

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Observatories &mdash; WhichNEO</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+<div class="top">
+  <div class="brand">
+    <h1>Which<b>NEO</b> &mdash; observatories</h1>
+    <div class="where">Every observatory this deployment serves</div>
+  </div>
+  <div class="live">
+    <div class="stat"><div class="k">Serving</div>
+      <div class="v{{ ' amber' if at_capacity }}">{{ active }} / {{ cap }}</div></div>
+    <div class="stat"><div class="k">&nbsp;</div>
+      <div class="v"><a class="chip" href="{{ url_for('site_new_form') }}">add an observatory</a></div></div>
+    <div class="stat"><div class="k">&nbsp;</div>
+      <div class="v"><a class="chip" href="{{ url_for('index') }}">&larr; sequence</a></div></div>
+  </div>
+</div>
+
+<table class="mini">
+  <tr><th>Code</th><th>Observatory</th><th>Where</th><th>You</th><th>People</th><th></th></tr>
+  {% for r in rows %}
+  <tr>
+    <td style="color:var(--ink)">{{ r.site.obscode }}</td>
+    <td>{{ r.site.name }}</td>
+    <td class="dim">{{ r.site.coords_text }}</td>
+    <td>{% if r.role == 'owner' %}<span class="pill warn">owner</span>
+        {% elif r.role %}<span class="pill">member</span>
+        {% else %}<span class="dim">&mdash;</span>{% endif %}</td>
+    <td class="dim">{{ r.members|length or '&mdash;'|safe }}</td>
+    <td><a class="chip" href="{{ url_for('index', site=r.site.obscode) }}">open</a></td>
+  </tr>
+  {% endfor %}
+</table>
+
+<p class="note">
+  Anyone may read any board here. The <strong>owner</strong> of an
+  observatory is whoever added it, and is the only account that can change
+  what it does; everyone else marks targets and reads. One role boundary,
+  which is all it needs.
+  {% if at_capacity %}
+  <br><br><strong>This deployment is at its limit of {{ cap }}
+  observatories.</strong> The cap is not arbitrary: only the ephemeris fetch
+  is per-observatory, at roughly 306 a day each, so {{ cap }} sites is about
+  five requests a minute against MPC. Raising it is the operator's call.
+  {% endif %}
+</p>
+
+</div>
+</body>
+</html>

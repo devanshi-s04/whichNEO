@@ -29,12 +29,22 @@ _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mpcdata")
 _CODE_RE = re.compile(r"^[A-Z0-9]{3}[ \d]")
 _NAME_COL = 30
 
+# The same fixed columns, for the three numbers that say where the telescope
+# is. MPC packs them without separators -- "L01  13.749300.704742+0.707169" is
+# longitude 13.74930, rho_cos_phi 0.704742, rho_sin_phi +0.707169 -- so they
+# can only be taken by position. Slicing is also what makes the padded and
+# unpadded forms both work; see the note above.
+_LON_COLS = (3, 13)
+_RHO_COS_COLS = (13, 21)
+_RHO_SIN_COLS = (21, 30)
+
 _sites = None
 _details = None
+_geometry = None
 
 
 def _load_sites():
-    out = {}
+    out, geom = {}, {}
     path = os.path.join(_DIR, "ObsCodes.htm")
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -45,9 +55,36 @@ def _load_sites():
                 name = line[_NAME_COL:].strip()
                 if name:
                     out[line[:3]] = name
+                where = _parse_geometry(line)
+                if where:
+                    geom[line[:3]] = where
     except OSError:
         pass
-    return out
+    return out, geom
+
+
+def _parse_geometry(line):
+    """Longitude and parallax constants from one ObsCodes line, or None.
+
+    A space-probe or roving "observatory" has no fixed position and leaves
+    these blank, which is a real answer rather than a parse failure -- such a
+    code simply cannot be a site here.
+    """
+    try:
+        lon = float(line[slice(*_LON_COLS)])
+        rho_cos = float(line[slice(*_RHO_COS_COLS)])
+        rho_sin = float(line[slice(*_RHO_SIN_COLS)])
+    except ValueError:
+        return None
+    if rho_cos == 0.0 and rho_sin == 0.0:
+        return None
+    return {"lon_deg": lon, "rho_cos_phi": rho_cos, "rho_sin_phi": rho_sin}
+
+
+def geometry(code):
+    """Where MPC says this observatory is, or None if it does not say."""
+    _ensure()
+    return _geometry.get((code or "").strip().upper())
 
 
 def _load_details():
@@ -88,9 +125,9 @@ def _load_details():
 
 
 def _ensure():
-    global _sites, _details
+    global _sites, _details, _geometry
     if _sites is None:
-        _sites = _load_sites()
+        _sites, _geometry = _load_sites()
     if _details is None:
         _details = _load_details()
 

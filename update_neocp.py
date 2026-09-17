@@ -32,6 +32,7 @@ import neocp_history
 import output
 import pipeline
 import ranking
+import registry
 import siteconf
 
 
@@ -189,12 +190,13 @@ def run_update(conn, hist_conn=None, source=None, sites=None):
     poll and make the research record a function of how many observatories
     happened to sign up; see multisite.md.
     """
-    sites = list(config.SITES.values()) if sites is None else list(sites)
-    # Settings edited through the web are overrides layered over each site's
-    # file, so they have to be applied here too. Without this the board would
-    # show a changed limit while the cycle that decides what reaches the board
-    # kept using the old one -- the worst of both, and invisible.
-    sites = [siteconf.effective(conn, s) for s in sites]
+    # Every observatory this deployment serves -- the ones defined by a file
+    # and the ones somebody signed up -- with their edited settings applied.
+    # Both halves matter: without the registry a new site would never be
+    # fetched for, and without the overrides the board would show a changed
+    # limit while the cycle kept using the old one.
+    sites = (list(registry.all_sites(conn).values()) if sites is None
+             else [siteconf.effective(conn, s) for s in sites])
     shared = {}
     t0 = time.perf_counter()
 
@@ -497,7 +499,7 @@ def main():
             # own failure is caught inside run_update and recorded against
             # that site alone.
             logging.exception("update failed: %s", e)
-            for site in config.SITES.values():
+            for site in registry.all_sites(conn).values():
                 db.set_meta(conn, "last_update_ok", "0", site=site)
                 db.set_meta(conn, "last_error", str(e), site=site)
             if not args.loop:
