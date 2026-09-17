@@ -78,6 +78,16 @@ body {
   letter-spacing: .01em; text-decoration: none; border: 1px solid var(--line);
 }
 .nav-btn:hover { color: var(--ink); border-color: var(--faint); }
+/* The observatory switcher. Only rendered when there is more than one site,
+   so a single-observatory board carries no empty control. Styled to match
+   .nav-btn beside it rather than as a bare form element. */
+.siteswitch { flex: 0 0 auto; margin-bottom: 2px; }
+.siteswitch select {
+  padding: 9px 14px; border-radius: 7px;
+  background: var(--raised); color: var(--ink); font-family: var(--ui);
+  font-weight: 500; font-size: 12px; border: 1px solid var(--line);
+}
+.siteswitch select:hover { border-color: var(--faint); }
 .live { display: flex; gap: 26px; align-items: flex-end; flex-wrap: wrap; }
 .stat .k {
   font-size: 9.5px; letter-spacing: .13em; text-transform: uppercase;

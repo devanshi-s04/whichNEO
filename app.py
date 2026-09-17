@@ -12,8 +12,8 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
-from flask import (Flask, Response, jsonify, redirect, render_template,
-                   request, send_file, url_for)
+from flask import (Flask, Response, has_request_context, jsonify, redirect,
+                   render_template, request, send_file, session, url_for)
 
 import auth
 import config
@@ -46,22 +46,58 @@ app.config.update(
 )
 
 
+def site_by_code(code):
+    """Resolve an observatory code to a Site, or None."""
+    code = (code or "").strip().upper()
+    if not code:
+        return None
+    for s in config.SITES.values():
+        if s.obscode.upper() == code:
+            return s
+    return None
+
+
 def current_site():
     """The observatory this request is about.
 
-    One deployment serves one observatory today, so this is the default site.
-    When the site switcher arrives (stage C in multisite.md) this is the one
-    function that has to start reading the request instead, and every caller
-    below already asks it rather than reaching for a global.
+    Named by `?site=<obscode>` and then remembered for the session, so the
+    choice survives the next click without every link on the board having to
+    carry it. An unknown or absent code falls back to the deployment's
+    default -- which is the lowest-numbered site -- so a visitor who never
+    touches the switcher sees exactly the board they saw before several
+    observatories existed.
+
+    Also called outside a request (the template filters below are reachable
+    from one, but the module is imported by tools that are not), hence the
+    context check rather than a bare request.args.
     """
+    if has_request_context():
+        chosen = site_by_code(request.args.get("site"))
+        if chosen is not None:
+            if session.get("site") != chosen.obscode:
+                session["site"] = chosen.obscode
+            return chosen
+        remembered = site_by_code(session.get("site"))
+        if remembered is not None:
+            return remembered
     return config.DEFAULT_SITE
 
 
-try:
-    from zoneinfo import ZoneInfo
-    _TZ = ZoneInfo(current_site().display_tz)
-except Exception:                                    # no tzdata on the host
-    _TZ = timezone.utc
+# One zone per site, resolved on demand rather than once at import: the board
+# shows times as the people standing in that dome read them, and two
+# observatories are not in the same timezone.
+_TZ_CACHE = {}
+
+
+def _tz(site=None):
+    name = (site or current_site()).display_tz
+    if name not in _TZ_CACHE:
+        try:
+            from zoneinfo import ZoneInfo
+            _TZ_CACHE[name] = ZoneInfo(name)
+        except Exception:                            # no tzdata on the host
+            _TZ_CACHE[name] = timezone.utc
+    return _TZ_CACHE[name]
 
 
 @app.context_processor
@@ -69,7 +105,10 @@ def inject_config():
     """Templates read limits and the horizon mask straight from config, and
     the sortable-column registry straight from ranking so the sort bar and
     the sort logic never drift apart."""
-    return {"config": config, "site": current_site(),
+    site = current_site()
+    telescope = (observatories.lookup(site.obscode) or {}).get("telescope")
+    return {"config": config, "site": site, "sites": config.SITES,
+            "site_telescope": telescope,
             "tzname": _tzabbr(), "ranking": ranking,
             "current_user": auth.current_user(),
             "csrf_token": auth.csrf_token,
@@ -78,7 +117,7 @@ def inject_config():
 
 
 def _tzabbr(ts=None):
-    d = datetime.fromtimestamp(ts if ts is not None else time.time(), _TZ)
+    d = datetime.fromtimestamp(ts if ts is not None else time.time(), _tz())
     return d.strftime("%Z") or current_site().display_tz
 
 
@@ -87,14 +126,14 @@ def localt(ts):
     """Unix timestamp -> local clock time at the observatory."""
     if ts is None:
         return "—"
-    return datetime.fromtimestamp(float(ts), _TZ).strftime("%H:%M")
+    return datetime.fromtimestamp(float(ts), _tz()).strftime("%H:%M")
 
 
 @app.template_filter("localdt")
 def localdt(ts):
     if ts is None:
         return "—"
-    return datetime.fromtimestamp(float(ts), _TZ).strftime("%Y-%m-%d %H:%M")
+    return datetime.fromtimestamp(float(ts), _tz()).strftime("%Y-%m-%d %H:%M")
 
 
 @app.template_filter("sitename")
@@ -148,25 +187,31 @@ def load_sorted(conn, show_observed=False, show_hidden=False, mode=None,
     return ranking.sort_targets(rows, mode, site=current_site())
 
 
-def status(conn):
-    timings = db.get_meta(conn, "last_update_timings")
-    stamp = db.get_meta(conn, "last_update_utc", "never")
+def status(conn, site=None):
+    """How the last cycle went -- for one observatory, not the deployment."""
+    site = site or current_site()
+    timings = db.get_meta(conn, "last_update_timings", site=site)
+    stamp = db.get_meta(conn, "last_update_utc", "never", site=site)
     try:
         ts = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(
             tzinfo=timezone.utc).timestamp()
     except ValueError:
         ts = None
     return {
+        "site": site.obscode,
+        "site_name": site.name,
         "last_update_utc": stamp,
         "last_update_ts": ts,
         "last_update_local": localt(ts) if ts else "never",
-        "count": db.get_meta(conn, "last_update_count", "0"),
-        "observable": db.get_meta(conn, "last_update_observable", "0"),
-        "night": db.get_meta(conn, "night", "-"),
-        "mismatches": db.get_meta(conn, "crosscheck_mismatches", "0"),
-        "plan_path": db.get_meta(conn, "plan_path"),
-        "ok": db.get_meta(conn, "last_update_ok", "0") == "1",
-        "error": db.get_meta(conn, "last_error"),
+        "count": db.get_meta(conn, "last_update_count", "0", site=site),
+        "observable": db.get_meta(conn, "last_update_observable", "0",
+                                  site=site),
+        "night": db.get_meta(conn, "night", "-", site=site),
+        "mismatches": db.get_meta(conn, "crosscheck_mismatches", "0",
+                                  site=site),
+        "plan_path": db.get_meta(conn, "plan_path", site=site),
+        "ok": db.get_meta(conn, "last_update_ok", "0", site=site) == "1",
+        "error": db.get_meta(conn, "last_error", site=site),
         "auth": auth.ENABLED,
         "timings": json.loads(timings) if timings else {},
     }
@@ -481,7 +526,7 @@ def _replay_ts(raw, window=None):
     elif abs(ts - time.time()) > _REPLAY_WINDOW_S:
         return None
     try:                       # the clock itself must accept it
-        datetime.fromtimestamp(ts, _TZ)
+        datetime.fromtimestamp(ts, _tz())
     except (OverflowError, OSError, ValueError):
         return None
     return ts
@@ -583,7 +628,7 @@ def plan_text():
     """The nightly plan file, exactly as written to disk."""
     conn = get_conn()
     try:
-        path = db.get_meta(conn, "plan_path")
+        path = db.get_meta(conn, "plan_path", site=current_site())
     finally:
         conn.close()
     if not path:

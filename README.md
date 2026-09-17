@@ -152,8 +152,9 @@ which is what correctness requires, costs it 218 s and costs us about 2.
 
 | File | Role |
 |---|---|
-| `sites.py` | The `Site` type: one observatory and its thresholds. |
-| `config.py` | The deployment, plus `DEFAULT_SITE` — L01. All TBDs live here. |
+| `sites.py` | The `Site` type, and loading sites from `sites/*.toml`. |
+| `sites/` | One TOML file per observatory. `L01.toml` is Višnjan, and its TBDs. |
+| `config.py` | The deployment: MPC endpoints, storage, mail, accounts, ds42. |
 | `neocp.py` | NEOCP list + `neocp_info` orbital parameters. |
 | `ephemeris.py` | Per-object MPC ephemeris, scatteredness, observation history. |
 | `pipeline.py` | Night model, filter cascade, row selection, cross-check. |

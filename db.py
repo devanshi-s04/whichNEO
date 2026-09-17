@@ -202,9 +202,17 @@ CREATE TABLE IF NOT EXISTS ds42_scores (
     config_json     TEXT
 );
 
+-- Mostly per site, and the exception is the point of the site_id column.
+-- "Which night is it", "did the last cycle work", "where is the plan file"
+-- are all answers about one observatory -- and once sites span longitudes,
+-- "tonight" stops being one thing at all. A handful of keys really are about
+-- the deployment (whether the one-off ds42 history backfill has run), and
+-- those sit on site_id 0.
 CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT
+    site_id INTEGER NOT NULL DEFAULT 0,
+    key     TEXT NOT NULL,
+    value   TEXT,
+    PRIMARY KEY (site_id, key)
 );
 
 -- One row per night, written once at rollover (see archive_night). Ephemeris
@@ -250,7 +258,19 @@ _COLS = [
 # The per-site tables that hold state nothing can regenerate, so they are
 # rebuilt to gain site_id rather than dropped. `targets` is absent on purpose:
 # the updater rewrites it every cycle, so it is dropped and rebuilt instead.
-_PER_SITE_TABLES = ("observer_state", "ephemeris_cache", "night_archive")
+_PER_SITE_TABLES = ("observer_state", "ephemeris_cache", "night_archive",
+                    "meta")
+
+# meta keys that describe one observatory's last cycle rather than the
+# deployment. Anything not listed here stays global, on site_id 0 -- which is
+# the right answer for the one-off flags, and the safe answer for a key added
+# later and forgotten about, since a global key read per-site would simply
+# come back empty rather than come back wrong.
+_SITE_META_KEYS = (
+    "night", "last_update_utc", "last_update_count", "last_update_observable",
+    "last_update_timings", "last_update_ok", "last_error",
+    "crosscheck_mismatches", "plan_path",
+)
 
 
 def _site(site):
@@ -326,8 +346,18 @@ def _adopt_pre_site_rows(conn, pending):
         old = f"{table}_pre_site"
         cols = sorted(r[1] for r in conn.execute(f"PRAGMA table_info({old})"))
         names = ",".join(cols)
-        conn.execute(f"INSERT INTO {table} ({names}, site_id) "
-                     f"SELECT {names}, ? FROM {old}", (site_id,))
+        if table == "meta":
+            # meta is the one table whose rows do not all belong to a site:
+            # the per-cycle keys are this deployment's single observatory's,
+            # everything else describes the deployment itself.
+            marks = ",".join("?" * len(_SITE_META_KEYS))
+            conn.execute(
+                f"INSERT INTO meta ({names}, site_id) SELECT {names}, "
+                f"CASE WHEN key IN ({marks}) THEN ? ELSE 0 END FROM {old}",
+                (*_SITE_META_KEYS, site_id))
+        else:
+            conn.execute(f"INSERT INTO {table} ({names}, site_id) "
+                         f"SELECT {names}, ? FROM {old}", (site_id,))
         before = conn.execute(f"SELECT count(*) FROM {old}").fetchone()[0]
         after = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
         if before != after:
@@ -848,14 +878,19 @@ def count_users(conn):
     return conn.execute("SELECT count(*) FROM users").fetchone()[0]
 
 
-def set_meta(conn, key, value):
+def set_meta(conn, key, value, site=None):
+    """Record a key. `site` None means the deployment rather than a site."""
+    site_id = 0 if site is None else site.id
     with conn:
         conn.execute(
-            "INSERT INTO meta (key,value) VALUES (?,?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, str(value)))
+            "INSERT INTO meta (site_id,key,value) VALUES (?,?,?) "
+            "ON CONFLICT(site_id,key) DO UPDATE SET value=excluded.value",
+            (site_id, key, str(value)))
 
 
-def get_meta(conn, key, default=None):
-    row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+def get_meta(conn, key, default=None, site=None):
+    """Read a key. `site` None means the deployment rather than a site."""
+    site_id = 0 if site is None else site.id
+    row = conn.execute("SELECT value FROM meta WHERE site_id=? AND key=?",
+                       (site_id, key)).fetchone()
     return row["value"] if row else default

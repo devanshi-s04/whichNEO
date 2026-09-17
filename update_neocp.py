@@ -173,54 +173,42 @@ def _backfill_history_once(conn, hist_conn):
         logging.exception("history backfill failed; will retry next cycle")
 
 
-def run_update(conn, hist_conn=None, source=None, site=None):
-    # One site per cycle, resolved once and threaded through everything
-    # below. The NEOCP list, the ds42 scoring and the history are about the
-    # object rather than the observatory, so when this loop grows to several
-    # sites they stay outside it -- see multisite.md.
-    site = config.DEFAULT_SITE if site is None else site
-    timings = {}
+def run_update(conn, hist_conn=None, source=None, sites=None):
+    """One cycle: the work that is about the objects once, then each site's.
+
+    The NEOCP list, its orbital parameters, the ds42 scores and the
+    longitudinal history are all properties of the objects themselves, so
+    they are fetched, parsed and recorded ONCE however many observatories are
+    being served. Only the ephemeris is genuinely per-observatory -- MPC
+    computes it for one observatory code -- along with the analysis that
+    follows from it.
+
+    Getting that division wrong would not merely be wasteful. Recording the
+    history inside the per-site loop would write N identical snapshots per
+    poll and make the research record a function of how many observatories
+    happened to sign up; see multisite.md.
+    """
+    sites = list(config.SITES.values()) if sites is None else list(sites)
+    shared = {}
     t0 = time.perf_counter()
 
     def mark(stage):
         nonlocal t0
-        timings[stage] = round((time.perf_counter() - t0) * 1000, 1)
+        shared[stage] = round((time.perf_counter() - t0) * 1000, 1)
         t0 = time.perf_counter()
 
-    # Archive the outgoing night the moment the label rolls over, before
-    # anything below overwrites it. targets/observer_state/ephemeris_cache
-    # still hold last cycle's (i.e. the night that just ended) state at this
-    # point -- this cycle's replace_targets/prune_cache haven't run yet, and
-    # after they do there is no other record of where a resolved-and-removed
-    # object actually was.
-    outgoing_night = db.get_meta(conn, "night")
-    incoming_night = pipeline.night_label(time.time(), site)
-    if outgoing_night and outgoing_night != incoming_night:
-        try:
-            db.archive_night(conn, outgoing_night, site)
-        except Exception:
-            # Logged and swallowed: a failed archive costs a night of replay,
-            # and taking the updater down over it would cost the board. But it
-            # is silent by the same token, so the first real rollover after
-            # this ships is worth watching in the log rather than assuming.
-            logging.exception("failed to archive night %s", outgoing_night)
-    # Billed as its own stage rather than folded into fetch_list: archiving
-    # serialises every observable target's whole track, and hiding that inside
-    # a network timing is how a slow one becomes impossible to spot.
-    mark("archive")
-
     raw = open(source).read() if source else neocp.fetch_neocp()
-    targets = neocp.parse_neocp(raw)
-    if not targets:
+    base = neocp.parse_neocp(raw)
+    if not base:
         raise RuntimeError("NEOCP returned no parseable targets")
     mark("fetch_list")
 
-    # Same parsed list the rest of this cycle uses -- not a `source` test
-    # fixture, and only when the caller actually wants history recorded
-    # (see main()'s --no-history) -- fed straight to neocp_history's own
-    # database instead of it fetching an identical copy of this list itself.
+    # Same parsed list every site below uses -- not a `source` test fixture,
+    # and only when the caller actually wants history recorded (see main()'s
+    # --no-history) -- fed straight to neocp_history's own database instead
+    # of it fetching an identical copy of this list itself.
     if hist_conn is not None and source is None:
-        neocp_history.record_cycle(hist_conn, targets)
+        neocp_history.record_cycle(hist_conn, base)
     mark("history")
 
     try:
@@ -230,12 +218,97 @@ def run_update(conn, hist_conn=None, source=None, site=None):
         orbits = {}
     mark("fetch_orbits")
 
-    for t in targets:
+    for t in base:
         o = orbits.get(t["desig"]) or {}
         t["q"], t["e"], t["incl"] = o.get("q"), o.get("e"), o.get("incl")
+
+    # One instant for the whole cycle, so two observatories analysing the
+    # same object are answering the same question rather than questions a
+    # few seconds apart.
+    now = time.time()
+
+    results, everything_cached = [], {}
+    for site in sites:
+        # One observatory's failure must not take the others down with it.
+        # Without this, a partner site whose ephemeris fetch times out ends
+        # the cycle, and every other board -- including the one this
+        # deployment was built for -- silently stops updating behind it.
+        try:
+            result, cache = _run_site(conn, site, base, orbits, now)
+        except Exception as e:
+            logging.exception("site %s failed; other sites continue",
+                              site.obscode)
+            db.set_meta(conn, "last_update_ok", "0", site=site)
+            db.set_meta(conn, "last_error", str(e), site=site)
+            continue
+        results.append(result)
+        # The 80-column astrometry is the object's own and identical whoever
+        # fetched it -- but an object cheap-rejected at one site is only in
+        # another's cache, so scoring reads the union rather than any one.
+        for desig, entry in cache.items():
+            everything_cached.setdefault(desig, entry)
+
+    t0 = time.perf_counter()
+    _score_new_objects(conn, everything_cached)
+    # After scoring, so the first run already has this cycle's new scores to
+    # backfill rather than leaving them for the next one.
+    _backfill_history_once(conn, hist_conn)
+    mark("ds42")
+
+    shared["total"] = round(
+        sum(shared.values()) + sum(r["timings"]["total"] for r in results), 1)
+    return shared, results
+
+
+def _run_site(conn, site, base, orbits, now):
+    """One observatory's half of a cycle. Returns (result, its cache).
+
+    Each site works on its OWN copy of the target dicts: analyze() annotates
+    them in place with altitudes, windows, exposures and discard reasons,
+    every one of which is a statement about this site's sky rather than about
+    the object. Sharing one list between sites would have the last
+    observatory in the loop overwrite every earlier one's board.
+    """
+    timings = {}
+    t0 = time.perf_counter()
+
+    def mark(stage):
+        nonlocal t0
+        timings[stage] = round((time.perf_counter() - t0) * 1000, 1)
+        t0 = time.perf_counter()
+
+    targets = [dict(t) for t in base]
+
+    # Archive the outgoing night the moment this site's label rolls over,
+    # before anything below overwrites it. targets/observer_state/
+    # ephemeris_cache still hold last cycle's (i.e. the night that just
+    # ended) state at this point -- this cycle's replace_targets/prune_cache
+    # haven't run yet, and after they do there is no other record of where a
+    # resolved-and-removed object actually was.
+    #
+    # Per site because the label is: a site four timezones away rolls over at
+    # a different moment, and reading a shared "night" would archive one
+    # observatory's evening into another's morning.
+    outgoing_night = db.get_meta(conn, "night", site=site)
+    incoming_night = pipeline.night_label(time.time(), site)
+    if outgoing_night and outgoing_night != incoming_night:
+        try:
+            db.archive_night(conn, outgoing_night, site)
+        except Exception:
+            # Logged and swallowed: a failed archive costs a night of replay,
+            # and taking the updater down over it would cost the board. But it
+            # is silent by the same token, so the first real rollover after
+            # this ships is worth watching in the log rather than assuming.
+            logging.exception("failed to archive night %s for %s",
+                              outgoing_night, site.obscode)
+    # Billed as its own stage rather than folded into fetch_list: archiving
+    # serialises every observable target's whole track, and hiding that inside
+    # a network timing is how a slow one becomes impossible to spot.
+    mark("archive")
+
+    for t in targets:
         t["cheap_reject"] = cheap_reject(t, site)
 
-    now = time.time()
     cache = db.load_cache(conn, site)
     candidates = [t for t in targets if not t["cheap_reject"]]
 
@@ -298,12 +371,6 @@ def run_update(conn, hist_conn=None, source=None, site=None):
         db.save_cache(conn, new_cache, site)
     cache.update(new_cache)
 
-    _score_new_objects(conn, cache)
-    # After scoring, so the first run already has this cycle's new scores to
-    # backfill rather than leaving them for the next one.
-    _backfill_history_once(conn, hist_conn)
-    mark("ds42")
-
     for t in targets:
         if t["cheap_reject"]:
             t.update(discard_reasons=t["cheap_reject"], observable=False,
@@ -355,7 +422,7 @@ def run_update(conn, hist_conn=None, source=None, site=None):
     night = pipeline.night_label(now, site)
     plan_path = None
     if config.WRITE_NIGHTLY_PLAN:
-        plan_path = output.write_plan(ordered, night)
+        plan_path = output.write_plan(ordered, night, site=site)
     mark("plan")
 
     n = db.replace_targets(conn, ordered, site)
@@ -367,17 +434,18 @@ def run_update(conn, hist_conn=None, source=None, site=None):
                      if t.get("crosscheck") and not t["crosscheck"].get("ok"))
     timings["total"] = round(sum(timings.values()), 1)
 
-    db.set_meta(conn, "last_update_utc", db.utcnow())
-    db.set_meta(conn, "last_update_count", n)
-    db.set_meta(conn, "last_update_observable", n_obs)
-    db.set_meta(conn, "last_update_timings", json.dumps(timings))
-    db.set_meta(conn, "last_update_ok", "1")
-    db.set_meta(conn, "night", night)
-    db.set_meta(conn, "crosscheck_mismatches", mismatches)
+    db.set_meta(conn, "last_update_utc", db.utcnow(), site=site)
+    db.set_meta(conn, "last_update_count", n, site=site)
+    db.set_meta(conn, "last_update_observable", n_obs, site=site)
+    db.set_meta(conn, "last_update_timings", json.dumps(timings), site=site)
+    db.set_meta(conn, "last_update_ok", "1", site=site)
+    db.set_meta(conn, "night", night, site=site)
+    db.set_meta(conn, "crosscheck_mismatches", mismatches, site=site)
     if plan_path:
-        db.set_meta(conn, "plan_path", plan_path)
+        db.set_meta(conn, "plan_path", plan_path, site=site)
 
-    return timings, n, n_obs, len(stale), mismatches
+    return ({"site": site, "timings": timings, "n": n, "n_obs": n_obs,
+             "n_fetched": len(stale), "mismatches": mismatches}, cache)
 
 
 def main():
@@ -398,22 +466,34 @@ def main():
 
     while True:
         try:
-            timings, n, n_obs, n_fetched, mism = run_update(
-                conn, hist_conn, args.source)
+            shared, results = run_update(conn, hist_conn, args.source)
             logging.info(
-                "%d targets, %d observable, %d ephemerides fetched, "
-                "%d crosscheck mismatches, %.1f s "
-                "(list %.0f, history %.0f, orbits %.0f, eph %.0f, aux %.0f, "
-                "analyze %.0f, xcheck %.0f, rank %.0f, plan %.0f, db %.0f ms)",
-                n, n_obs, n_fetched, mism, timings["total"] / 1000,
-                timings["fetch_list"], timings["history"], timings["fetch_orbits"],
-                timings["fetch_ephemerides"], timings["fetch_aux"],
-                timings["analyze"], timings["crosscheck"], timings["rank"],
-                timings["plan"], timings["database"])
+                "shared %.1f s over %d site(s) "
+                "(list %.0f, history %.0f, orbits %.0f, ds42 %.0f ms)",
+                shared["total"] / 1000, len(results),
+                shared["fetch_list"], shared["history"],
+                shared["fetch_orbits"], shared["ds42"])
+            for r in results:
+                t = r["timings"]
+                logging.info(
+                    "%s: %d targets, %d observable, %d ephemerides fetched, "
+                    "%d crosscheck mismatches, %.1f s "
+                    "(archive %.0f, eph %.0f, aux %.0f, analyze %.0f, "
+                    "xcheck %.0f, rank %.0f, plan %.0f, db %.0f ms)",
+                    r["site"].obscode, r["n"], r["n_obs"], r["n_fetched"],
+                    r["mismatches"], t["total"] / 1000,
+                    t["archive"], t["fetch_ephemerides"], t["fetch_aux"],
+                    t["analyze"], t["crosscheck"], t["rank"], t["plan"],
+                    t["database"])
         except Exception as e:
+            # A failure out here is shared -- NEOCP itself, or the parse --
+            # so it is every site's failure, not one site's. A single site's
+            # own failure is caught inside run_update and recorded against
+            # that site alone.
             logging.exception("update failed: %s", e)
-            db.set_meta(conn, "last_update_ok", "0")
-            db.set_meta(conn, "last_error", str(e))
+            for site in config.SITES.values():
+                db.set_meta(conn, "last_update_ok", "0", site=site)
+                db.set_meta(conn, "last_error", str(e), site=site)
             if not args.loop:
                 return 1
 

@@ -6,22 +6,19 @@ Two different things live here, and they are now kept apart:
     accounts, ds42, the sky-map geometry. One set of these, whatever
     observatories are served.
 
-  * **The default site** -- L01, built at the bottom as `DEFAULT_SITE`.
-    Everything observatory-specific is a field of that object rather than a
-    module-level name, so a module is handed the site it is working on
-    instead of reaching for a global. See sites.py for the type and
-    multisite.md (branch `multisite-plan`) for why.
+  * **The observatories** -- loaded at the bottom from `sites/*.toml`, one
+    file per site. Everything observatory-specific is a field of a Site
+    rather than a module-level name here, so a module is handed the site it
+    is working on instead of reaching for a global. See sites.py for the type
+    and multisite.md (branch `multisite-plan`) for why.
 
-Values marked TBD are placeholders awaiting confirmation from Luka -- see
-TBD.md for the open questions.
-
-Thresholds marked "legacy" are the defaults recovered from the observatory's
-own planner (planets-new.py), so our output can be compared against its.
+L01's own settings, and the reasoning behind each of them, now live in
+sites/L01.toml rather than in this file.
 """
 
 import os
 
-from sites import Site
+import sites
 
 # --- Data sources ------------------------------------------------------------
 NEOCP_URL = "https://www.minorplanetcenter.net/iau/NEO/neocp.txt"
@@ -84,7 +81,9 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "targets.db")
 LOG_PATH = os.path.join(DATA_DIR, "update.log")
-# Nightly plan files, in the legacy planner's format.
+# Nightly plan files, in the legacy planner's format. Each site says which
+# directory under here is its own (see a site's plan_dir), so this is only
+# the root they are resolved against.
 PLAN_DIR = os.path.join(BASE_DIR, "plans")
 WRITE_NIGHTLY_PLAN = True
 
@@ -158,197 +157,23 @@ UPDATE_INTERVAL_S = 300
 WEB_POLL_INTERVAL_S = 20
 
 
+
 # =============================================================================
-# The default site
+# The observatories this deployment serves
 # =============================================================================
-# Everything below describes one observatory. It is passed to the modules that
-# need it rather than read from here, so that a second observatory is a second
-# Site rather than a second copy of this file.
+# One TOML file per site in sites/, loaded at import. L01 is site 1 and is
+# described by sites/L01.toml exactly as any other observatory would be --
+# nothing in the code knows it by name, so a bug in its path is found rather
+# than hidden.
+#
+# A bad site file raises here rather than being skipped with a warning. A
+# site whose horizon mask failed to load would still produce a board, and
+# that board would be confidently wrong about where a telescope can point.
+SITES_DIR = os.environ.get("WHICHNEO_SITES_DIR",
+                           os.path.join(BASE_DIR, "sites"))
+SITES = sites.load_dir(SITES_DIR)
 
-# --- Horizon / dome mask -----------------------------------------------------
-# Azimuth sector -> (start, end, minimum observable altitude, hardness).
-# A minimum of None means the whole sector is discouraged at every altitude.
-# Sectors are 45 deg wide starting at 337.5; N wraps through 0.
-#
-# HARDNESS is the important field:
-#
-#   "soft"  the sky there is poor, not unreachable. Rows are KEPT and the
-#           target stays in the queue carrying a warning. Nothing is deleted.
-#   "hard"  the telescope genuinely cannot point there -- terrain, a building,
-#           a mount limit. Rows are rejected outright.
-#
-# Everything is soft today because every limit we have is a preference, not an
-# obstruction: north is avoided because Trieste sits 41 km away at bearing 3
-# deg and lights up that sky, not because anything blocks it. Deleting targets
-# for that reason would mean an impactor discovered in the north simply never
-# appeared on this board. It is also how the observatory's own planner behaves
-# -- planets-new.py has no azimuth mask at all, only a flat altitude floor.
-#
-# Mark a sector "hard" only once Luka confirms it is a physical obstruction.
-#
-# TBD -- from observer notes containing two unresolved conflicts:
-#   * "northwest is 50 degrees" vs later "Northwest = 40"  -> using 40
-#   * "below 30-40 degrees in the west" vs "West = 40"     -> using 40
-#   * SW was never specified                               -> interpolated 30
-_L01_HORIZON_MASK = [
-    (337.5, 22.5, None, "soft"),   # N  - "avoid north completely" (Trieste)
-    (22.5, 67.5, 20.0, "soft"),    # NE - "above 20 in South and East"
-    (67.5, 112.5, 20.0, "soft"),   # E
-    (112.5, 157.5, 20.0, "soft"),  # SE
-    (157.5, 202.5, 20.0, "soft"),  # S
-    (202.5, 247.5, 30.0, "soft"),  # SW - TBD, interpolated between S and W
-    (247.5, 292.5, 40.0, "soft"),  # W  - "West = 40"
-    (292.5, 337.5, 40.0, "soft"),  # NW - "Northwest = 40"
-]
-
-# --- Keep-out wedges: hard, and about the equipment ---------------------------
-# Sky the telescope must not be pointed at, whatever else is true.
-#
-# Deliberately NOT part of the horizon mask. That mask is advisory -- it
-# describes sky that is poor because of Trieste's light dome, and it never
-# removes a target, because an impactor discovered in a light-polluted
-# direction still has to appear on the board. These are the opposite: a slew
-# into one risks damaging the mount, so they reject outright and no display
-# setting, filter or view can bring the affected rows back.
-#
-# Each entry is (az_from, az_to, min_altitude, reason). The arc runs CLOCKWISE
-# from az_from to az_to, so (270, 45) is west -> north -> north-east, the
-# northern half, and NOT the southern one. Getting that backwards would cut
-# 87% of a typical night's rows rather than 9%.
-#
-# Below min_altitude inside the arc is forbidden; above it is allowed.
-# 247.5 rather than 270: the western edge started at due west, and a target
-# tracking down the west-south-west slipped under it for a whole night --
-# P22pZo5 ran from azimuth 189 to 269 and never once entered the wedge, while
-# being far enough west to be a problem. 247.5 is the W sector's own boundary,
-# so the rule reads as "W, NW, N and NE below 70 degrees" rather than as an
-# arbitrary number.
-#
-# This has now moved once in response to a target someone spotted. Fitting a
-# safety limit to individual complaints will keep finding gaps: the real
-# answer is the mount's actual limit from the observatory, which is open
-# question 1 in TBD.md. Find_Orb supports a continuous horizon profile
-# (site_L01.txt) if L01 has one, and we should use it directly if so.
-_L01_KEEPOUT_WEDGES = [
-    (247.5, 45.0, 70.0, "mount/dome collision risk"),
-]
-
-# --- Frames: the observatory's own speed table --------------------------------
-# Given by Luka. A fixed number of frames for every target, with the length of
-# each frame set by how fast the object is moving -- the faster it goes, the
-# shorter each frame has to be to stop it trailing across the detector.
-#
-#   0-5 "/min -> 30 s,  5-25 -> 15 s,  25-50 -> 10 s,
-#   50-100    ->  5 s, 100-200 -> 2 s,  200+  ->  1 s
-#
-# Upper bound INCLUSIVE, so a target at exactly 25.00 "/min gets 15 s, not 10.
-# MPC reports motion to two decimals, so exact boundary values are rare but do
-# occur.
-#
-# This answers what PR #3 was blocked on. That draft derived frame length from
-# a trailing budget and derived the count from the magnitude rule; the
-# observatory has a table instead, so the table wins.
-#
-# Note this is a SEPARATE quantity from the exposure_* fields. Those give
-# obsExposure -- total integration in minutes, from magnitude, inherited from
-# planets-new.py. This gives the per-frame instruction, from speed. They are
-# not meant to agree and generally do not: a slow target here gets 36 x 30 s =
-# 18 minutes on sky while its obsExposure asks for around 27.
-_L01_SPEED_BANDS = [                 # (max "/min inclusive, seconds per frame)
-    (5.0, 30),
-    (25.0, 15),
-    (50.0, 10),
-    (100.0, 5),
-    (200.0, 2),
-]
-
-# L01, Tican Station, Visnjan Observatory.
-#
-# Derived from the official MPC parallax constants rather than a hardcoded
-# lat/lon, so the site matches exactly what Find_Orb and the MPC use for L01.
-# ObsCodes.htm: "L01  13.749300.704742+0.707169Visnjan Observatory, Tican"
-# These resolve to 45.2909 N, 13.74930 E, 381 m.
-DEFAULT_SITE = Site(
-    # Site one, by migration rather than by privilege: every row that existed
-    # before site_id did belongs to L01, so it takes the first id and runs the
-    # same code path as any observatory added later.
-    id=1,
-    obscode="L01",
-    lon_deg=13.74930,
-    rho_cos_phi=0.704742,
-    rho_sin_phi=0.707169,
-
-    # The board is read at the observatory, so times are shown in Visnjan
-    # local time. UTC is kept alongside because that is what MPC, the plan
-    # file and the 80-column astrometry format all use -- the plan file stays
-    # UTC on purpose.
-    display_tz="Europe/Zagreb",
-    # The legacy planner treats a night as 11:00 UT to 11:00 UT the next day,
-    # so a session spanning midnight stays one unit and names one output file.
-    night_rollover_hour_ut=11,
-
-    horizon_mask=_L01_HORIZON_MASK,
-    sector_names=["N", "NE", "E", "SE", "S", "SW", "W", "NW"],
-    keepout_wedges=_L01_KEEPOUT_WEDGES,
-    min_alt=15.0,                    # legacy
-    # Zenith blind spot. The observer mentioned an upper elevation limit but
-    # gave no value; common on fork mounts. None disables the check.
-    max_altitude=None,               # TBD
-    # Note this dominates min_alt above -- the legacy planner sets minAlt=15
-    # while also passing oalt=20, so its 15 can never fire.
-    mpc_server_min_alt=20.0,
-
-    # Square field used to overlay the uncertainty map and report what
-    # fraction of an object's cloud one pointing covers. 2600 is Luka's
-    # figure. The legacy MPCS tool's own config (MPCS.ini) says FOV = 2562;
-    # 1.5% apart, so one of them is rounded or stale. Recorded here so the
-    # discrepancy is not lost.
-    fov_arcsec=2600,
-    # Ephemerides are interpolated this far ahead, so coordinates account for
-    # the time it takes to slew and settle.
-    interpolate_ahead_s=600,
-
-    # --- Filter cascade ---
-    max_mag=21.6,                    # legacy (we previously used 21.7)
-    sun_alt_max=-15.0,               # legacy
-    moon_sep_min=20.0,               # legacy
-    min_score=25,                    # legacy: digest2 floor
-    min_arc_days=0.01,               # legacy
-    max_not_seen_days=4.0,           # legacy
-    min_motion=0.7,                  # legacy: arcsec/min, rejects main-belt
-    max_scatteredness=(2000, 2000),  # legacy: arcsec spread of uncertainty map
-    scatteredness_warn=(1000, 800),  # legacy: warn but do not discard
-    # Keep only NEO-like or otherwise unusual orbits.
-    neo_only=True,                   # legacy
-    neo_q_max=1.3,                   # legacy
-    neo_e_min=0.5,                   # legacy
-    # Discard objects our own site has already observed.
-    skip_already_observed=True,      # legacy
-    blacklist=[],                    # TBD
-    high_priority_surveys=[],        # TBD
-    low_priority_surveys=[],         # TBD
-
-    # --- Exposures ---
-    # The observatory's real rule, recovered from the legacy planner:
-    #     minutes = 10 + (magnitude - 18) * 5
-    exposure_base_min=10.0,
-    exposure_ref_mag=18.0,
-    exposure_min_per_mag=5.0,
-    # The formula is linear and unbounded, so it goes negative for bright
-    # targets -- V=12.5 yields -17.5 minutes. The legacy planner prints that
-    # verbatim. Clamped here; ask Luka what the floor should really be.
-    exposure_floor_min=1.0,          # TBD
-    exposure_frames=36,
-    exposure_speed_bands=_L01_SPEED_BANDS,
-    exposure_fastest_sec=1,          # anything above the last band
-
-    # --- Ranking ---
-    # Default ordering is chronological by time of maximum altitude, matching
-    # the legacy planner: the list is a working sequence for the night, not a
-    # desirability ranking. The intrinsic score is retained as a sortable
-    # column so the two views can be compared.
-    default_sort="chronological",    # or "score"
-    rank_weights={"digest2": 2.0, "arc": 1.5, "magnitude": 1.5},
-    arc_saturate_days=3.0,
-    mag_bright=15.0,
-)
+# The site a request that names none gets. Lowest id, which is L01 here, so a
+# signed-out visitor sees exactly the board they saw before several sites
+# existed.
+DEFAULT_SITE = SITES[min(SITES)]

@@ -27,7 +27,8 @@ Their imports are deliberately lazy -- `manage.py` and the mailer construct a
 Site by importing config, and must not pay for numpy and astropy to do it.
 """
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, fields
 from functools import cached_property
 
 # Equatorial radius, the same figure MPC's parallax constants are expressed
@@ -49,6 +50,15 @@ class Site:
     # Parallax constants rather than a lat/lon, so the site matches exactly
     # what Find_Orb and the MPC use for this code.
     obscode: str
+    # What the site switcher calls it. MPC's own name for the code is in
+    # observatories.py; this is what the observatory calls itself.
+    name: str
+    # Where this site's nightly plan files are written, relative to the
+    # repository. A setting rather than a rule, so that L01 can keep writing
+    # to the `plans/` directory its legacy planner already reads while a new
+    # observatory gets its own subdirectory -- no code anywhere knows which
+    # of those is the special case.
+    plan_dir: str
     lon_deg: float
     rho_cos_phi: float
     rho_sin_phi: float
@@ -169,5 +179,132 @@ class Site:
             self.rho_sin_phi * A_EARTH_M * u.m,
         )
 
+    @cached_property
+    def lat_deg(self):
+        """Geodetic latitude, recovered from the parallax constants."""
+        return float(self.earth_location.lat.deg)
+
+    @cached_property
+    def height_m(self):
+        import astropy.units as u
+        return float(self.earth_location.height.to(u.m).value)
+
+    @cached_property
+    def coords_text(self):
+        """Where the telescope is, for the top of the board.
+
+        MPC gives east longitude in 0..360; a site in the Americas would read
+        as 280 degrees east rather than 80 west, which is correct and useless
+        to a person, so it is folded to +-180 with a hemisphere letter.
+        """
+        lat = self.lat_deg
+        lon = ((self.lon_deg + 180.0) % 360.0) - 180.0
+        return (f"{abs(lat):.4f}°{'N' if lat >= 0 else 'S'} "
+                f"{abs(lon):.5f}°{'E' if lon >= 0 else 'W'} "
+                f"{self.height_m:.0f} m")
+
     def __repr__(self):
         return f"<Site {self.id} {self.obscode}>"
+
+
+# --- loading sites from files ------------------------------------------------
+#
+# TOML, read with the standard library's tomllib. Deliberately a data format
+# rather than Python: a site file describes an observatory, and nothing in it
+# should be able to execute. The same reasoning runs through the plan-file
+# templating decision in multisite.md -- user-supplied text is never code.
+
+def _field_names():
+    return [f.name for f in fields(Site)]
+
+
+class SiteFileError(Exception):
+    """A site file is missing, unreadable, or does not describe a site.
+
+    Raised rather than warned about: a site whose horizon mask failed to load
+    would still produce a board, and that board would be confidently wrong
+    about where the telescope can point.
+    """
+
+
+def _as_tuples(value):
+    """TOML gives arrays of arrays as lists of lists; the Site wants tuples."""
+    return tuple(tuple(v) for v in value)
+
+
+def from_dict(data, source="<dict>"):
+    """Build a Site from a plain mapping, checking it is complete.
+
+    Every field is required. There are no defaults on purpose: a site file
+    that forgot to say what its magnitude limit is must fail loudly rather
+    than quietly inherit somebody else's observatory's judgement.
+    """
+    names = _field_names()
+    missing = [n for n in names if n not in data]
+    unknown = [k for k in data if k not in names]
+    if missing:
+        raise SiteFileError(f"{source}: missing {', '.join(sorted(missing))}")
+    if unknown:
+        raise SiteFileError(f"{source}: unknown {', '.join(sorted(unknown))}")
+
+    d = dict(data)
+    # A mask entry's minimum altitude is optional in the sense that "no
+    # altitude is good enough" is a real answer; TOML has no null, so a
+    # sector writes -1 and means it.
+    d["horizon_mask"] = tuple(
+        (a, b, None if m is not None and m < 0 else m, h)
+        for a, b, m, h in d["horizon_mask"])
+    for key in ("keepout_wedges", "exposure_speed_bands"):
+        d[key] = _as_tuples(d[key])
+    for key in ("sector_names", "max_scatteredness", "scatteredness_warn",
+                "blacklist", "high_priority_surveys", "low_priority_surveys"):
+        d[key] = tuple(d[key])
+    # Same convention for the one scalar that is genuinely optional.
+    if d.get("max_altitude") is not None and d["max_altitude"] < 0:
+        d["max_altitude"] = None
+    try:
+        return Site(**d)
+    except TypeError as e:                     # pragma: no cover - defensive
+        raise SiteFileError(f"{source}: {e}") from e
+
+
+def load_file(path):
+    """One site from one TOML file."""
+    import tomllib
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except OSError as e:
+        raise SiteFileError(f"{path}: {e}") from e
+    except tomllib.TOMLDecodeError as e:
+        raise SiteFileError(f"{path}: not valid TOML: {e}") from e
+    return from_dict(data, source=path)
+
+
+def load_dir(path):
+    """Every *.toml in a directory, as {id: Site}, ordered by id.
+
+    Ids and observatory codes must both be unique. A duplicate id would make
+    two observatories share a board's worth of rows; a duplicate obscode
+    would make the site switcher ambiguous and double our requests to MPC for
+    the same ephemeris.
+    """
+    import glob
+
+    out = {}
+    by_code = {}
+    for f in sorted(glob.glob(os.path.join(path, "*.toml"))):
+        site = load_file(f)
+        if site.id in out:
+            raise SiteFileError(
+                f"{f}: id {site.id} is already used by "
+                f"{out[site.id].obscode}")
+        if site.obscode in by_code:
+            raise SiteFileError(
+                f"{f}: obscode {site.obscode} is already used by site "
+                f"{by_code[site.obscode].id}")
+        out[site.id] = site
+        by_code[site.obscode] = site
+    if not out:
+        raise SiteFileError(f"{path}: no site files found")
+    return {k: out[k] for k in sorted(out)}
