@@ -135,8 +135,12 @@ def render_plan(targets):
     return HEADER + "\n\n\n\n" + body + "\n"
 
 
-def write_plan(targets, night_label, directory=None):
-    """Write plans/<night>.txt and return the path.
+def write_plan(targets, night_label, directory=None, site=None):
+    """Write <the site's plan_dir>/<night>.txt and return the path.
+
+    Each site says where its own plans go, so an observatory that has driven
+    a telescope from `plans/` for years keeps that path while a new one gets
+    its own directory -- and no code here knows which is which.
 
     Refuses to replace a plan that has content with an empty one. Once a
     night ends nothing is observable any more, but the night label does not
@@ -144,7 +148,9 @@ def write_plan(targets, night_label, directory=None):
     would otherwise overwrite the night's record with a bare header, which
     is exactly what happened to the first two nights.
     """
-    directory = directory or config.PLAN_DIR
+    if directory is None:
+        s = config.DEFAULT_SITE if site is None else site
+        directory = os.path.join(config.BASE_DIR, s.plan_dir)
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, f"{night_label}.txt")
 

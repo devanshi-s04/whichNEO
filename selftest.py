@@ -36,6 +36,7 @@ import output
 import pipeline
 import ranking
 import moonplot
+import sites as sitesmod
 import skymap
 import update_neocp
 
@@ -1420,6 +1421,392 @@ def test_two_sites_never_read_each_others_rows():
         conn.close()
     finally:
         config.DB_PATH = prev
+
+
+def test_l01_from_file_is_the_l01_we_had():
+    """L01's settings moved into sites/L01.toml and must not have drifted.
+
+    These numbers are written out here rather than read from the file,
+    deliberately: a test that compares the file to itself would pass through
+    any transcription slip. Every value below is what config.py held before
+    stage C moved it, and several of them decide where a telescope points.
+    """
+    s = config.DEFAULT_SITE
+    check("L01 is site one", s.id == 1, s.id)
+    check("and keeps its observatory code", s.obscode == "L01", s.obscode)
+
+    for name, want in [
+            ("lon_deg", 13.74930), ("rho_cos_phi", 0.704742),
+            ("rho_sin_phi", 0.707169), ("night_rollover_hour_ut", 11),
+            ("min_alt", 15.0), ("mpc_server_min_alt", 20.0),
+            ("fov_arcsec", 2600), ("interpolate_ahead_s", 600),
+            ("max_mag", 21.6), ("sun_alt_max", -15.0), ("moon_sep_min", 20.0),
+            ("min_score", 25), ("min_arc_days", 0.01),
+            ("max_not_seen_days", 4.0), ("min_motion", 0.7),
+            ("neo_q_max", 1.3), ("neo_e_min", 0.5),
+            ("exposure_base_min", 10.0), ("exposure_ref_mag", 18.0),
+            ("exposure_min_per_mag", 5.0), ("exposure_floor_min", 1.0),
+            ("exposure_frames", 36), ("exposure_fastest_sec", 1),
+            ("arc_saturate_days", 3.0), ("mag_bright", 15.0)]:
+        got = getattr(s, name)
+        check(f"L01 {name} is still {want}", got == want, got)
+
+    check("display timezone is Visnjan's", s.display_tz == "Europe/Zagreb",
+          s.display_tz)
+    check("NEO-only filtering is still on", s.neo_only is True)
+    check("already-observed objects are still skipped",
+          s.skip_already_observed is True)
+    check("default sort is still chronological",
+          s.default_sort == "chronological", s.default_sort)
+    check("rank weights unchanged",
+          s.rank_weights == {"digest2": 2.0, "arc": 1.5, "magnitude": 1.5},
+          s.rank_weights)
+    check("scatteredness limits unchanged",
+          s.max_scatteredness == (2000, 2000)
+          and s.scatteredness_warn == (1000, 800),
+          (s.max_scatteredness, s.scatteredness_warn))
+    check("max altitude is still unset", s.max_altitude is None, s.max_altitude)
+
+    # The two that would be dangerous to get wrong.
+    check("the keep-out wedge is exactly the one wedge it was",
+          s.keepout_wedges == ((247.5, 45.0, 70.0,
+                                "mount/dome collision risk"),),
+          s.keepout_wedges)
+    check("the horizon mask is the same eight soft sectors",
+          s.horizon_mask == (
+              (337.5, 22.5, None, "soft"), (22.5, 67.5, 20.0, "soft"),
+              (67.5, 112.5, 20.0, "soft"), (112.5, 157.5, 20.0, "soft"),
+              (157.5, 202.5, 20.0, "soft"), (202.5, 247.5, 30.0, "soft"),
+              (247.5, 292.5, 40.0, "soft"), (292.5, 337.5, 40.0, "soft")),
+          s.horizon_mask)
+    check("north is still discouraged at every altitude, not blocked",
+          s.horizon_mask[0][2] is None and s.horizon_mask[0][3] == "soft")
+    check("the speed table is unchanged",
+          s.exposure_speed_bands == ((5.0, 30), (25.0, 15), (50.0, 10),
+                                     (100.0, 5), (200.0, 2)),
+          s.exposure_speed_bands)
+    check("its plan files still go where the legacy planner reads them",
+          s.plan_dir == "plans", s.plan_dir)
+
+
+def test_a_site_file_must_be_complete():
+    """A half-written site file is an error, not a set of defaults.
+
+    A site that quietly inherited somebody else's magnitude limit or horizon
+    mask would produce a board that looks right and is not.
+    """
+    import tempfile
+
+    good = dataclasses.asdict(config.DEFAULT_SITE)
+    check("the round trip of a complete site works",
+          sitesmod.from_dict(good).obscode == "L01")
+
+    short = dict(good)
+    del short["max_mag"]
+    try:
+        sitesmod.from_dict(short)
+        check("a missing field is refused", False, "no error raised")
+    except sitesmod.SiteFileError as e:
+        check("a missing field is refused", "max_mag" in str(e), str(e))
+
+    extra = dict(good, telescope_colour="blue")
+    try:
+        sitesmod.from_dict(extra)
+        check("an unknown field is refused", False, "no error raised")
+    except sitesmod.SiteFileError as e:
+        check("an unknown field is refused", "telescope_colour" in str(e),
+              str(e))
+
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "bad.toml"), "w") as f:
+        f.write("this is not toml = = =\n")
+    try:
+        sitesmod.load_dir(d)
+        check("a malformed file is refused", False, "no error raised")
+    except sitesmod.SiteFileError:
+        check("a malformed file is refused", True)
+
+    # Two sites claiming the same id would share a board's worth of rows;
+    # two claiming the same obscode would double our requests to MPC.
+    d2 = tempfile.mkdtemp()
+    for name, code in (("a.toml", "AAA"), ("b.toml", "BBB")):
+        body = dict(good, obscode=code)
+        with open(os.path.join(d2, name), "w") as f:
+            f.write(_toml_of(body))
+    try:
+        sitesmod.load_dir(d2)
+        check("a duplicate id is refused", False, "no error raised")
+    except sitesmod.SiteFileError as e:
+        check("a duplicate id is refused", "id" in str(e), str(e))
+
+
+def _toml_of(d):
+    """Minimal TOML writer, just for the tests above."""
+    def val(v):
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, str):
+            return json.dumps(v)
+        if isinstance(v, (int, float)):
+            return repr(v)
+        if v is None:
+            return "-1.0"
+        if isinstance(v, (list, tuple)):
+            return "[" + ", ".join(val(x) for x in v) + "]"
+        raise TypeError(type(v))
+
+    lines, tables = [], []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            tables.append(f"[{k}]\n" + "\n".join(
+                f"{kk} = {val(vv)}" for kk, vv in v.items()))
+        elif k == "horizon_mask":
+            rows = [[a, b, -1.0 if m is None else m, h] for a, b, m, h in v]
+            lines.append(f"{k} = " + val(rows))
+        else:
+            lines.append(f"{k} = {val(v)}")
+    return "\n".join(lines) + "\n" + "\n".join(tables) + "\n"
+
+
+NEOCP_TWO_OBJECTS = (
+    "TR0006  100 2026 09 04.9  21.8863 -14.6396 17.3 "
+    "Added Sept. 8.89 UT              3   0.01 18.5  3.975\n"
+    "TR0007   90 2026 09 04.9  11.1111 +22.2222 18.1 "
+    "Added Sept. 8.89 UT              4   0.02 19.0  2.500\n")
+
+
+def _second_site(**over):
+    """A second observatory, differing only where the test needs it to."""
+    base = dict(id=2, obscode="Z99", name="Second Site", plan_dir="plans/Z99")
+    base.update(over)
+    return dataclasses.replace(config.DEFAULT_SITE, **base)
+
+
+def test_a_cycle_serves_several_sites_without_repeating_shared_work():
+    """The object-level work happens once; only the ephemeris is per site.
+
+    This is the efficiency the whole data-model split exists for. Fetching
+    the orbital parameters or running ds42 once per observatory would scale
+    our load on MPC and on the model with the number of sites, for answers
+    that are identical every time -- and running the history recorder per
+    site would write N copies of every poll into the research record.
+    """
+    import tempfile
+
+    prev_db, prev_sites = config.DB_PATH, config.SITES
+    d = tempfile.mkdtemp()
+    config.DB_PATH = os.path.join(d, "targets.db")
+    config.SITES = {1: config.DEFAULT_SITE, 2: _second_site()}
+    src = os.path.join(d, "neocp.txt")
+    with open(src, "w") as f:
+        f.write(NEOCP_TWO_OBJECTS)
+
+    real_info = neocp.fetch_neocp_info
+    real_many = ephemeris.fetch_many
+    real_score = update_neocp._score_new_objects
+    real_plan = config.WRITE_NIGHTLY_PLAN
+    calls = {"orbits": 0, "ephemeris": 0, "ds42": 0}
+
+    def fake_info(*a, **k):
+        calls["orbits"] += 1
+        return ""
+
+    def fake_many(desigs, **k):
+        calls["ephemeris"] += 1
+        list(desigs)
+        return {}
+
+    def fake_score(conn, cache):
+        calls["ds42"] += 1
+
+    try:
+        neocp.fetch_neocp_info = fake_info
+        ephemeris.fetch_many = fake_many
+        update_neocp._score_new_objects = fake_score
+        config.WRITE_NIGHTLY_PLAN = False
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        shared, results = update_neocp.run_update(conn, None, src)
+
+        check("both sites ran", len(results) == 2,
+              [r["site"].obscode for r in results])
+        check("the orbital parameters were fetched once, not per site",
+              calls["orbits"] == 1, calls["orbits"])
+        check("ds42 scoring ran once, not per site", calls["ds42"] == 1,
+              calls["ds42"])
+        check("but the ephemeris was fetched once per site",
+              calls["ephemeris"] == 2, calls["ephemeris"])
+
+        one, two = config.SITES[1], config.SITES[2]
+        n1 = len(db.load_targets(conn, True, True, site=one))
+        n2 = len(db.load_targets(conn, True, True, site=two))
+        check("each site got its own board", n1 == 2 and n2 == 2, (n1, n2))
+
+        check("and its own last-cycle record",
+              db.get_meta(conn, "last_update_ok", site=one) == "1"
+              and db.get_meta(conn, "last_update_ok", site=two) == "1")
+        check("recorded against the site, not the deployment",
+              db.get_meta(conn, "last_update_ok") is None,
+              db.get_meta(conn, "last_update_ok"))
+        check("each site has a night label of its own",
+              db.get_meta(conn, "night", site=one) is not None
+              and db.get_meta(conn, "night", site=two) is not None)
+        conn.close()
+    finally:
+        neocp.fetch_neocp_info = real_info
+        ephemeris.fetch_many = real_many
+        update_neocp._score_new_objects = real_score
+        config.WRITE_NIGHTLY_PLAN = real_plan
+        config.DB_PATH, config.SITES = prev_db, prev_sites
+
+
+def test_one_sites_failure_does_not_take_the_others_down():
+    """A partner observatory breaking must not stop this one's board.
+
+    Without isolation the per-site loop makes every site a single point of
+    failure for every other: one timing out ends the cycle, and the board
+    this deployment was built for silently stops updating behind it.
+    """
+    import tempfile
+
+    prev_db, prev_sites = config.DB_PATH, config.SITES
+    d = tempfile.mkdtemp()
+    config.DB_PATH = os.path.join(d, "targets.db")
+    # The broken site runs FIRST, so a failure that aborted the cycle would
+    # take the good one with it.
+    broken = _second_site(id=1, obscode="BAD", name="Broken")
+    good = _second_site(id=2, obscode="Z99")
+    config.SITES = {1: broken, 2: good}
+    src = os.path.join(d, "neocp.txt")
+    with open(src, "w") as f:
+        f.write(NEOCP_TWO_OBJECTS)
+
+    real_info = neocp.fetch_neocp_info
+    real_many = ephemeris.fetch_many
+    real_score = update_neocp._score_new_objects
+    real_plan = config.WRITE_NIGHTLY_PLAN
+
+    def fake_many(desigs, site=None, **k):
+        if site is not None and site.obscode == "BAD":
+            raise RuntimeError("MPC timed out for BAD")
+        list(desigs)
+        return {}
+
+    try:
+        neocp.fetch_neocp_info = lambda *a, **k: ""
+        ephemeris.fetch_many = fake_many
+        update_neocp._score_new_objects = lambda conn, cache: None
+        config.WRITE_NIGHTLY_PLAN = False
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        shared, results = update_neocp.run_update(conn, None, src)
+
+        check("the cycle completed despite one site failing",
+              [r["site"].obscode for r in results] == ["Z99"],
+              [r["site"].obscode for r in results])
+        check("the working site still got its board",
+              len(db.load_targets(conn, True, True, site=good)) == 2)
+        check("the failed site is marked not ok",
+              db.get_meta(conn, "last_update_ok", site=broken) == "0",
+              db.get_meta(conn, "last_update_ok", site=broken))
+        check("with its own error recorded against it",
+              "BAD" in (db.get_meta(conn, "last_error", site=broken) or ""),
+              db.get_meta(conn, "last_error", site=broken))
+        check("and the working site is not blamed for it",
+              db.get_meta(conn, "last_error", site=good) is None,
+              db.get_meta(conn, "last_error", site=good))
+        conn.close()
+    finally:
+        neocp.fetch_neocp_info = real_info
+        ephemeris.fetch_many = real_many
+        update_neocp._score_new_objects = real_score
+        config.WRITE_NIGHTLY_PLAN = real_plan
+        config.DB_PATH, config.SITES = prev_db, prev_sites
+
+
+def test_each_site_writes_its_own_plan_file():
+    """Two observatories must not overwrite each other's night.
+
+    L01's plan_dir is the directory its legacy planner already reads, so the
+    path it has always used is unchanged; a new site gets its own. Nothing in
+    the code knows which of those is the special case.
+    """
+    import tempfile
+
+    prev_base = config.BASE_DIR
+    config.BASE_DIR = tempfile.mkdtemp()
+    try:
+        rows = [dict(desig="T1", observable=False)]
+        p1 = output.write_plan(rows, "2026-09-20", site=config.DEFAULT_SITE)
+        p2 = output.write_plan(rows, "2026-09-20", site=_second_site())
+        check("L01's plan keeps the path the planner reads",
+              p1 == os.path.join(config.BASE_DIR, "plans", "2026-09-20.txt"),
+              p1)
+        check("the second site writes somewhere else entirely", p1 != p2, p2)
+        check("and both files exist",
+              os.path.exists(p1) and os.path.exists(p2))
+    finally:
+        config.BASE_DIR = prev_base
+
+
+def test_the_switcher_only_appears_when_there_is_somewhere_to_go():
+    """One observatory must look exactly as it did before several existed.
+
+    Also the reason the switcher is driven by obscode rather than by id: a
+    URL someone pastes should name the observatory, and an unknown one must
+    fall back rather than 500.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db, prev_sites = config.DB_PATH, config.SITES
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+
+        config.SITES = {1: config.DEFAULT_SITE}
+        importlib.reload(appmod)
+        page = appmod.app.test_client().get("/").data.decode()
+        check("with one site there is no switcher on the board",
+              'class="siteswitch"' not in page)
+        check("and the header still names L01",
+              "L01" in page and "Vi" in page)
+
+        config.SITES = {1: config.DEFAULT_SITE, 2: _second_site()}
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+        page = c.get("/").data.decode()
+        check("with two sites the switcher appears",
+              'class="siteswitch"' in page)
+        check("offering both observatories",
+              "Z99" in page and "L01" in page)
+
+        with appmod.app.test_request_context("/?site=Z99"):
+            check("?site= picks the observatory by code",
+                  appmod.current_site().obscode == "Z99")
+        with appmod.app.test_request_context("/?site=NOPE"):
+            check("an unknown code falls back to the default rather than 500",
+                  appmod.current_site().obscode
+                  == config.DEFAULT_SITE.obscode)
+        with appmod.app.test_request_context("/"):
+            check("and naming none gives the default",
+                  appmod.current_site().obscode
+                  == config.DEFAULT_SITE.obscode)
+
+        # The choice has to survive the next click, or every link on the
+        # board would have to carry it.
+        c.get("/?site=Z99")
+        check("the choice is remembered for the session",
+              "Z99" in c.get("/status").data.decode())
+    finally:
+        config.DB_PATH, config.SITES = prev_db, prev_sites
+        importlib.reload(appmod)
 
 
 def test_ranking_bounds():
@@ -3246,6 +3633,12 @@ def main():
                test_schema_migration_from_older_db,
                test_site_id_migration_keeps_every_row,
                test_two_sites_never_read_each_others_rows,
+               test_l01_from_file_is_the_l01_we_had,
+               test_a_site_file_must_be_complete,
+               test_a_cycle_serves_several_sites_without_repeating_shared_work,
+               test_one_sites_failure_does_not_take_the_others_down,
+               test_each_site_writes_its_own_plan_file,
+               test_the_switcher_only_appears_when_there_is_somewhere_to_go,
                test_ranking_bounds, test_row_rejection_reasons,
                test_replay_ts_never_takes_the_map_down,
                test_night_archive_survives_per_account_state,
