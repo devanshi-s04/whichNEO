@@ -137,13 +137,27 @@ def airmass(alt_deg):
     return float(1.0 / np.cos(np.radians(90.0 - alt_deg)))
 
 
-def moon_illumination(t, loc):
-    sun = get_body("sun", t, loc)
-    moon = get_body("moon", t, loc)
+def _illuminated_fraction(sun, moon):
+    """Illuminated fraction from a sun and moon already computed together.
+
+    Factored out so moon_state() and moon_states() cannot drift apart. The
+    replay frames the updater precomputes have to be the SAME picture the
+    live /skymap.svg route draws for that instant -- verified byte for byte
+    by test_precomputed_frames_match_the_live_route -- and two copies of this
+    formula is exactly how that stops being true.
+
+    Returns whatever shape the inputs were: a scalar for one instant, an
+    array for many.
+    """
     elong = sun.separation(moon)
     phase = np.arctan2(sun.distance * np.sin(elong),
                        moon.distance - sun.distance * np.cos(elong))
-    return float((1 + np.cos(phase)) / 2.0)
+    return (1 + np.cos(phase)) / 2.0
+
+
+def moon_illumination(t, loc):
+    return float(_illuminated_fraction(get_body("sun", t, loc),
+                                       get_body("moon", t, loc)))
 
 
 # Bounded on purpose, and cleared rather than evicted one at a time. The key
@@ -200,6 +214,45 @@ def moon_state(unix_ts=None, site=None):
             _MOON_CACHE.clear()
         _MOON_CACHE[key] = hit
     return dict(hit)
+
+
+def moon_states(unix_ts_list, site=None):
+    """moon_state() for many instants at once, in one vectorised call.
+
+    This is what makes a precomputed night affordable. The moon is the single
+    most expensive thing the sky map draws, and a replay needs it at every
+    instant of the night rather than at one: 241 instants (eight hours at
+    two-minute steps) cost 1.37 s here against 10.6 s calling moon_state() in
+    a loop on a cold cache -- one Time array and one body transform for the
+    whole grid instead of one per instant, the same reason moon_altitudes()
+    below is vectorised.
+
+    Quantised to the minute exactly the way moon_state() is, and that is the
+    load-bearing part rather than a detail: the frames the updater precomputes
+    must be the same picture the live route renders for the same instant, and
+    half a minute of difference in the moon's place would put the glyph and
+    its exclusion locus in a visibly different spot. Because the quantisation
+    matches, the two agree bit for bit -- see
+    test_precomputed_frames_match_the_live_route.
+
+    Deliberately NOT routed through the moon_state() cache. This is a bulk
+    computation for a whole night, and filing a few hundred fresh entries
+    would evict the live board's own minute on every update cycle.
+    """
+    if not len(unix_ts_list):
+        return []
+    loc = _site(site).earth_location
+    minutes = np.round(np.asarray(unix_ts_list, dtype=float) / 60.0) * 60.0
+    t = Time(minutes, format="unix")
+    moon = get_body("moon", t, loc)
+    aa = moon.transform_to(AltAz(obstime=t, location=loc))
+    illum = np.atleast_1d(np.asarray(
+        _illuminated_fraction(get_body("sun", t, loc), moon), dtype=float))
+    alt = np.atleast_1d(aa.alt.deg)
+    az = np.atleast_1d(aa.az.deg)
+    return [{"alt": float(alt[i]), "az": float(az[i]),
+             "illum": float(illum[i]), "ts": float(minutes[i])}
+            for i in range(len(alt))]
 
 
 def moon_altitudes(unix_ts_list, site=None):

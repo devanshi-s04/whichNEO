@@ -6,6 +6,7 @@ rendering stays fast. The updater has already done all the work.
 
 import csv
 import dataclasses
+import gzip
 import io
 import json
 import math
@@ -28,10 +29,12 @@ import mailer
 import moonplot
 import observability
 import observatories
+import pipeline
 import ranking
 import registry
 import siteconf
 import sites
+import skyframes
 import skymap
 import uncertainty
 
@@ -416,6 +419,17 @@ def night_strip(rows, max_lanes=16):
     }
 
 
+def sky_rows(rows):
+    """The queue rows the sky map draws, in the order it draws them.
+
+    One expression, shared, because a marker's number is its position in this
+    list and the precomputed replay has to number them the same way the live
+    map does. Two copies of `if r["observable"]` would be two chances to
+    drift.
+    """
+    return [r for r in rows if r["observable"]]
+
+
 def sky_view(conn, rows, now=None):
     """The all-sky map, drawn fresh for this instant.
 
@@ -428,7 +442,7 @@ def sky_view(conn, rows, now=None):
     """
     now = now if now is not None else time.time()
     site = current_site()
-    shown = [r for r in rows if r["observable"]]
+    shown = sky_rows(rows)
     tracks = {d: ephemeris.track(lines)
               for d, lines in db.load_tracks(
                   conn, [r["desig"] for r in shown], site).items()}
@@ -719,6 +733,87 @@ def skymap_svg():
                  "X-Sky-Time": f"{localt(used)} {_tzabbr(used)}"})
     finally:
         conn.close()
+
+
+@app.route("/skyframes.json")
+def skyframes_json():
+    """The whole night's map in one payload, so the replay never asks again.
+
+    Each entry is the finished SVG of the map's moving layer for one instant
+    -- the same bytes /skymap.svg would put inside its dynamic group -- so
+    scrubbing and playback are an assignment to one element rather than a
+    round trip. See skyframes.py for why the browser is given finished
+    drawing rather than positions to interpret.
+
+    Answers 200 with {"available": false} rather than an error whenever it
+    cannot serve a night it is sure about. Those are ordinary states, not
+    faults: a fresh database, an afternoon with nothing observable yet, a
+    night the updater has not reached, a target that joined the queue after
+    the last cycle. The page treats any of them as "keep doing what you did
+    before" and goes on rendering frames on demand, which is the behaviour
+    this route is an optimisation of rather than a replacement for.
+
+    Deliberately tonight only. An archived night comes out of night_archive,
+    whose payload the updater never revisits, so there is nothing precomputed
+    to serve and ?night= stays on the server-rendered path.
+    """
+    v = _view_args()
+    site = current_site()
+    conn = get_conn()
+    try:
+        blob = db.load_skyframes(conn, site)
+        if blob is None:
+            return _no_skyframes("no precomputed night for this site")
+        if blob.get("night") != pipeline.night_label(time.time(), site):
+            # Built for a night that has rolled over. The frames are still
+            # internally consistent, they are simply not tonight's, and the
+            # slider's stops are.
+            return _no_skyframes("precomputed night is not tonight")
+        shown = sky_rows(load_sorted(conn, v["show_observed"],
+                                     v["show_hidden"], v["mode"],
+                                     v["range_filters"]))
+        if not skyframes.covers(blob, [r["desig"] for r in shown]):
+            return _no_skyframes("a visible target is not in the payload")
+        body = json.dumps({
+            "available": True,
+            "step": blob["step"],
+            "grid": blob["grid"],
+            "frames": skyframes.frames(blob, shown, site, localt=localt,
+                                       localdt=localdt),
+            "built_utc": blob["built_utc"],
+            "night": blob["night"],
+        }, separators=(",", ":"))
+    finally:
+        conn.close()
+    return _json_maybe_gzipped(body)
+
+
+def _no_skyframes(reason):
+    """Why the fast path is off, as data rather than as an error.
+
+    The reason is for whoever is looking at why a demo is not smooth; the
+    page only reads `available`.
+    """
+    return _json_maybe_gzipped(
+        json.dumps({"available": False, "reason": reason}))
+
+
+def _json_maybe_gzipped(body):
+    """JSON, compressed when the client said it could take it.
+
+    A night of frames is a few hundred kilobytes of extremely repetitive
+    markup -- measured 544 KB down to 30 KB for the live board's night --
+    and waitress does not compress for us. Sent once per page load, so the
+    difference is the whole cost of the feature over the wire.
+    """
+    raw = body.encode()
+    headers = {"Content-Type": "application/json; charset=utf-8",
+               "Cache-Control": "no-store"}
+    if "gzip" in request.headers.get("Accept-Encoding", ""):
+        raw = gzip.compress(raw, 6)
+        headers["Content-Encoding"] = "gzip"
+    headers["Content-Length"] = str(len(raw))
+    return raw, 200, headers
 
 
 @app.route("/rows")

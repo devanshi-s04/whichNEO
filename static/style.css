@@ -140,6 +140,9 @@ body {
   width: 100%; margin: 2px 0 8px; accent-color: var(--amber);
 }
 .replay .ghost { font-size: 10.5px; padding: 2px 8px; }
+/* Fixed width so the row does not shuffle sideways when "play" becomes
+   "pause" mid-animation -- the control has to stay under the pointer. */
+#replayPlay { min-width: 62px; text-align: center; }
 
 /* Scrubbed: the map is at a past instant, the panel beside it is not. The
    counts and the moon row are rendered once per page load and cannot follow

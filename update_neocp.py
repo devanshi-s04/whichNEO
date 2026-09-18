@@ -34,6 +34,7 @@ import pipeline
 import ranking
 import registry
 import siteconf
+import skyframes
 
 
 def setup_logging(verbose=False):
@@ -268,6 +269,42 @@ def run_update(conn, hist_conn=None, source=None, sites=None):
     return shared, results
 
 
+def _build_skyframes(conn, ordered, site, night):
+    """Precompute and store tonight's replay frames for one site.
+
+    The span is the observable night the board itself draws -- the same
+    min(window_start_ts) to max(window_end_ts) over observable rows that
+    app.night_strip() computes for the "Tonight" strip and that the replay
+    slider's stops come from. Deriving it here again from `ordered` rather
+    than reading it back keeps the updater from depending on the web app.
+
+    Returns False when there is nothing to build: no observable target has a
+    window yet, which is the ordinary state of a fresh database or an
+    afternoon. The stale row from the last night that did have one is cleared
+    rather than left, so nothing can serve yesterday's frames as tonight's.
+    """
+    obs = [t for t in ordered if t.get("observable")]
+    spans = [t for t in obs
+             if t.get("window_start_ts") and t.get("window_end_ts")]
+    if not spans:
+        with conn:
+            conn.execute("DELETE FROM skyframe_cache WHERE site_id=?",
+                         (site.id,))
+        return False
+    # Every observable target, not only the ones that set the span. The web
+    # filters the map by `observable` alone, so a target with no window would
+    # otherwise be visible and uncovered -- which correctly disables the fast
+    # path for the whole night rather than losing one marker, but disables it
+    # for no reason.
+    tracks = {d: ephemeris.track(lines) for d, lines in db.load_tracks(
+        conn, [t["desig"] for t in obs], site).items()}
+    blob = skyframes.build(obs, tracks,
+                           min(t["window_start_ts"] for t in spans),
+                           max(t["window_end_ts"] for t in spans), site)
+    db.save_skyframes(conn, night, blob, site)
+    return True
+
+
 def _run_site(conn, site, base, orbits, now):
     """One observatory's half of a cycle. Returns (result, its cache).
 
@@ -436,6 +473,24 @@ def _run_site(conn, site, base, orbits, now):
     n = db.replace_targets(conn, ordered, site)
     db.prune_cache(conn, [t["desig"] for t in targets], site)
     mark("database")
+
+    # Tonight's replay frames, so the slider and the play button can animate
+    # without a request per frame -- see skyframes.py. Here rather than in
+    # Flask because the moon is the expensive part and page loads do no
+    # astronomy; and after replace_targets, so the frames are built from the
+    # same queue the board is about to serve.
+    #
+    # Swallowed on failure, deliberately. A missing payload costs smoothness
+    # and nothing else: /skyframes.json answers "unavailable" and the board
+    # falls back to rendering each frame on demand, exactly as it did before
+    # this existed. Taking the update cycle down over a cache would be the
+    # wrong trade.
+    try:
+        _build_skyframes(conn, ordered, site, night)
+    except Exception:
+        logging.exception("failed to precompute replay frames for %s",
+                          site.obscode)
+    mark("skyframes")
 
     n_obs = sum(1 for t in ordered if t["observable"])
     mismatches = sum(1 for t in ordered

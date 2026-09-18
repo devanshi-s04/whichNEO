@@ -3091,6 +3091,340 @@ def test_archived_replay_endpoint():
         importlib.reload(appmod)
 
 
+def _eph_line(ts, az_deg, alt_deg, vmag=19.0):
+    """One fabricated ephemeris line at a chosen instant and sky position.
+
+    ephemeris.Row splits on whitespace, so this only has to get the field
+    ORDER right rather than the column widths. Azimuth goes in the way MPC
+    writes it -- measured from south -- because undoing that is Row's job and
+    a test that skipped it would be testing the wrong convention.
+    """
+    import datetime
+    d = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+    return " ".join([
+        "%04d" % d.year, "%02d" % d.month, "%02d" % d.day,
+        "%02d%02d" % (d.hour, d.minute),
+        "02", "30", "34.7", "+36", "47", "19",          # RA / Dec
+        "118.3", "%.1f" % vmag, "391.9", "047.2",       # elong V motion PA
+        "%.1f" % ((az_deg - 180.0) % 360.0),            # az, from south
+        "%+.1f" % alt_deg,
+        "-26", "0.00", "115", "-28", "Map/Offsets", "!!"])
+
+
+def _skyframe_night(conn, site, desig="P12frm", az=120.0, alt=45.0,
+                    minutes=40, step_min=10):
+    """A one-target observable night in `conn`, as the updater would leave it.
+
+    Returns (start_ts, end_ts). Anchored a little in the past and on a whole
+    minute: /skymap.svg?ts= refuses instants more than a year from now, and
+    an ephemeris line carries a time only to the minute.
+    """
+    start = (int(time.time()) // 60) * 60 - 3600
+    end = start + minutes * 60
+    lines = [_eph_line(start + k * step_min * 60, az, alt)
+             for k in range(minutes // step_min + 1)]
+    conn.execute(
+        "INSERT INTO targets (site_id, desig, score, vmag, observable, "
+        "window_start_ts, window_end_ts) VALUES (?,?,?,?,?,?,?)",
+        (site.id, desig, 88, 19.0, 1, start, end))
+    conn.execute(
+        "INSERT INTO ephemeris_cache (site_id, desig, signature, "
+        "fetched_utc, payload) VALUES (?,?,?,?,?)",
+        (site.id, desig, "sig", db.utcnow(), json.dumps({"lines": lines})))
+    conn.commit()
+    return start, end
+
+
+def test_precomputed_frames_match_the_live_route():
+    """A precomputed frame must be the bytes the live route would send.
+
+    This is the check the whole replay animation rests on. The browser no
+    longer asks the server for a picture per frame -- it is handed the whole
+    night up front and paints it locally -- so the one thing that could go
+    wrong is the two paths drawing different maps for the same instant. That
+    is not a cosmetic risk: which targets appear, which carry the poor-sky
+    ring and which are removed outright are this observatory's own limits
+    applied position by position by observability.keepout_violation and
+    mask_violation, and an animation that disagreed with them would be a
+    preview of sky the mount must not be sent to.
+
+    So this does not compare approximately, or compare positions, or compare
+    counts. It takes every instant of a precomputed night, fetches the same
+    instant from /skymap.svg?ts=, and demands the precomputed frame be
+    character for character what the route put inside its dynamic group --
+    with the backdrop before it proven identical at every instant, which is
+    what makes shipping the backdrop once legitimate.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+    import pipeline
+    import skyframes
+    import update_neocp as upd
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        site = config.DEFAULT_SITE
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        start, end = _skyframe_night(conn, site)
+        ordered = [dict(r) for r in conn.execute(
+            "SELECT * FROM targets WHERE site_id=?", (site.id,))]
+        night = pipeline.night_label(time.time(), site)
+        check("the updater precomputes the night",
+              upd._build_skyframes(conn, ordered, site, night))
+        conn.close()
+
+        c = appmod.app.test_client()
+        r = c.get("/skyframes.json")
+        check("the frames endpoint answers", r.status_code == 200, r.status_code)
+        data = json.loads(r.data)
+        check("it offers a night", data.get("available") is True, data)
+        check("on the two-minute grid",
+              data["step"] == skyframes.GRID_STEP_S, data.get("step"))
+        check("one frame per instant of the night",
+              len(data["frames"]) == len(data["grid"]) > 1,
+              (len(data["frames"]), len(data.get("grid", []))))
+
+        opening = '<g class="%s">' % skymap.DYNAMIC_CLASS
+        backdrops, mismatched = set(), []
+        for i, ts in enumerate(data["grid"]):
+            body = c.get("/skymap.svg?ts=%r" % ts).data.decode()
+            head, _, tail = body.partition(opening)
+            backdrops.add(head)
+            if tail != data["frames"][i] + "</g></svg>":
+                mismatched.append(i)
+        check("every precomputed frame is the live route's own bytes",
+              not mismatched,
+              "%d of %d differ, first at %s"
+              % (len(mismatched), len(data["grid"]), mismatched[:3]))
+        check("the backdrop really is the same at every instant",
+              len(backdrops) == 1, len(backdrops))
+        check("and it is the one backdrop_svg() draws",
+              backdrops.pop() == skymap.backdrop_svg(None, site))
+
+        # The composition is not an accident of this night: render_svg() is
+        # defined as the two halves joined, which is why a frame can be
+        # swapped in on its own at all.
+        marks = skymap.target_marks(ordered, {}, start, site)
+        check("render_svg is exactly backdrop plus one dynamic layer",
+              skymap.render_svg(marks, None, site=site)
+              == (skymap.backdrop_svg(None, site) + opening
+                  + skymap.dynamic_svg(marks, None, site=site)
+                  + "</g></svg>"))
+    finally:
+        config.DB_PATH = prev_db
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+
+def test_the_replay_falls_back_when_nothing_is_precomputed():
+    """Every way the fast path can be unavailable must stay honest.
+
+    The precompute is a cache, and a cache that guesses when it is stale
+    draws a map that is wrong rather than slow. There are four ways it can
+    have nothing to say -- no row at all, a row built for a night that has
+    rolled over, a target that joined the queue since it was built, and an
+    archived night, which the updater never revisits -- and each of them has
+    to put the board back on the server-rendered path it used before any of
+    this existed, with /skymap.svg?ts= still answering.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+    import pipeline
+    import skyframes
+    import update_neocp as upd
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        site = config.DEFAULT_SITE
+        c = appmod.app.test_client()
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        check("a fresh database has no precomputed night",
+              db.load_skyframes(conn, site) is None)
+        start, end = _skyframe_night(conn, site)
+        ordered = [dict(r) for r in conn.execute(
+            "SELECT * FROM targets WHERE site_id=?", (site.id,))]
+        conn.close()
+
+        def offered():
+            return json.loads(c.get("/skyframes.json").data)
+
+        answer = offered()
+        check("so the endpoint declines rather than erring",
+              answer.get("available") is False, answer)
+        check("and says why", "no precomputed" in answer.get("reason", ""),
+              answer)
+        r = c.get("/skymap.svg?ts=%r" % (start + 600))
+        check("the server-rendered frame still works without it",
+              r.status_code == 200 and b"<svg" in r.data, r.status_code)
+        check("and still dates itself", bool(r.headers.get("X-Sky-Time")))
+
+        conn = db.connect(config.DB_PATH)
+        night = pipeline.night_label(time.time(), site)
+        upd._build_skyframes(conn, ordered, site, night)
+        conn.close()
+        check("built for tonight, it is offered", offered().get("available"))
+
+        # A night that has rolled over. The frames are still internally
+        # consistent; they are simply not the night the slider is showing.
+        conn = db.connect(config.DB_PATH)
+        conn.execute("UPDATE skyframe_cache SET night='1999-01-01'")
+        conn.commit()
+        conn.close()
+        answer = offered()
+        check("a night that has rolled over is not served",
+              answer.get("available") is False, answer)
+        check("and says so", "not tonight" in answer.get("reason", ""), answer)
+
+        # A target that joined the queue after the payload was built. Serving
+        # the rest would draw fewer markers than /skymap.svg would.
+        conn = db.connect(config.DB_PATH)
+        conn.execute("UPDATE skyframe_cache SET night=?", (night,))
+        _skyframe_night(conn, site, desig="P12new", az=150.0)
+        conn.close()
+        answer = offered()
+        check("an uncovered target disables the fast path",
+              answer.get("available") is False, answer)
+        check("and names the reason",
+              "not in the payload" in answer.get("reason", ""), answer)
+
+        # An afternoon with nothing observable clears the row rather than
+        # leaving last night's to be served as tonight's.
+        conn = db.connect(config.DB_PATH)
+        check("nothing observable means nothing to build",
+              upd._build_skyframes(conn, [], site, night) is False)
+        check("and the stale payload is gone",
+              db.load_skyframes(conn, site) is None)
+        conn.close()
+
+        blob = {"version": skyframes.PAYLOAD_VERSION, "built_for": ["A", "B"]}
+        check("a subset of the payload's targets is covered",
+              skyframes.covers(blob, ["A"]))
+        check("the whole set is covered", skyframes.covers(blob, ["A", "B"]))
+        check("an unknown target is not",
+              not skyframes.covers(blob, ["A", "C"]))
+        check("neither is a payload from an older format",
+              not skyframes.covers(dict(blob, version=0), ["A"]))
+        check("nor no payload at all", not skyframes.covers(None, ["A"]))
+    finally:
+        config.DB_PATH = prev_db
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+
+def test_the_browser_is_never_given_geometry_to_judge():
+    """Marker state must reach the browser already decided.
+
+    The failure this guards against is a second implementation of the
+    observing rules in JavaScript: a client that got positions and a copy of
+    the dome's limits could draw a marker in sky the mount must not be sent
+    to, and would do it convincingly. So the payload deliberately carries no
+    geometry at all -- no altitude, no azimuth, no wedge, no separation --
+    only finished markup per instant, which leaves the browser nothing to
+    judge even if it wanted to.
+
+    Checked two ways: the payload's shape, and the behaviour that shape
+    encodes. A target that crosses into a keep-out wedge has to vanish from
+    the frames by the server's decision, while the payload never says where
+    it was.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+    import pipeline
+    import skyframes
+    import update_neocp as upd
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        site = config.DEFAULT_SITE
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        _skyframe_night(conn, site)
+        ordered = [dict(r) for r in conn.execute(
+            "SELECT * FROM targets WHERE site_id=?", (site.id,))]
+        upd._build_skyframes(conn, ordered, site,
+                             pipeline.night_label(time.time(), site))
+        conn.close()
+
+        data = json.loads(appmod.app.test_client().get("/skyframes.json").data)
+        check("the payload's shape is fixed",
+              set(data) == {"available", "step", "grid", "frames",
+                            "built_utc", "night"}, sorted(data))
+        check("a frame is markup, not a position",
+              all(isinstance(f, str) for f in data["frames"]))
+        check("the grid is only instants",
+              all(isinstance(t, (int, float)) for t in data["grid"]))
+        check("nothing in it is a per-target structure the client could read",
+              not any(isinstance(f, (dict, list)) for f in data["frames"]))
+
+        # The server's decision, visible in the markup rather than derivable
+        # from it. L01's keep-out wedge runs clockwise from 247.5 to 45
+        # degrees below altitude 70, so the same target is drawn at azimuth
+        # 120 and removed at azimuth 300 -- and the payload says only that.
+        rows = [{"desig": "KO1", "observed": False, "vmag": 19.0, "score": 70}]
+        t0 = (int(time.time()) // 60) * 60
+        clear = [(t0 + 600 * k, 120.0, 45.0) for k in range(5)]
+        inside = [(t0 + 600 * k, 300.0, 45.0) for k in range(5)]
+        drawn = skyframes.build(rows, {"KO1": clear}, t0, t0 + 2400, site)
+        gone = skyframes.build(rows, {"KO1": inside}, t0, t0 + 2400, site)
+        frames_drawn = skyframes.frames(drawn, rows, site)
+        frames_gone = skyframes.frames(gone, rows, site)
+        check("clear sky earns a marker in every frame",
+              all('data-desig="KO1"' in f for f in frames_drawn),
+              sum('data-desig="KO1"' in f for f in frames_drawn))
+        check("a keep-out violation is drawn nowhere",
+              not any('data-desig="KO1"' in f for f in frames_gone))
+        check("and the removed target is still listed as covered, so the "
+              "fast path is not silently disabled",
+              skyframes.covers(gone, ["KO1"]))
+        check("the payload holds no position for the client to test",
+              all(not m for m in gone["marks"]), gone["marks"][:1])
+
+        # The page's whole drawing path is one assignment of that markup.
+        # Nothing here builds or places a marker, which is the property the
+        # payload's shape is there to make unavoidable.
+        page = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "templates", "index.html")).read()
+        # The page's script, not the whole template: the legend beside the
+        # map does render the site's keep-out wedges, in Jinja, as a caption.
+        # Naming the limits in prose is the opposite of the problem -- what
+        # must not happen is the SCRIPT deciding anything from them.
+        script = page[page.rindex("<script>"):]
+        check("the page paints a frame by assigning it",
+              "layer.innerHTML = frag" in script)
+        for forbidden in ("createElementNS", "setAttribute",
+                          "keepout", "moon_sep", "sector",
+                          "Math.sin", "Math.cos", "Math.atan"):
+            check("the script never reaches for %s" % forbidden,
+                  forbidden not in script)
+    finally:
+        config.DB_PATH = prev_db
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+
 def test_the_replay_handle_never_opens_in_the_future():
     """The slider's right-hand stop is NOW, not the night's end.
 
@@ -4952,6 +5286,9 @@ def main():
                test_replay_ts_never_takes_the_map_down,
                test_night_archive_survives_per_account_state,
                test_archived_replay_endpoint,
+               test_precomputed_frames_match_the_live_route,
+               test_the_replay_falls_back_when_nothing_is_precomputed,
+               test_the_browser_is_never_given_geometry_to_judge,
                test_the_replay_handle_never_opens_in_the_future,
                test_a_bad_replay_url_cannot_replace_the_map_with_prose,
                test_marks_never_cross_a_hole_in_the_ephemeris,

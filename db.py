@@ -21,7 +21,7 @@ Some data is about the object and some is about the object *as seen from a
 site*, and the schema now says which is which:
 
   per site, carrying site_id   targets, ephemeris_cache, observer_state,
-                               night_archive
+                               night_archive, skyframe_cache
   shared by every site         ds42_scores, users, meta, and the whole of
                                neocp_history
 
@@ -35,6 +35,7 @@ working on; passing none means the deployment's default. See sites.py and
 multisite.md.
 """
 
+import gzip
 import json
 import os
 import sqlite3
@@ -229,6 +230,27 @@ CREATE TABLE IF NOT EXISTS night_archive (
     end_ts       REAL,
     payload      TEXT,
     PRIMARY KEY (site_id, night)
+);
+
+-- Tonight's replay frames, precomputed by the updater -- see skyframes.py.
+-- One row per site, replaced wholesale every cycle, and the only table here
+-- that is pure cache: every byte of it is regenerable from targets and
+-- ephemeris_cache, so unlike night_archive it is never migrated, never
+-- archived, and safe to be missing. A site with no row simply falls back to
+-- server-rendered frames, which is what the board did before this existed.
+--
+-- The payload is gzipped JSON in a BLOB rather than TEXT: a busy night at
+-- two-minute steps is a few hundred kilobytes of very repetitive numbers,
+-- and compressing it keeps a table that is rewritten every five minutes
+-- from dominating the database file.
+CREATE TABLE IF NOT EXISTS skyframe_cache (
+    site_id   INTEGER NOT NULL PRIMARY KEY,
+    night     TEXT NOT NULL,
+    built_utc TEXT NOT NULL,
+    start_ts  REAL,
+    end_ts    REAL,
+    step_s    REAL,
+    payload   BLOB NOT NULL
 );
 
 -- Settings edited through the web, one row per changed field, layered over
@@ -582,6 +604,46 @@ def archive_night(conn, night, site=None):
             "VALUES (?,?,?,?,?,?)",
             (s.id, night, utcnow(), start, end, json.dumps(payload)))
     return cur.rowcount > 0
+
+
+def save_skyframes(conn, night, blob, site=None):
+    """Replace this site's precomputed replay frames. See skyframes.py.
+
+    Replace rather than accumulate: the payload describes tonight, and a
+    night that has ended is replayed from night_archive by the server-rendered
+    path instead. Keeping old ones would grow the database for nothing.
+    """
+    with conn:
+        conn.execute(
+            "INSERT INTO skyframe_cache "
+            "(site_id, night, built_utc, start_ts, end_ts, step_s, payload) "
+            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(site_id) DO UPDATE SET "
+            "night=excluded.night, built_utc=excluded.built_utc, "
+            "start_ts=excluded.start_ts, end_ts=excluded.end_ts, "
+            "step_s=excluded.step_s, payload=excluded.payload",
+            (_site(site).id, night, utcnow(),
+             blob["grid"][0] if blob["grid"] else None,
+             blob["grid"][-1] if blob["grid"] else None,
+             blob["step"], gzip.compress(
+                 json.dumps(blob, separators=(",", ":")).encode(), 6)))
+
+
+def load_skyframes(conn, site=None):
+    """This site's precomputed replay frames, or None.
+
+    None is a normal answer, not an error: a fresh database, a night the
+    updater has not reached yet, or a cycle whose precompute failed. Every
+    caller has to be able to fall back to rendering frames on demand.
+    """
+    row = conn.execute(
+        "SELECT night, built_utc, step_s, payload FROM skyframe_cache "
+        "WHERE site_id=?", (_site(site).id,)).fetchone()
+    if not row:
+        return None
+    blob = json.loads(gzip.decompress(row["payload"]))
+    blob["night"] = row["night"]
+    blob["built_utc"] = row["built_utc"]
+    return blob
 
 
 def load_archived_night(conn, night, site=None):
