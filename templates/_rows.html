@@ -1,5 +1,9 @@
 {% for r in rows %}
+{# data-row keys the row so the 20-second poll can patch the cells that
+   actually changed instead of rebuilding all ~2700 of them. data-desig is
+   not usable for that: it is only present when the target is observable. #}
 <tr class="{{ '' if r.observable else 'gone' }}{{ ' done' if r.observed else '' }}{{ ' row-hidden' if r.hidden else '' }}"
+    data-row="{{ r.desig }}"
     {% if r.observable %}data-desig="{{ r.desig }}"{% endif %}>
   <td class="l idx">{{ loop.index }}</td>
 
@@ -110,7 +114,7 @@
 </tr>
 
 {% if r.plan_block %}
-<tr class="planrow" id="plan-{{ r.desig }}" hidden>
+<tr class="planrow" id="plan-{{ r.desig }}" data-row="plan-{{ r.desig }}" hidden>
   <td></td>
   <td colspan="17">
     <div class="planwrap">
@@ -121,5 +125,5 @@
 </tr>
 {% endif %}
 {% else %}
-<tr><td colspan="18" class="empty">No targets yet &mdash; has the updater run?</td></tr>
+<tr data-row="__empty__"><td colspan="18" class="empty">No targets yet &mdash; has the updater run?</td></tr>
 {% endfor %}
