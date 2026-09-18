@@ -197,12 +197,43 @@ class ObjectEphemeris:
     def nearest_to(self, ts):
         return min(self.rows, key=lambda r: abs(r.ts - ts)) if self.rows else None
 
+    def _typical_step(self, rows):
+        """Median spacing between samples, in seconds.
+
+        The same quantity skymap._spacing() computes for a plotted track, and
+        for the same purpose: it is what tells a gap between two consecutive
+        samples apart from the ordinary interval between them.
+        """
+        if len(rows) < 2:
+            return 3600.0
+        gaps = sorted(b.ts - a.ts for a, b in zip(rows, rows[1:]))
+        return gaps[len(gaps) // 2] or 3600.0
+
     def interpolate_at(self, ts):
         """Linear alt/az interpolation between the bracketing rows.
 
         The legacy planner evaluates at now + 600 s so the coordinates account
         for slew time; we keep that, but rebuild the output line from the data
         instead of splicing the original string, which corrupts it.
+
+        Returns None when `ts` falls in a hole. An ephemeris is not one
+        continuous run: MPC suppresses every row below the server floor, so a
+        target that sets and rises again leaves hours of nothing in the middle
+        while the samples either side stay CONSECUTIVE in the list. Blending
+        across that produces a smooth, plausible and entirely invented
+        position -- and because the blended row is stamped with the requested
+        `ts`, live_row_is_now() then reads it as current and the plan file
+        publishes it as the one line you are meant to slew to.
+
+        Measured on the live board at 15:05 UT: or09023 published a pointing
+        line at altitude +35 with the sun at -33, interpolated across the
+        daylight hole between 02:30 and 22:00. The MPC's own row for that
+        instant says -31, and astropy agrees to half a degree. It was 17:00
+        in the afternoon.
+
+        skymap._covers() already refuses this for markers, which is why the
+        map went dark for those targets while the plan file did not. This is
+        the same rule for the line the telescope is actually driven from.
         """
         if not self.rows:
             return None
@@ -211,8 +242,17 @@ class ObjectEphemeris:
             return rows[0]
         if ts >= rows[-1].ts:
             return rows[-1]
+        step = self._typical_step(rows)
         for a, b in zip(rows, rows[1:]):
             if a.ts <= ts <= b.ts:
+                # Landing on a sample is that sample, however wide the hole
+                # beyond it -- nothing is blended in.
+                if ts == a.ts:
+                    return a
+                if ts == b.ts:
+                    return b
+                if b.ts - a.ts > step:
+                    return None
                 span = b.ts - a.ts
                 f = 0.0 if span == 0 else (ts - a.ts) / span
                 out = Row(a.line)
