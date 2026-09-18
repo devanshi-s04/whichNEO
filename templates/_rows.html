@@ -121,5 +121,9 @@
 </tr>
 {% endif %}
 {% else %}
+{% if range_filters %}
+<tr><td colspan="18" class="empty">There are no NEO candidates known within the selected filters.</td></tr>
+{% else %}
 <tr><td colspan="18" class="empty">No targets yet &mdash; has the updater run?</td></tr>
+{% endif %}
 {% endfor %}
