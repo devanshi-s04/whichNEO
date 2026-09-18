@@ -64,14 +64,20 @@
       <strong>east is to the right</strong>, so the disc reads like a map of
       the ground rather than a star chart.</p>
     <table class="mini legend">
+      {# The three counts and the moon row are server-rendered for THIS
+         instant and never recomputed, so while the slider is scrubbed they
+         describe a different moment than the map: 3 / 5 / 1 here against a
+         21:00 frame showing 4 / 9 / 0. Marked as live so the replay handler
+         can dim them rather than leave them contradicting the picture beside
+         them -- see updateSkySide(). #}
       <tr><td><span class="sw up"></span></td><td>Up now</td>
-          <td class="n">{{ sky.up }}</td></tr>
+          <td class="n live-now">{{ sky.up }}</td></tr>
       <tr><td><span class="sw tick"></span></td><td>Still to rise</td>
-          <td class="n">{{ sky.pending }}</td></tr>
+          <td class="n live-now">{{ sky.pending }}</td></tr>
       <tr><td><span class="sw done"></span></td><td>Observed</td>
           <td class="n">&mdash;</td></tr>
       <tr><td><span class="sw poll"></span></td><td>In poor sky now</td>
-          <td class="n">{{ sky.flagged }}</td></tr>
+          <td class="n live-now">{{ sky.flagged }}</td></tr>
       {% for start, end, minalt, reason in site.keepout_wedges %}
       <tr><td><span class="sw keepout"></span></td>
           <td>Keep out &mdash; below {{ minalt|int }}&deg;,
@@ -79,12 +85,17 @@
           <td class="n">&mdash;</td></tr>
       {% endfor %}
       {% if sky.moon and sky.moon.alt > 0 %}
-      <tr><td><span class="sw moon"></span></td><td>Moon,
+      <tr class="live-now"><td><span class="sw moon"></span></td><td>Moon,
           {{ '%.0f'|format(sky.moon.illum * 100) }}% lit</td>
-          <td class="n">{{ '%.0f'|format(sky.moon.alt) }}&deg;</td></tr>
+          <td class="n live-now">{{ '%.0f'|format(sky.moon.alt) }}&deg;</td></tr>
       {% endif %}
     </table>
     <p class="cap">
+      {# Whether the moon is up is decided once, at render time. Scrubbed back
+         to 21:00 with the moon now set, this sentence claimed no exclusion
+         zone applied over a frame that drew the moon and both separation
+         curves -- so the replay handler hides it and says what is live. #}
+      <span id="skyMoonNote">
       {% if sky.moon and sky.moon.alt > 0 %}
         The dashed line is {{ site.moon_sep_min|int }}&deg; from the moon.
         It is not a circle: a fixed angular separation projects to a
@@ -92,6 +103,8 @@
       {% else %}
         The moon is below the horizon, so no exclusion zone applies.
       {% endif %}
+      </span>
+      <span id="skyReplayNote" class="replay-note" hidden></span>
       <br><br>
       Flat red is <em>discouraged</em>, never excluded &mdash; the north is
       avoided for Trieste&rsquo;s light dome, not because anything blocks it,
@@ -117,13 +130,17 @@
         {% endfor %}
       </select>
       {% endif %}
+      {# The right-hand stop is NOW, not the night's end: the rest of the span
+         has not happened yet, and a ?ts= in it renders a cheerful empty
+         daylight sky. For an archived night now_ts IS end_ts, so the whole
+         recorded night stays scrubbable. #}
       <input type="range" id="replaySlider" min="{{ replay_default.start_ts|int }}"
-             max="{{ replay_default.end_ts|int }}" step="60"
-             value="{{ replay_default.end_ts|int }}">
+             max="{{ replay_default.now_ts|int }}" step="60"
+             value="{{ replay_default.now_ts|int }}">
       <div class="replay-row">
         <span class="dim" id="replayStart">{{ replay_default.start_label }}</span>
         {% if strip %}<button type="button" class="ghost" id="replayLive">back to live</button>{% endif %}
-        <span class="dim" id="replayEnd">{{ replay_default.end_label }}</span>
+        <span class="dim" id="replayEnd">{{ replay_default.now_label }}</span>
       </div>
     </div>
     {% endif %}
@@ -351,6 +368,15 @@
 const POLL = {{ poll_interval }} * 1000;
 const TZ = {{ tzname|tojson }};
 const params = new URLSearchParams(window.location.search);
+// `ts` and `night` belong to the replay controls, which set them per request.
+// Carrying them out of the page URL into the 20-second poll is how a shared
+// or bookmarked /?ts=... silently froze the "live" map -- the readout still
+// said "live", and "back to live" could not clear it because loadSky() only
+// ever ADDS to this. /?night=bogus was worse: a 404 whose body is the
+// sentence "No archive for night bogus", written straight into the plot.
+params.delete('ts');
+params.delete('night');
+const SITE_TZ = {{ site.display_tz|tojson }};
 const HAS_LIVE = {{ 'true' if strip else 'false' }};
 const ARCHIVE_BOUNDS = {{ archived_nights|tojson }};
 // replay_default already *is* {night:"", start_ts, end_ts, start_label,
@@ -678,38 +704,132 @@ function boundsFor(night) {
   return ARCHIVE_BOUNDS.find(n => n.night === night) || null;
 }
 
+// A frame costs about 60 ms to draw. A 250-pixel slider has 480 steps on it,
+// so dragging fired roughly one request per pixel, and they come back in
+// whatever order the server finishes them. Measured: a 250-step drag issued
+// 250 requests with 88 out-of-order pairs and left the WRONG frame painted;
+// with the ordering guard off, 24 requests 20 ms apart painted 21:00, 21:41,
+// 21:20, 22:23 ... and finished on 04:18 while the handle sat at 04:59.
+//
+// So two things, not one. The handle waits this long after the last move
+// before asking at all -- which turns that 250-request drag into 1 -- and
+// every reply still has to prove it is the newest before it may touch the
+// DOM, because a pause mid-drag can still put two frames in flight.
+const SKY_DEBOUNCE_MS = 120;
+let skySeq = 0;
+let skyTimer = null;
+
+// The clock reading for an instant, in the observatory's own timezone, so
+// the readout can follow the thumb without waiting for a round trip.
+const skyClock = (() => {
+  try {
+    return new Intl.DateTimeFormat('en-GB', {
+      hour: '2-digit', minute: '2-digit', hour12: false, timeZone: SITE_TZ});
+  } catch (e) { return null; }          // no tzdata in this browser
+})();
+function skyClockLabel(ts) {
+  if (ts === null || !skyClock) return '';
+  return skyClock.format(new Date(ts * 1000)) + ' ' + TZ;
+}
+
+// The counts and the moon row beside the map are rendered once, for now, and
+// are not recomputed per frame -- returning them per frame would mean
+// archived_sky_view() growing past the {svg, used} it returns today. So while
+// the map is scrubbed they are dimmed and the moon sentence is replaced by
+// one that says which of the two the reader is looking at.
+function updateSkySide(ts) {
+  const side = document.querySelector('.skyside');
+  if (!side) return;
+  const live = (ts === null && !replayNight);
+  side.classList.toggle('scrubbed', !live);
+  const note = document.getElementById('skyReplayNote');
+  if (!note) return;
+  const at = skyClockLabel(ts);
+  note.hidden = live;
+  note.textContent = live ? ''
+    : ('Counts and moon are live; the map is at ' + (at || 'an earlier instant') + '.');
+}
+
 async function loadSky(ts) {
+  const seq = ++skySeq;
   const qs = new URLSearchParams(params);
   if (replayNight) qs.set('night', replayNight);
   if (ts !== null) qs.set('ts', ts);
   const resp = await fetch('/skymap.svg?' + qs.toString());
+  // An error body is a sentence, not an SVG. /skymap.svg?night=bogus answers
+  // 404 with "No archive for night bogus", and writing that into the plot
+  // replaces the sky map with that line of text.
+  if (!resp.ok) return;
   const svg = await resp.text();
+  if (seq !== skySeq) return;      // a newer frame has already been asked for
   const plot = document.getElementById('skyplot');
   if (plot) plot.innerHTML = svg;
   if (replayTimeEl) {
     replayTimeEl.textContent = (ts === null && !replayNight)
       ? 'live' : (resp.headers.get('X-Sky-Time') || '');
   }
+  updateSkySide(ts);
+}
+
+// Coalesces a drag into one request. Bumping the sequence here as well means
+// a frame already in flight when the handle moves again can no longer win,
+// even though its replacement has not been sent yet.
+function loadSkySoon(ts) {
+  skySeq++;
+  clearTimeout(skyTimer);
+  skyTimer = setTimeout(() => loadSky(ts), SKY_DEBOUNCE_MS);
 }
 
 if (replaySlider) {
   replaySlider.addEventListener('input', () => {
-    replayTs = Number(replaySlider.value);
-    loadSky(replayTs);
+    const v = Number(replaySlider.value);
+    // The right-hand stop IS now for the live night, so landing on it means
+    // live again. Assigning a number unconditionally -- which this did --
+    // left skyIsLive() false at the far right, so dragging back to the end
+    // stopped the 20-second poll for good and only the button resumed it.
+    //
+    // Within one step, not exactly on max: a range input's values are
+    // min + n*step, so when the span is not a whole number of steps the max
+    // itself is never reachable and an equality test would never fire. The
+    // slack costs nothing -- the map is computed to the minute anyway.
+    const step = Number(replaySlider.step) || 60;
+    replayTs = (!replayNight && v >= Number(replaySlider.max) - step)
+      ? null : v;
+    // Optimistic, so the readout tracks the thumb while the map lags behind.
+    if (replayTimeEl) {
+      replayTimeEl.textContent = (replayTs === null) ? 'live' : skyClockLabel(v);
+    }
+    updateSkySide(replayTs);
+    loadSkySoon(replayTs);
   });
 }
+// The right-hand stop for a set of bounds. Tonight's carries now_ts, clamped
+// to the span by index(); an archived night is entirely in the past, so its
+// stop is the last instant it recorded.
+function rightStop(b) {
+  return (b.now_ts === undefined || b.now_ts === null) ? b.end_ts : b.now_ts;
+}
+function rightLabel(b) {
+  return b.now_label || b.end_label;
+}
+function applyBounds(b) {
+  if (!b) return;
+  replaySlider.min = Math.floor(b.start_ts);
+  replaySlider.max = Math.floor(rightStop(b));
+  replaySlider.value = replaySlider.max;
+  if (replayStartEl) replayStartEl.textContent = b.start_label;
+  if (replayEndEl) replayEndEl.textContent = rightLabel(b);
+}
+
 if (replayNightSel) {
   replayNightSel.addEventListener('change', () => {
     replayNight = replayNightSel.value;
-    const b = boundsFor(replayNight);
-    if (b) {
-      replaySlider.min = Math.floor(b.start_ts);
-      replaySlider.max = Math.floor(b.end_ts);
-      replaySlider.value = replaySlider.max;
-      if (replayStartEl) replayStartEl.textContent = b.start_label;
-      if (replayEndEl) replayEndEl.textContent = b.end_label;
-    }
-    replayTs = Number(replaySlider.value);
+    applyBounds(boundsFor(replayNight));
+    // Back on tonight the handle is at the right-hand stop, which is now, so
+    // that is live rather than a replay of this instant.
+    replayTs = replayNight ? Number(replaySlider.value) : null;
+    if (replayTimeEl && replayTs === null) replayTimeEl.textContent = 'live';
+    updateSkySide(replayTs);
     loadSky(replayTs);
   });
 }
@@ -718,20 +838,19 @@ if (replayLiveBtn) {
     replayTs = null;
     replayNight = '';
     if (replayNightSel) replayNightSel.value = '';
-    if (LIVE_BOUNDS) {
-      replaySlider.min = Math.floor(LIVE_BOUNDS.start_ts);
-      replaySlider.max = Math.floor(LIVE_BOUNDS.end_ts);
-      replaySlider.value = replaySlider.max;
-      if (replayStartEl) replayStartEl.textContent = LIVE_BOUNDS.start_label;
-      if (replayEndEl) replayEndEl.textContent = LIVE_BOUNDS.end_label;
-    }
+    applyBounds(LIVE_BOUNDS);
+    updateSkySide(null);
     loadSky(null);
   });
 }
 
 // If tonight has nothing up yet, land on the most recent archived night
 // instead of an empty live map.
-if (!HAS_LIVE && replayNight) loadSky(Number(replaySlider ? replaySlider.value : 0));
+if (!HAS_LIVE && replayNight) {
+  const ts0 = Number(replaySlider ? replaySlider.value : 0);
+  updateSkySide(ts0);
+  loadSky(ts0);
+}
 
 function skyIsLive() { return replayTs === null && !replayNight; }
 
@@ -739,7 +858,10 @@ async function refresh() {
   try {
     const [rows, sky, st] = await Promise.all([
       fetch('/rows?' + params.toString()).then(r => r.text()),
-      skyIsLive() ? fetch('/skymap.svg?' + params.toString()).then(r => r.text()) : null,
+      // Same rule as loadSky(): an error body is prose, and prose in the plot
+      // is the sky map gone. null here means "leave the last good render".
+      skyIsLive() ? fetch('/skymap.svg?' + params.toString())
+        .then(r => r.ok ? r.text() : null) : null,
       fetch('/status').then(r => r.json())
     ]);
     document.getElementById('rows').innerHTML = rows;

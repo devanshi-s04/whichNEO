@@ -432,13 +432,14 @@ def sky_view(conn, rows, now=None):
     tracks = {d: ephemeris.track(lines)
               for d, lines in db.load_tracks(
                   conn, [r["desig"] for r in shown], site).items()}
-    marks = skymap.target_marks(shown, tracks, now)
+    marks = skymap.target_marks(shown, tracks, now, site)
     try:
         moon = observability.moon_state(now, site)
     except Exception:
         moon = None                       # never take the board down for this
     return {
-        "svg": skymap.render_svg(marks, moon, localt=localt, site=site),
+        "svg": skymap.render_svg(marks, moon, localt=localt, site=site,
+                                 localdt=localdt),
         "moon": moon,
         "up": sum(1 for m in marks if m["up"]),
         "pending": sum(1 for m in marks if not m["up"]),
@@ -476,12 +477,13 @@ def archived_sky_view(conn, archived, now=None):
                      "vmag": t["vmag"], "score": t["score"]})
     tracks = {t["desig"]: ephemeris.track(t["lines"]) for t in archived["targets"]}
     site = current_site()
-    marks = skymap.target_marks(rows, tracks, now)
+    marks = skymap.target_marks(rows, tracks, now, site)
     try:
         moon = observability.moon_state(now, site)
     except Exception:
         moon = None                       # never take the board down for this
-    return {"svg": skymap.render_svg(marks, moon, localt=localt, site=site),
+    return {"svg": skymap.render_svg(marks, moon, localt=localt, site=site,
+                                     localdt=localdt),
             "used": now}
 
 
@@ -579,13 +581,27 @@ def index():
         # there is one; otherwise the most recently archived night, so the
         # slider is still useful before tonight's targets are up, or before
         # the first update cycle of a fresh night has run at all.
+        #
+        # `now_ts` is where the handle belongs and how far right it may go.
+        # The span is the whole observable night, which for an evening demo
+        # is almost entirely still ahead: opening at end_ts put the handle at
+        # 05:00 with 97 percent of the track in the future, and scrubbing
+        # "back" from there drew hours of empty daylight sky before reaching
+        # anything. Clamped into the span because the night's window can
+        # close before someone reloads the page, and because a night whose
+        # first target is not up yet starts in the future.
         if strip:
+            now_ts = min(max(time.time(), strip["start_ts"]), strip["end_ts"])
             replay_default = {"night": "", "start_ts": strip["start_ts"],
-                              "end_ts": strip["end_ts"],
+                              "end_ts": strip["end_ts"], "now_ts": now_ts,
+                              "now_label": localt(now_ts),
                               "start_label": strip["start"], "end_label": strip["end"]}
         elif archived_nights:
+            # A finished night is replayable to its last recorded instant --
+            # all of it is the past, so there is no future stop to clamp to.
             latest = archived_nights[0]
-            replay_default = dict(latest)
+            replay_default = dict(latest, now_ts=latest["end_ts"],
+                                  now_label=latest["end_label"])
         else:
             replay_default = None
 

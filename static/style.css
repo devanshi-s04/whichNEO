@@ -141,6 +141,19 @@ body {
 }
 .replay .ghost { font-size: 10.5px; padding: 2px 8px; }
 
+/* Scrubbed: the map is at a past instant, the panel beside it is not. The
+   counts and the moon row are rendered once per page load and cannot follow
+   the handle, so they are dimmed rather than left reading as facts about the
+   frame on screen. Measured on one night: the panel said 3 up / 5 to rise /
+   1 in poor sky with the moon below the horizon, while the frame scrubbed to
+   21:00 showed 4 / 9 / 0 with the moon up and both separation curves drawn
+   -- all four numbers wrong, none of them visibly so. Dimmed, not hidden:
+   they are still true about now, and a legend that vanished mid-drag would
+   be worse than one that is plainly not the subject. */
+.skyside.scrubbed .legend .live-now { opacity: .32; }
+.skyside.scrubbed #skyMoonNote { display: none; }
+.replay-note { color: var(--cyan); }
+
 .legend { width: 100%; margin: 0 0 13px; }
 .legend td { padding: 3px 0; vertical-align: middle; }
 .legend td.n {
