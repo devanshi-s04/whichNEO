@@ -105,7 +105,52 @@ def _spacing(track):
     return gaps[len(gaps) // 2] or 3600.0
 
 
-def target_marks(rows, tracks, now):
+def _covers(track, now, gap):
+    """Does the ephemeris genuinely cover `now`?
+
+    "Genuinely" is the whole point. A track is not one continuous run: MPC
+    suppresses every row below the server floor, so a target that sets and
+    rises again leaves a hole of hours in the middle, and the samples either
+    side of that hole are still CONSECUTIVE in the list. Asking only whether
+    the nearest sample is within `gap` of now -- which is what this replaced
+    -- says yes for the whole half-hour after a run ends, and _interpolate()
+    then blends that run's last sample with the next run's first one, which
+    is frequently the following night. The marker barely moves for half an
+    hour of scrub time and then teleports. Measured on the live board:
+    P12q6iW azimuth 219 to 134 across 02:31, gb00870 242 to 127 across 04:01.
+
+    So inside the track the bracketing pair's OWN gap has to be no wider than
+    the typical spacing -- that is what distinguishes standing inside a
+    covered run from standing in a hole between two of them.
+
+    Off either END of the track the old tolerance is kept, because there is
+    nothing to blend with: _interpolate() clamps to the end sample, so the
+    worst it can say is a real position up to `gap` stale, which is the same
+    bounded approximation every sample in the track already is. Tightening
+    this end case as well would drop a track that holds a single sample --
+    which is what an archived night with one ephemeris line is.
+    """
+    if now < track[0][0]:
+        return track[0][0] - now <= gap
+    if now > track[-1][0]:
+        return now - track[-1][0] <= gap
+    for a, b in zip(track, track[1:]):
+        if a[0] <= now <= b[0]:
+            # Landing exactly on a sample is coverage by definition, however
+            # wide the hole on the far side of it: _interpolate() returns that
+            # sample's own position with nothing blended into it. Without this
+            # the last instant of a run whose next gap is a shade over the
+            # median -- which is most runs' final pair -- loses its marker.
+            if now == a[0] or now == b[0]:
+                return True
+            return b[0] - a[0] <= gap
+    # Both ends are handled above, so reaching here means `now` sits between
+    # the first sample and the last with no pair around it -- which only a
+    # one-sample track can do, by landing exactly on it.
+    return True
+
+
+def target_marks(rows, tracks, now, site=None):
     """Queue rows plus cached tracks to map markers.
 
     A target is drawn on the disc only when the ephemeris actually covers this
@@ -114,25 +159,31 @@ def target_marks(rows, tracks, now):
     the azimuth where it next appears, rather than a dot at a position it does
     not occupy. Silently plotting the nearest row instead is how a map ends up
     showing the whole night's targets at three in the afternoon.
+
+    `site` decides which dome's limits the markers are filtered by. It used to
+    be left off, so the wedges render_svg() draws came from the site being
+    viewed while the markers were filtered against config.DEFAULT_SITE -- with
+    one observatory configured those are the same object, and with two they
+    are not.
     """
+    s = _site(site)
     marks = []
     for i, r in enumerate(rows, start=1):
         track = tracks.get(r["desig"])
         if not track:
             continue
         gap = _spacing(track)
-        nearest = min(track, key=lambda p: abs(p[0] - now))
         common = {
             "desig": r["desig"], "index": i,
             "observed": bool(r.get("observed")),
             "vmag": r.get("vmag"), "score": r.get("score"),
         }
-        if abs(nearest[0] - now) <= gap:
+        if _covers(track, now, gap):
             az, alt = _interpolate(track, now)
             # Inside a keep-out wedge the target is simply not drawn. It is
             # sky the mount must not be sent to, so a marker there is an
             # invitation to do exactly that. It reappears if it comes out.
-            if observability.keepout_violation(az, alt):
+            if observability.keepout_violation(az, alt, s):
                 continue
             # Judged at the position being drawn, not from the stored peak
             # flag. The queue badge answers "is tonight's best moment in poor
@@ -140,18 +191,22 @@ def target_marks(rows, tracks, now):
             # and for most targets those differ -- the peak deliberately
             # prefers clean sky, so a peak-derived ring would almost never
             # light up even while a target sat in the light dome.
-            reason, _hard = observability.mask_violation(az, alt)
+            reason, _hard = observability.mask_violation(az, alt, s)
             marks.append(dict(common, up=True, az=az, alt=alt,
                               mask=bool(reason)))
             continue
         ahead = [p for p in track
                  if p[0] > now
-                 and not observability.keepout_violation(p[1], p[2])]
+                 and not observability.keepout_violation(p[1], p[2], s)]
         if ahead:
             reason, _hard = observability.mask_violation(ahead[0][1],
-                                                         ahead[0][2])
+                                                         ahead[0][2], s)
+            # How far ahead the rise is, so the label can say which night it
+            # falls on. Past the end of a covered run the next sample is
+            # frequently tomorrow's, and a bare "20:14" then reads as tonight.
             marks.append(dict(common, up=False, az=ahead[0][1],
                               alt=ahead[0][2], rise_ts=ahead[0][0],
+                              rise_ahead_s=ahead[0][0] - now,
                               mask=bool(reason)))
     return marks
 
@@ -230,14 +285,37 @@ def _moon_glyph(mx, my, r, illum):
             f'{mx:.1f} {my - r:.1f} Z" fill="#e8ecf5" fill-opacity=".92"/>')
 
 
-def render_svg(marks, moon=None, size=None, localt=None, site=None):
-    """The whole map. `localt` formats a unix timestamp for rise labels."""
+def _rise_label(m, fmt, fmtdt):
+    """A rise time, carrying its date whenever that date is not now's.
+
+    Past a hole in an ephemeris the next sample is frequently the FOLLOWING
+    night's, and a bare "03:00" on that tick is indistinguishable from a rise
+    a few hours away -- an observer reads tomorrow's rise as tonight's and
+    waits for an object that is not coming back. The date settles it.
+
+    Compared through the caller's own formatter rather than against a fixed
+    number of hours, because "a different day" is a fact about local midnight
+    at the observatory, which only the formatter knows.
+    """
+    when = fmt(m["rise_ts"])
+    ahead = m.get("rise_ahead_s")
+    if ahead is None:
+        return when
+    here, there = fmtdt(m["rise_ts"] - ahead), fmtdt(m["rise_ts"])
+    return there if here[:10] != there[:10] else when
+
+
+def render_svg(marks, moon=None, size=None, localt=None, site=None,
+               localdt=None):
+    """The whole map. `localt` formats a unix timestamp for rise labels, and
+    `localdt` the same instant with its date, for a rise on another night."""
     s = _site(site)
     size = size or config.SKYMAP_SIZE
     pad = 30
     radius = (size - 2 * pad) / 2.0
     cx = cy = size / 2.0
     fmt = localt or (lambda ts: "")
+    fmtdt = localdt or (lambda ts: "")
 
     p = [f'<svg viewBox="0 0 {size} {size}" width="100%" '
          f'style="max-width:{size}px;display:block;margin:0 auto" role="img" '
@@ -353,7 +431,7 @@ def render_svg(marks, moon=None, size=None, localt=None, site=None):
                      f'pointer-events="all"/>')
             p.append(f'<title>{m["desig"]} &#8212; not yet up, first above '
                      f'{s.mpc_server_min_alt:.0f}&#176; at '
-                     f'{fmt(m["rise_ts"])} toward azimuth '
+                     f'{_rise_label(m, fmt, fmtdt)} toward azimuth '
                      f'{m["az"]:.0f}&#176;</title>')
             p.append("</a>")
 

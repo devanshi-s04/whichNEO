@@ -3091,6 +3091,320 @@ def test_archived_replay_endpoint():
         importlib.reload(appmod)
 
 
+def test_the_replay_handle_never_opens_in_the_future():
+    """The slider's right-hand stop is NOW, not the night's end.
+
+    min/max came from night_strip's start_ts/end_ts and the handle opened at
+    end_ts -- the last instant of the OBSERVABLE window, which for most of a
+    night is still hours away. Opened during an evening demo that put the
+    handle at the far right with 97 percent of the track in the future, and
+    scrubbing "back" from there drew empty daylight sky, with 0 targets and
+    no explanation, until it reached anything real.
+
+    An archived night is all past, so it keeps its whole recorded span.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+
+    prev_db = config.DB_PATH
+    prev_env = os.environ.pop("WHICHNEO_AUTH", None)
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        now = time.time()
+        # Two hours in, six still to run: the shape of a real evening.
+        start, end = now - 2 * 3600, now + 6 * 3600
+        conn.execute(
+            "INSERT INTO targets (desig, score, vmag, hmag, nobs, arc_days, "
+            "not_seen_days, observable, window_start_ts, window_end_ts, "
+            "max_alt_ts, max_alt, max_alt_az, window_minutes, exposure_min, "
+            "frames, frame_sec, cur_alt, cur_az, cur_motion, cur_moon_dist, "
+            "score_total, mask_flags) VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("P12aaaa", 90, 20.1, 22.0, 12, 0.5, 0.4, 1, start, end,
+             now, 55.0, 180.0, 480.0, 12.0, 4, 180, 40.0, 170.0, 3.0, 90.0,
+             90.0, "[]"))
+        conn.commit()
+        conn.close()
+
+        html = appmod.app.test_client().get("/").data.decode()
+        m = re.search(r'<input type="range" id="replaySlider"[^>]*>', html)
+        check("the board renders a replay slider", m is not None)
+        if m is None:
+            return
+        tag = m.group(0)
+        got = {k: float(v) for k, v in
+               re.findall(r'\b(min|max|value)="(-?\d+)"', tag)}
+        check("the slider still opens at the start of the night",
+              abs(got.get("min", 0) - start) < 120, got)
+        # The whole point: both the stop and the handle are now, not end.
+        check("the right-hand stop is now, not the end of the night",
+              got.get("max", 0) <= now + 120 < end, got)
+        check("and the handle opens on it, not in the future",
+              got.get("value", 0) <= now + 120, got)
+        check("the span is still the night that has happened, not a point",
+              got.get("max", 0) - got.get("min", 0) > 3600, got)
+
+        # An archived night has no future half to clamp away.
+        eph_ts = ephemeris.Row(SAMPLE_EPH).ts
+        conn = db.connect(config.DB_PATH)
+        conn.execute("DELETE FROM targets")
+        conn.execute(
+            "INSERT INTO targets (desig, score, vmag, observable, "
+            "window_start_ts, window_end_ts) VALUES (?,?,?,?,?,?)",
+            ("P12bbbb", 90, 20.1, 1, eph_ts - 3600, eph_ts + 3600))
+        conn.execute(
+            "INSERT INTO ephemeris_cache (desig, signature, fetched_utc, "
+            "payload) VALUES (?,?,?,?)",
+            ("P12bbbb", "sig", db.utcnow(), json.dumps({"lines": [SAMPLE_EPH]})))
+        conn.commit()
+        db.archive_night(conn, "2026-09-14")
+        conn.execute("DELETE FROM targets")          # the night has rolled over
+        conn.commit()
+        conn.close()
+
+        html = appmod.app.test_client().get("/").data.decode()
+        m = re.search(r'<input type="range" id="replaySlider"[^>]*>', html)
+        check("a board with no live night still offers the archive", m is not None)
+        if m is not None:
+            got = {k: float(v) for k, v in
+                   re.findall(r'\b(min|max|value)="(-?\d+)"', m.group(0))}
+            check("an archived night keeps its whole recorded span",
+                  abs(got.get("max", 0) - (eph_ts + 3600)) < 120, got)
+    finally:
+        config.DB_PATH = prev_db
+        if prev_env is not None:
+            os.environ["WHICHNEO_AUTH"] = prev_env
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+
+def test_a_bad_replay_url_cannot_replace_the_map_with_prose():
+    """A 404's body is a sentence. It must never reach the plot.
+
+    /skymap.svg?night=bogus answers 404 with "No archive for night bogus".
+    Neither the replay fetch nor the 20-second poll checked resp.ok, so that
+    sentence was written into #skyplot.innerHTML and the all-sky map became
+    one line of text -- on the live board, from nothing more than a mistyped
+    or stale link someone had shared.
+
+    Two things had to be true, and both are checked here: the query keys the
+    replay controls own are stripped out of the page URL so the poll can
+    never carry them at all, and the fetch that CAN still receive an error
+    refuses to paint it.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+
+    prev_db = config.DB_PATH
+    prev_env = os.environ.pop("WHICHNEO_AUTH", None)
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(auth)
+        importlib.reload(appmod)
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+
+        r = appmod.app.test_client().get("/skymap.svg?night=bogus")
+        body = r.data.decode()
+        check("an unknown night is a 404", r.status_code == 404, r.status_code)
+        check("and its body is prose, not a map",
+              "<svg" not in body and "No archive" in body, body[:80])
+
+        # The page's own guards. Read from the template rather than a browser:
+        # this has to hold on the observatory's host, which has no node.
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "templates", "index.html")).read()
+        check("the page drops ?ts= from the polled query string",
+              "params.delete('ts')" in src, None)
+        check("and ?night= with it",
+              "params.delete('night')" in src, None)
+
+        # resp.ok has to be tested BEFORE anything is written to the plot,
+        # not merely mentioned somewhere in the file.
+        fn = re.search(r"async function loadSky\(ts\) \{.*?\n\}", src, re.S)
+        check("loadSky is still there to guard", fn is not None)
+        if fn is not None:
+            b = fn.group(0)
+            guard, paint = b.find("resp.ok"), b.find("innerHTML")
+            check("loadSky refuses a non-ok response before painting",
+                  0 <= guard < paint, (guard, paint))
+            # And a stale reply cannot win a race it has already lost.
+            seq, paint = b.find("seq !== skySeq"), b.find("innerHTML")
+            check("and an out-of-date frame is dropped before painting",
+                  0 <= seq < paint, (seq, paint))
+
+        poll = re.search(r"async function refresh\(\) \{.*?\n\}", src, re.S)
+        check("the 20-second poll checks its response too",
+              poll is not None and "r.ok" in poll.group(0))
+    finally:
+        config.DB_PATH = prev_db
+        if prev_env is not None:
+            os.environ["WHICHNEO_AUTH"] = prev_env
+        importlib.reload(auth)
+        importlib.reload(appmod)
+
+
+def test_marks_never_cross_a_hole_in_the_ephemeris():
+    """A position is drawn only from samples that really bracket the instant.
+
+    MPC suppresses every row below the server floor, so a target that sets
+    and rises again leaves a hole of hours in its track -- and the samples
+    either side of that hole are still consecutive in the list. The coverage
+    test only asked whether the NEAREST sample was within the median gap, so
+    for the whole gap after a run ended _interpolate() blended that run's
+    last sample with the NEXT NIGHT's first one: the marker crawled for half
+    an hour of scrub time and then jumped. Measured on the live board,
+    P12q6iW went azimuth 219 to 134 at 02:31 and gb00870 242 to 127 at 04:01,
+    85 and 115 degrees, both inside the slider's own range.
+
+    Off the ENDS of a track there is nothing to blend with -- _interpolate()
+    clamps to the end sample -- so the old tolerance stays. An archived night
+    can hold a single ephemeris line, and that one sample still covers the
+    instant it was taken at.
+    """
+    import datetime
+
+    # Pinned to an evening in UT so the hole genuinely straddles midnight --
+    # which is the case the tick label has to survive.
+    now = datetime.datetime(2026, 9, 18, 20, 0,
+                            tzinfo=datetime.timezone.utc).timestamp()
+    # A covered run ending at now, and the next night's run 12 hours later.
+    tonight = [(now - 5400 + 1800 * k, 210.0 + 2.0 * k, 30.0) for k in range(4)]
+    tomorrow = [(now + 12 * 3600 + 1800 * k, 120.0 + 2.0 * k, 25.0)
+                for k in range(4)]
+    track = tonight + tomorrow
+    rows = [{"desig": "HOLE", "observed": False, "mask_flags": [],
+             "vmag": 19.0, "score": 80}]
+
+    check("the median gap is the run's spacing, not the hole's",
+          skymap._spacing(track) == 1800.0, skymap._spacing(track))
+
+    inside = skymap.target_marks(rows, {"HOLE": track}, now - 900)
+    check("inside the covered run it is still a dot",
+          len(inside) == 1 and inside[0]["up"], inside)
+
+    # 900 s past the last sample of tonight's run: the old test passed here,
+    # and the answer it gave was a blend with tomorrow.
+    after = skymap.target_marks(rows, {"HOLE": track}, now + 900)
+    check("just past the end of the run it is no longer a dot",
+          len(after) == 1 and not after[0]["up"], after)
+    check("and the tick points at the next run's first sample, honestly",
+          after and after[0]["rise_ts"] == tomorrow[0][0], after)
+
+    # The measurable version of the same thing: step through the hole and
+    # make sure no drawn position ever appears between the two runs. Starts
+    # after the run's own last sample, which is a real position, not a hole.
+    drawn = []
+    for k in range(300, 12 * 3600, 300):
+        got = skymap.target_marks(rows, {"HOLE": track}, now + k)
+        drawn += [m["az"] for m in got if m["up"]]
+    check("no position is invented anywhere inside the hole", drawn == [],
+          drawn[:6])
+
+    # A lone sample is not a hole, and must still be drawn near its instant.
+    lone = [(now, 200.0, 40.0)]
+    check("a single-sample track covers its own instant",
+          len(skymap.target_marks(rows, {"HOLE": lone}, now)) == 1)
+    check("and an hour either side of it, as it always did",
+          len(skymap.target_marks(rows, {"HOLE": lone}, now + 1800)) == 1)
+    check("but not a day later",
+          skymap.target_marks(rows, {"HOLE": lone}, now + 86400) == [])
+
+    # A rise on another night has to be readable as one. The tick's label
+    # named a bare clock time, so tomorrow's rise read as tonight's.
+    def _at(ts):
+        return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+
+    fmt = lambda ts: _at(ts).strftime("%H:%M")
+    fmtdt = lambda ts: _at(ts).strftime("%Y-%m-%d %H:%M")
+
+    svg = skymap.render_svg(after, None, size=400, localt=fmt, localdt=fmtdt)
+    check("a rise on the following night is labelled with its date",
+          fmtdt(tomorrow[0][0]) in svg, svg[-300:])
+    # Well before the run starts, so this is a tick and not a clamped dot,
+    # and still the same calendar day.
+    soon = skymap.target_marks(rows, {"HOLE": track}, tonight[0][0] - 7200)
+    check("a rise later today is a tick too", soon and not soon[0]["up"], soon)
+    svg = skymap.render_svg(soon, None, size=400, localt=fmt, localdt=fmtdt)
+    check("and stays a plain clock time, with no date to read past",
+          fmt(tonight[0][0]) in svg and fmtdt(tonight[0][0]) not in svg,
+          svg[-300:])
+
+
+def test_marks_are_filtered_by_the_site_they_are_given():
+    """target_marks must judge a position against the site being drawn.
+
+    render_svg() draws the wedges of the site it is given; target_marks()
+    took no site at all and filtered every marker against config.DEFAULT_SITE.
+    With one observatory configured those are the same object and nothing
+    shows. With two, a second site's map draws its own keep-out hatching
+    while its markers are being suppressed by L01's -- targets missing from
+    one dome's map because of a wall in a different country.
+    """
+    now = 1_760_000_000.0
+    rows = [{"desig": "S1", "observed": False, "mask_flags": [],
+             "vmag": 19.0, "score": 80}]
+
+    def at(az, alt, site):
+        track = [(now - 60, az, alt), (now + 60, az, alt)]
+        return skymap.target_marks(rows, {"S1": track}, now, site)
+
+    base = config.DEFAULT_SITE
+    # Azimuth 300 at 40 degrees is inside L01's keep-out wedge -- the same
+    # position test_keepout_wedge uses to prove nothing is plotted there.
+    check("the position chosen really is blocked for L01",
+          at(300.0, 40.0, None) == [], at(300.0, 40.0, None))
+
+    open_sky = dataclasses.replace(base, id=901, obscode="Z91",
+                                   keepout_wedges=())
+    got = at(300.0, 40.0, open_sky)
+    check("a site with no wedge there draws the target",
+          len(got) == 1 and got[0]["up"], got)
+
+    # And the other way: a wedge L01 does not have must be honoured.
+    walled = dataclasses.replace(base, id=902, obscode="Z92",
+                                 keepout_wedges=((160.0, 200.0, 70.0,
+                                                  "a hill to the south"),))
+    check("the same position is open for L01 in the south",
+          len(at(180.0, 40.0, None)) == 1, at(180.0, 40.0, None))
+    check("but a site walled to the south drops it",
+          at(180.0, 40.0, walled) == [], at(180.0, 40.0, walled))
+
+    # The advisory ring follows the given site's horizon mask, not L01's.
+    idx = int(observability.sector_index(180.0))
+    mask = list(base.horizon_mask)
+    a0, a1, _minalt, _hard, _why = mask[idx]
+    mask[idx] = (a0, a1, 60.0, "soft", "test fog")
+    foggy = dataclasses.replace(base, id=903, obscode="Z93",
+                                horizon_mask=tuple(mask))
+    plain = at(180.0, 40.0, None)
+    check("L01 does not ring a clear southern position",
+          plain and not plain[0]["mask"], plain)
+    hazed = at(180.0, 40.0, foggy)
+    check("a site whose south is poor rings the same position",
+          hazed and hazed[0]["mask"], hazed)
+
+    # The lookahead tick is filtered by the site too, not just the dot.
+    rising = [(now + 600, 300.0, 40.0), (now + 1200, 300.0, 41.0)]
+    l01 = skymap.target_marks(rows, {"S1": rising}, now - 7200)
+    check("a tick toward L01's wedge is suppressed for L01", l01 == [], l01)
+    other = skymap.target_marks(rows, {"S1": rising}, now - 7200, open_sky)
+    check("and offered to a site that can point there",
+          len(other) == 1 and not other[0]["up"], other)
+
+
 def test_skymap_orientation():
     """North up, east right, south down, west left.
 
@@ -4638,6 +4952,10 @@ def main():
                test_replay_ts_never_takes_the_map_down,
                test_night_archive_survives_per_account_state,
                test_archived_replay_endpoint,
+               test_the_replay_handle_never_opens_in_the_future,
+               test_a_bad_replay_url_cannot_replace_the_map_with_prose,
+               test_marks_never_cross_a_hole_in_the_ephemeris,
+               test_marks_are_filtered_by_the_site_they_are_given,
                test_skymap_orientation, test_skymap_mask_wedges,
                test_moon_exclusion_locus, test_skymap_marks,
                test_priority_bump_is_fully_gone,
