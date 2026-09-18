@@ -669,20 +669,53 @@ document.addEventListener('click', ev => {
 // Hovering a queue row lights up its marker on the sky map, and the reverse.
 // Both directions matter: one answers "where is number 4", the other "which
 // row is that dot".
+//
+// mouseover and mouseout fire on every element boundary the pointer crosses,
+// and the table is ~2700 cells, so sweeping across it fires these hundreds of
+// times a second. Doing two document-wide querySelectorAll per call -- which
+// is what this was -- meant four full scans of a ~5100-element document per
+// cell crossed, to find at most a handful of elements. The set is small (68
+// on a typical night) and only changes when the rows or the map are
+// re-rendered, so it is built once and looked up thereafter.
+let hoverIndex = new Map();
+let hoveredDesig = null;
+
+// The last markup applied, so an unchanged poll costs a string comparison
+// instead of a re-render. Declared up here because loadSky() writes lastSky
+// and is defined -- and on a night with nothing up yet, called -- further
+// down the file.
+let lastSky = null;
+let lastRows = null;
+
+function buildHoverIndex() {
+  hoverIndex = new Map();
+  document.querySelectorAll('[data-desig]').forEach(el => {
+    const d = el.dataset.desig;
+    let group = hoverIndex.get(d);
+    if (!group) hoverIndex.set(d, group = []);
+    group.push(el);
+  });
+  // The sky map is replaced whole on every poll, so its markers come back
+  // unlit. If the pointer is resting on a row, put the highlight back rather
+  // than waiting for the reader to jiggle the mouse.
+  if (hoveredDesig) linkHover(hoveredDesig, true);
+}
+
 function linkHover(desig, on) {
-  document.querySelectorAll('.mk[data-desig="' + CSS.escape(desig) + '"]')
-    .forEach(el => el.classList.toggle('lit', on));
-  document.querySelectorAll('tr[data-desig="' + CSS.escape(desig) + '"]')
-    .forEach(el => el.classList.toggle('lit', on));
+  const group = hoverIndex.get(desig);
+  if (group) group.forEach(el => el.classList.toggle('lit', on));
 }
 
 document.addEventListener('mouseover', ev => {
   const el = ev.target.closest('[data-desig]');
-  if (el) linkHover(el.dataset.desig, true);
+  if (el) { hoveredDesig = el.dataset.desig; linkHover(hoveredDesig, true); }
 });
 document.addEventListener('mouseout', ev => {
   const el = ev.target.closest('[data-desig]');
-  if (el) linkHover(el.dataset.desig, false);
+  if (el) {
+    linkHover(el.dataset.desig, false);
+    if (hoveredDesig === el.dataset.desig) hoveredDesig = null;
+  }
 });
 
 // Replaying the sky map, live or archived. Touching either control takes
@@ -764,6 +797,10 @@ async function loadSky(ts) {
   if (seq !== skySeq) return;      // a newer frame has already been asked for
   const plot = document.getElementById('skyplot');
   if (plot) plot.innerHTML = svg;
+  // New markers, so the row-to-marker lookup is stale. Keep lastSky in step
+  // as well, or the next poll re-paints a map that is already on screen.
+  lastSky = svg;
+  buildHoverIndex();
   if (replayTimeEl) {
     replayTimeEl.textContent = (ts === null && !replayNight)
       ? 'live' : (resp.headers.get('X-Sky-Time') || '');
@@ -854,6 +891,79 @@ if (!HAS_LIVE && replayNight) {
 
 function skyIsLive() { return replayTs === null && !replayNight; }
 
+// Replacing #rows wholesale meant parsing ~230 KB and destroying and
+// rebuilding ~2700 cells every poll, which is a visible hitch and throws away
+// any text selection sitting in the table. Almost none of those cells
+// actually differ between two polls: the altitude, the peak time and the
+// countdown move, and the other dozen or so per row do not. So the incoming
+// HTML is parsed off-document and only the cells whose markup really changed
+// are swapped in.
+//
+// Keyed by data-row rather than by position, because sorting and range
+// filters reorder and remove rows, and a positional diff would rewrite every
+// row below the first change.
+function patchRow(live, next) {
+  // Every attribute, not just class: data-desig is present only while the
+  // target is observable, so a row that sets behind the horizon between two
+  // polls has to lose it, or it keeps lighting a marker that is gone.
+  const wasLit = live.classList.contains('lit');
+  for (const a of Array.from(next.attributes)) {
+    if (live.getAttribute(a.name) !== a.value) live.setAttribute(a.name, a.value);
+  }
+  for (const a of Array.from(live.attributes)) {
+    if (!next.hasAttribute(a.name)) live.removeAttribute(a.name);
+  }
+  // 'lit' is put there by hovering, never by the server. Rows now survive a
+  // poll, so without this the highlight would vanish from under a pointer
+  // that has not moved.
+  if (wasLit) live.classList.add('lit');
+
+  const olds = Array.from(live.children);
+  const news = Array.from(next.children);
+  // A different cell count is not the same shape of row any more.
+  if (olds.length !== news.length) { live.replaceChildren(...news); return; }
+  for (let i = 0; i < news.length; i++) {
+    if (olds[i].outerHTML !== news[i].outerHTML) olds[i].replaceWith(news[i]);
+  }
+}
+
+function applyRows(html) {
+  const host = document.getElementById('rows');
+  const parsed = document.createElement('tbody');
+  parsed.innerHTML = html;
+  const incoming = Array.from(parsed.children);
+  // If anything arrives without a key -- an older server, or markup this does
+  // not know about -- fall back to what this replaced rather than drop rows.
+  if (incoming.some(tr => !tr.dataset.row)) { host.innerHTML = html; return; }
+
+  // Keyed rows are kept and reused; everything else in here goes. That
+  // "everything else" is the newlines the template leaves between rows: a
+  // table ignores them when it renders, but moving elements around them
+  // leaves them in an order nothing controls, and the result stops being
+  // comparable to what a plain innerHTML would have built.
+  const existing = new Map();
+  for (const node of Array.from(host.childNodes)) {
+    if (node.nodeType === 1 && node.dataset.row) {
+      existing.set(node.dataset.row, node);
+    } else {
+      node.remove();
+    }
+  }
+
+  let cursor = null;
+  for (const next of incoming) {
+    let live = existing.get(next.dataset.row);
+    if (live) { patchRow(live, next); existing.delete(next.dataset.row); }
+    else { live = next; }
+    // Where this row belongs: straight after the one just placed.
+    const slot = cursor ? cursor.nextSibling : host.firstChild;
+    if (slot !== live) host.insertBefore(live, slot);
+    cursor = live;
+  }
+  // Whatever is left was filtered out or has left the confirmation page.
+  for (const gone of existing.values()) gone.remove();
+}
+
 async function refresh() {
   try {
     const [rows, sky, st] = await Promise.all([
@@ -864,11 +974,19 @@ async function refresh() {
         .then(r => r.ok ? r.text() : null) : null,
       fetch('/status').then(r => r.json())
     ]);
-    document.getElementById('rows').innerHTML = rows;
-    if (sky !== null) {
+    let touched = false;
+    if (rows !== lastRows) {
+      applyRows(rows);
+      lastRows = rows;
+      touched = true;
+    }
+    if (sky !== null && sky !== lastSky) {
       const plot = document.getElementById('skyplot');
       if (plot) plot.innerHTML = sky;
+      lastSky = sky;
+      touched = true;
     }
+    if (touched) buildHoverIndex();
     applyOpenPlans();
     document.getElementById('last-update').innerHTML =
       st.last_update_local + '<small> ' + TZ + '</small>';
@@ -878,6 +996,7 @@ async function refresh() {
 }
 setInterval(refresh, POLL);
 applyOpenPlans();
+buildHoverIndex();
 </script>
 </body>
 </html>
