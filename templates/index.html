@@ -119,6 +119,12 @@
     <div class="replay">
       <div class="replay-row">
         <span class="replay-label">Replay</span>
+        {# Hidden until /skyframes.json says tonight is precomputed. Without
+           frames on the page every step is a round trip returning a whole
+           SVG, and a "play" button over that is a slideshow that lies about
+           being an animation -- so it is offered only where it can actually
+           run. See skyframes.py. #}
+        <button type="button" class="ghost" id="replayPlay" hidden>&#9654; play</button>
         <span class="replay-time" id="replayTime">{{ 'live' if strip else '' }}</span>
       </div>
       {% if archived_nights %}
@@ -698,6 +704,9 @@ const replayLiveBtn = document.getElementById('replayLive');
 const replayNightSel = document.getElementById('replayNight');
 const replayStartEl = document.getElementById('replayStart');
 const replayEndEl = document.getElementById('replayEnd');
+// The step the markup shipped with, captured before the precomputed grid
+// gets a chance to replace it, so applyBounds() can put it back.
+const SKY_BASE_STEP = replaySlider ? (Number(replaySlider.step) || 60) : 60;
 
 function boundsFor(night) {
   if (!night) return LIVE_BOUNDS;
@@ -763,7 +772,9 @@ async function loadSky(ts) {
   const svg = await resp.text();
   if (seq !== skySeq) return;      // a newer frame has already been asked for
   const plot = document.getElementById('skyplot');
-  if (plot) plot.innerHTML = svg;
+  // A whole fresh SVG replaces the moving layer along with everything else,
+  // so whichever precomputed frame was on screen no longer is.
+  if (plot) { plot.innerHTML = svg; skyPainted = -1; }
   if (replayTimeEl) {
     replayTimeEl.textContent = (ts === null && !replayNight)
       ? 'live' : (resp.headers.get('X-Sky-Time') || '');
@@ -780,8 +791,184 @@ function loadSkySoon(ts) {
   skyTimer = setTimeout(() => loadSky(ts), SKY_DEBOUNCE_MS);
 }
 
+// --- the night, precomputed ------------------------------------------------
+//
+// Everything above is the fallback. It cannot animate, and no amount of
+// tuning makes it: with one HTTP round trip per frame the map only moves
+// after you stop moving the handle, which is why the debounce above exists
+// and why scrubbing felt stepped rather than continuous.
+//
+// So the server precomputes the whole night -- one finished SVG fragment of
+// the map's MOVING layer per two-minute step, the same bytes /skymap.svg
+// would have put inside its <g class="skydyn"> for that instant -- and ships
+// them once. After that, scrubbing and playback make no request at all: a
+// frame is one assignment to one element, and the backdrop (disc, horizon
+// mask, keep-out wedges, rings, rose) is never reparsed because it never
+// changes.
+//
+// Nothing here decides what a marker MEANS. Which targets are drawn, which
+// carry the poor-sky ring, which are rim ticks and which are removed for a
+// keep-out violation are the observatory's own limits, applied position by
+// position by the server; this file only paints what it was sent. That is
+// deliberate and it is the reason the frames are markup rather than
+// coordinates -- see skyframes.py, and the byte-for-byte check in
+// test_precomputed_frames_match_the_live_route.
+//
+// How long the whole night takes to play. Ten seconds against a two-minute
+// grid works out at about 24 distinct pictures a second -- film rate, and
+// every one of them a genuinely different precomputed frame rather than the
+// same frame held over. Slower than this and the picture rate drops below
+// what reads as motion; faster and the night is over before anyone has
+// looked at it.
+const SKY_PLAY_SECONDS = 10;
+
+let skyFrames = null;      // {step, grid: [unix ts], frames: [svg fragment]}
+let skyFramesKey = null;   // the view the frames were fetched for
+let skyPainted = -1;       // which frame index is on screen, -1 for none
+let skyProbed = false;
+let skyPlaying = false;
+let skyPlayFrom = 0, skyPlayT0 = 0;
+const replayPlayBtn = document.getElementById('replayPlay');
+
+// Tonight only. An archived night comes out of night_archive, which the
+// updater never revisits, so there is nothing precomputed for it and it
+// stays on the server-rendered path above -- slower, and correct.
+function skyFastPath() { return skyFrames !== null && !replayNight; }
+
+function skyDynLayer() {
+  const plot = document.getElementById('skyplot');
+  return plot ? plot.querySelector('.skydyn') : null;
+}
+
+function frameIndexFor(ts) {
+  const g = skyFrames.grid;
+  const i = Math.round((ts - g[0]) / skyFrames.step);
+  return Math.max(0, Math.min(i, g.length - 1));
+}
+
+// The entire client-side drawing path.
+function paintFrame(i) {
+  const layer = skyDynLayer();
+  if (!layer || !skyFrames) return false;
+  if (i === skyPainted) return true;
+  const frag = skyFrames.frames[i];
+  layer.innerHTML = frag;
+  // innerHTML on an SVG element is specified and works in every current
+  // browser, but it is the single assumption this fast path rests on, so it
+  // is checked once against a fragment known not to be empty rather than
+  // trusted. A browser that quietly dropped it would otherwise animate an
+  // empty disc very smoothly, which is the worst of the available outcomes.
+  if (!skyProbed && frag.length) {
+    skyProbed = true;
+    if (layer.childNodes.length === 0) {
+      skyFrames = null;
+      if (replayPlayBtn) replayPlayBtn.hidden = true;
+      return false;
+    }
+  }
+  skyPainted = i;
+  return true;
+}
+
+// The one place that moves the handle, the readout, the side panel and the
+// picture together, so dragging and playback cannot disagree about where in
+// the night we are.
+function skySetTs(ts) {
+  const lo = Number(replaySlider.min), hi = Number(replaySlider.max);
+  const v = Math.min(Math.max(ts, lo), hi);
+  replaySlider.value = v;
+  replayTs = v;
+  if (replayTimeEl) replayTimeEl.textContent = skyClockLabel(v);
+  updateSkySide(v);
+  return paintFrame(frameIndexFor(v));
+}
+
+function skyPlayStop() {
+  skyPlaying = false;
+  if (replayPlayBtn) replayPlayBtn.innerHTML = '&#9654; play';
+}
+
+// requestAnimationFrame rather than setInterval: a timer fires whenever the
+// event loop gets to it, which against a display refresh means frames
+// painted twice and frames dropped -- visible as stutter even when every
+// frame is already in memory. rAF is called once per refresh, which is the
+// rate at which the picture can actually change.
+function skyPlayTick(now) {
+  if (!skyPlaying) return;
+  const lo = Number(replaySlider.min), hi = Number(replaySlider.max);
+  const ts = skyPlayFrom + (now - skyPlayT0) * (hi - lo)
+             / (SKY_PLAY_SECONDS * 1000);
+  if (!skySetTs(ts)) { skyPlayStop(); return; }   // the fast path went away
+  if (ts >= hi) { skyPlayStop(); return; }
+  requestAnimationFrame(skyPlayTick);
+}
+
+if (replayPlayBtn) {
+  replayPlayBtn.addEventListener('click', () => {
+    if (!skyFastPath()) return;
+    if (skyPlaying) { skyPlayStop(); return; }
+    const lo = Number(replaySlider.min), hi = Number(replaySlider.max);
+    const step = Number(replaySlider.step) || 60;
+    // Pressing play at the right-hand stop replays the night from its start
+    // rather than doing nothing, which is what the button is for. Anywhere
+    // else it carries on from where the handle is.
+    skyPlayFrom = (Number(replaySlider.value) >= hi - step) ? lo
+                                                            : Number(replaySlider.value);
+    skyPlayT0 = performance.now();
+    skyPlaying = true;
+    replayPlayBtn.innerHTML = '&#10073;&#10073; pause';
+    requestAnimationFrame(skyPlayTick);
+  });
+}
+
+// Fetched once per view, and again when the updater has run or when the sort
+// or the range filters change what the map is meant to show -- both of which
+// live in `params`, so one signature covers them.
+//
+// Any answer but a usable night leaves skyFrames null, which is not a
+// failure state: it is the board behaving exactly as it did before any of
+// this existed. A fresh database, an afternoon with nothing observable, a
+// night the updater has not reached, a target that joined the queue since
+// the last cycle -- all of them keep the server-rendered path.
+async function loadSkyFrames(key) {
+  try {
+    const resp = await fetch('/skyframes.json?' + params.toString());
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data.available || !data.frames || data.frames.length < 2) {
+      skyFrames = null;
+      skyFramesKey = key;
+      if (replayPlayBtn) replayPlayBtn.hidden = true;
+      return;
+    }
+    skyFrames = data;
+    skyFramesKey = key;
+    skyPainted = -1;
+    // Every reachable slider position becomes exactly one precomputed
+    // instant, so the handle cannot come to rest between two pictures and
+    // the readout can never name a time the map is not showing. Only when
+    // the handle has not been moved yet: frames can arrive mid-drag, and
+    // yanking the thumb to the right-hand stop then would be worse than
+    // leaving it where the hand is.
+    //
+    // And only with tonight selected. The grid describes tonight; stamping
+    // it over an archived night's stops -- which is where the slider starts
+    // when nothing is up yet -- would move that night's handle to instants
+    // it never recorded.
+    if (!replayNight) {
+      skyGridBounds(replayTs === null);
+    }
+    showPlayButton();
+  } catch (e) {
+    skyFrames = null;               // keep the fallback, say nothing
+    if (replayPlayBtn) replayPlayBtn.hidden = true;
+  }
+}
+
 if (replaySlider) {
   replaySlider.addEventListener('input', () => {
+    // Dragging takes over from playback rather than fighting it.
+    if (skyPlaying) skyPlayStop();
     const v = Number(replaySlider.value);
     // The right-hand stop IS now for the live night, so landing on it means
     // live again. Assigning a number unconditionally -- which this did --
@@ -800,6 +987,14 @@ if (replaySlider) {
       replayTimeEl.textContent = (replayTs === null) ? 'live' : skyClockLabel(v);
     }
     updateSkySide(replayTs);
+    // With the night precomputed the handle is followed immediately and
+    // locally -- no debounce to wait out, no request to order against, no
+    // SVG to reparse. Landing on the right-hand stop still means live, and
+    // live is a real render with real counts beside it, so that one goes
+    // back through the fallback.
+    if (skyFastPath() && replayTs !== null && paintFrame(frameIndexFor(v))) {
+      return;
+    }
     loadSkySoon(replayTs);
   });
 }
@@ -816,15 +1011,40 @@ function applyBounds(b) {
   if (!b) return;
   replaySlider.min = Math.floor(b.start_ts);
   replaySlider.max = Math.floor(rightStop(b));
+  // Back to the minute the markup asked for. An archived night is rendered
+  // one frame per request, so it gains nothing from the grid's coarser step
+  // and would only lose resolution by keeping it.
+  replaySlider.step = SKY_BASE_STEP;
   replaySlider.value = replaySlider.max;
   if (replayStartEl) replayStartEl.textContent = b.start_label;
   if (replayEndEl) replayEndEl.textContent = rightLabel(b);
 }
 
+// Snap the slider onto the precomputed grid, so every position it can reach
+// is exactly one frame. Applied both when the frames arrive and whenever
+// applyBounds() has just put the night's raw bounds back.
+function skyGridBounds(toRightStop) {
+  if (!skyFrames || !replaySlider) return;
+  const g = skyFrames.grid;
+  const capped = Math.min(Number(replaySlider.max), g[g.length - 1]);
+  const steps = Math.max(1, Math.floor((capped - g[0]) / skyFrames.step));
+  replaySlider.min = g[0];
+  replaySlider.max = g[0] + steps * skyFrames.step;
+  replaySlider.step = skyFrames.step;
+  if (toRightStop) replaySlider.value = replaySlider.max;
+}
+
+function showPlayButton() {
+  if (replayPlayBtn) replayPlayBtn.hidden = !skyFastPath();
+}
+
 if (replayNightSel) {
   replayNightSel.addEventListener('change', () => {
+    skyPlayStop();
     replayNight = replayNightSel.value;
     applyBounds(boundsFor(replayNight));
+    if (!replayNight) skyGridBounds(true);
+    showPlayButton();
     // Back on tonight the handle is at the right-hand stop, which is now, so
     // that is live rather than a replay of this instant.
     replayTs = replayNight ? Number(replaySlider.value) : null;
@@ -835,10 +1055,13 @@ if (replayNightSel) {
 }
 if (replayLiveBtn) {
   replayLiveBtn.addEventListener('click', () => {
+    skyPlayStop();
     replayTs = null;
     replayNight = '';
     if (replayNightSel) replayNightSel.value = '';
     applyBounds(LIVE_BOUNDS);
+    skyGridBounds(true);
+    showPlayButton();
     updateSkySide(null);
     loadSky(null);
   });
@@ -867,17 +1090,35 @@ async function refresh() {
     document.getElementById('rows').innerHTML = rows;
     if (sky !== null) {
       const plot = document.getElementById('skyplot');
-      if (plot) plot.innerHTML = sky;
+      // Whichever precomputed frame was on screen has just been replaced.
+      if (plot) { plot.innerHTML = sky; skyPainted = -1; }
     }
     applyOpenPlans();
     document.getElementById('last-update').innerHTML =
       st.last_update_local + '<small> ' + TZ + '</small>';
+
+    // Refetch the night when, and only when, something it depends on has
+    // moved: a new update cycle (fresh tracks, a changed queue) or a change
+    // of sort or range filter, both of which live in `params`. Marking a
+    // target observed is a form POST and reloads the page, so it needs no
+    // case of its own.
+    const key = params.toString() + '|' + st.last_update_local;
+    if (replaySlider && key !== skyFramesKey) await loadSkyFrames(key);
   } catch (e) { /* keep the last good render */ }
 
   await syncPlanNow();
 }
-setInterval(refresh, POLL);
+setInterval(() => refresh(), POLL);
 applyOpenPlans();
+// Straight away rather than on the first poll: the slider is usable the
+// moment the page is, and twenty seconds of the fallback path would be
+// twenty seconds of the lag this replaces.
+// Seeded with the cycle the page itself was rendered from, so the first poll
+// does not see a changed key and refetch a night it already has.
+if (replaySlider) {
+  loadSkyFrames(params.toString() + '|'
+                + {{ status.last_update_local|tojson }});
+}
 </script>
 </body>
 </html>

@@ -305,17 +305,37 @@ def _rise_label(m, fmt, fmtdt):
     return there if here[:10] != there[:10] else when
 
 
-def render_svg(marks, moon=None, size=None, localt=None, site=None,
-               localdt=None):
-    """The whole map. `localt` formats a unix timestamp for rise labels, and
-    `localdt` the same instant with its date, for a rise on another night."""
-    s = _site(site)
+# The group the moving half of the map lives in. The replay animation swaps
+# this group's contents, frame by frame, and touches nothing else -- so the
+# horizon mask, the keep-out wedges, the rings and the rose are parsed once
+# per page rather than once per frame. Named here rather than spelled out in
+# the template so the two cannot drift.
+DYNAMIC_CLASS = "skydyn"
+
+
+def _frame(size):
+    """Canvas geometry shared by the backdrop and the moving layer."""
     size = size or config.SKYMAP_SIZE
     pad = 30
-    radius = (size - 2 * pad) / 2.0
-    cx = cy = size / 2.0
-    fmt = localt or (lambda ts: "")
-    fmtdt = localdt or (lambda ts: "")
+    return size, (size - 2 * pad) / 2.0, size / 2.0, size / 2.0
+
+
+def backdrop_svg(size=None, site=None):
+    """Everything on the map that does not depend on the time.
+
+    The disc, the horizon mask, the keep-out wedges, the altitude rings and
+    the compass rose are all statements about where the telescope is, not
+    about when it is looking -- so they are the same picture at every instant
+    of the night, and the replay reuses one copy of them instead of shipping
+    them 240 times.
+
+    Opens the <svg> and deliberately does not close it: render_svg() closes
+    it after the moving layer, so the bytes it returns are exactly the two
+    halves joined. Anything else here would let the replay's backdrop and the
+    live route's backdrop drift apart.
+    """
+    s = _site(site)
+    size, radius, cx, cy = _frame(size)
 
     p = [f'<svg viewBox="0 0 {size} {size}" width="100%" '
          f'style="max-width:{size}px;display:block;margin:0 auto" role="img" '
@@ -380,6 +400,26 @@ def render_svg(marks, moon=None, size=None, localt=None, site=None,
                  f'font-size="{10.5 if len(name) == 1 else 9}" font-weight="{weight}" '
                  f'text-anchor="middle" font-family="monospace">{name}</text>')
 
+    return "".join(p)
+
+
+def dynamic_svg(marks, moon=None, size=None, localt=None, site=None,
+                localdt=None):
+    """Only the half of the map that moves: the moon and the markers.
+
+    One of these is a replay frame. `marks` must already be what
+    target_marks() decided -- which of them are drawn at all, which carry the
+    poor-sky ring, which are rim ticks -- because those are this
+    observatory's own limits applied position by position, and nothing
+    downstream of here is allowed to re-decide them. See the module note on
+    target_marks() and skyframes.py.
+    """
+    s = _site(site)
+    size, radius, cx, cy = _frame(size)
+    fmt = localt or (lambda ts: "")
+    fmtdt = localdt or (lambda ts: "")
+    p = []
+
     # --- moon ---
     if moon and moon["alt"] > 0:
         for pts in _moon_locus(moon, cx, cy, radius, site=s):
@@ -435,5 +475,21 @@ def render_svg(marks, moon=None, size=None, localt=None, site=None,
                      f'{m["az"]:.0f}&#176;</title>')
             p.append("</a>")
 
-    p.append("</svg>")
     return "".join(p)
+
+
+def render_svg(marks, moon=None, size=None, localt=None, site=None,
+               localdt=None):
+    """The whole map. `localt` formats a unix timestamp for rise labels, and
+    `localdt` the same instant with its date, for a rise on another night.
+
+    Literally the backdrop followed by one moving layer, which is what lets
+    the replay precompute only the second half: a frame the updater stored is
+    the same bytes this function would have put inside that group, so the
+    animated map cannot show anything the live route would not.
+    """
+    return (backdrop_svg(size, site)
+            + f'<g class="{DYNAMIC_CLASS}">'
+            + dynamic_svg(marks, moon, size=size, localt=localt, site=site,
+                          localdt=localdt)
+            + "</g></svg>")
