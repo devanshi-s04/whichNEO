@@ -5234,6 +5234,146 @@ def _live_db_fingerprint():
     return counts, digest
 
 
+def test_a_poll_patches_the_table_instead_of_rebuilding_it():
+    """The twenty-second poll must not rebuild ~2700 cells to move a few.
+
+    It used to do `#rows.innerHTML = html` every tick: ~230 KB parsed, every
+    cell destroyed and rebuilt, any text selection in the table lost. Patching
+    only what changed needs a stable key per row, and data-desig cannot be it
+    -- that attribute is only present while the target is observable, so a row
+    would lose its identity exactly when it set behind the horizon.
+
+    The equivalence of the patched DOM to a plain innerHTML is checked in a
+    real DOM outside this suite; what is checked here is the contract the
+    patching depends on -- that every row arrives keyed, and that the keys are
+    unique and stable across reordering and filtering.
+    """
+    import importlib
+    import re
+    import tempfile
+
+    import app as appmod
+
+    rows_src = open(os.path.join(os.path.dirname(__file__),
+                                 "templates", "_rows.html")).read()
+    opens = re.findall(r"<tr\b[^>]*>", rows_src, re.S)
+    check("every kind of row in the template carries a key",
+          len(opens) == 3 and all("data-row=" in t for t in opens),
+          [t[:60] for t in opens if "data-row=" not in t])
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.execute(
+            "INSERT INTO targets (desig, score, vmag, hmag, nobs, arc_days,"
+            " observable, not_seen_days, score_total, discard_reasons,"
+            " max_alt, max_alt_ts) VALUES "
+            # Scores deliberately run against the clock, or sorting by score
+            # would give back the chronological order and prove nothing.
+            "('P11aaaa', 55, 20.0, 22.0, 5, 0.1, 1, 0.4, 1.0, '[]', 55.0, ?),"
+            "('P11bbbb', 90, 21.5, 23.0, 4, 0.2, 1, 0.3, 3.0, '[]', 40.0, ?),"
+            "('P11cccc', 70, 19.0, 21.0, 9, 0.4, 0, 0.6, 2.0, '[]', 20.0, ?)",
+            (time.time() + 900, time.time() + 1800, time.time() + 2700))
+        conn.commit()
+        conn.close()
+        importlib.reload(appmod)
+        client = appmod.app.test_client()
+
+        def keys(url):
+            body = client.get(url).data.decode()
+            return re.findall(r'<tr\b[^>]*\bdata-row="([^"]*)"', body), body
+
+        base, body = keys("/rows")
+        trs = re.findall(r"<tr\b", body)
+        check("every rendered row carries a key",
+              len(base) == len(trs) and len(base) > 0,
+              f"{len(base)} keyed of {len(trs)} rows")
+        check("and no two rows share one",
+              len(set(base)) == len(base), sorted(base))
+
+        # A row that is not observable carries no data-desig, which is exactly
+        # why the key has to be a separate attribute.
+        unobservable = re.search(r'<tr\b[^>]*data-row="P11cccc"[^>]*>', body)
+        check("an unobservable row is still keyed", unobservable is not None)
+        check("even though it has no designation attribute to key on",
+              unobservable is not None
+              and "data-desig=" not in unobservable.group(0),
+              unobservable.group(0) if unobservable else None)
+
+        # Plan rows share the table with target rows, so their keys must live
+        # in a namespace that cannot collide with a designation.
+        check("plan rows are keyed apart from target rows",
+              'data-row="plan-{{ r.desig }}"' in rows_src)
+        check("and no target designation reaches into that namespace",
+              not any(k.startswith("plan-") and k[5:] in base for k in base),
+              sorted(base))
+
+        resorted, _ = keys("/rows?sort=score")
+        check("reordering the table moves keys without inventing any",
+              sorted(resorted) == sorted(base), (sorted(base), sorted(resorted)))
+        check("and it really did reorder", resorted != base or len(base) < 2)
+
+        filtered, _ = keys("/rows?range=mag:19.5:21.0")
+        check("filtering can only ever remove keys",
+              set(filtered) <= set(base), sorted(set(filtered) - set(base)))
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
+        importlib.reload(appmod)
+
+    # The hover highlight ran two document-wide queries per mouse event, on a
+    # document of ~5100 elements, to find at most a handful of nodes. Both
+    # mouseover and mouseout fire on every element boundary the pointer
+    # crosses, so sweeping the table cost four full scans per cell.
+    page_src = open(os.path.join(os.path.dirname(__file__),
+                                 "templates", "index.html")).read()
+    body = re.search(r"function linkHover\(.*?\n\}", page_src, re.S)
+    check("linkHover is still there", body is not None)
+    check("but it no longer searches the document",
+          body is not None and "querySelectorAll" not in body.group(0),
+          body.group(0) if body else None)
+    check("it reads an index instead", body is not None
+          and "hoverIndex.get" in body.group(0))
+
+    # The replay repaints the map's moving layer ~24 times a second, and those
+    # markers carry data-desig. Rebuilding the index there would put the
+    # per-frame document scan back on the hottest path in the page, so it is
+    # only marked stale and rebuilt by the next hover, if one comes at all.
+    paint = re.search(r"function paintFrame\(.*?\n\}", page_src, re.S)
+    check("playing the replay does not rebuild the index per frame",
+          paint is not None and "buildHoverIndex()" not in paint.group(0),
+          paint.group(0) if paint else None)
+    check("it marks it stale instead",
+          paint is not None and "hoverIndexStale = true" in paint.group(0))
+    check("and a hover rebuilds it before reading it",
+          body is not None and "hoverIndexStale" in body.group(0))
+
+    # An index is only correct while it matches the DOM, so it has to be
+    # rebuilt everywhere the rows or the map are replaced.
+    check("the index is built when the page loads",
+          re.search(r"^buildHoverIndex\(\);", page_src, re.M) is not None)
+    refresh = re.search(r"async function refresh\(\).*?\n\}", page_src, re.S)
+    check("the poll rebuilds it", refresh is not None
+          and "buildHoverIndex()" in refresh.group(0))
+    loadsky = re.search(r"async function loadSky\(.*?\n\}", page_src, re.S)
+    check("so does redrawing the map for a replay", loadsky is not None
+          and "buildHoverIndex()" in loadsky.group(0))
+
+    check("the poll patches the table rather than replacing it",
+          refresh is not None and "applyRows(rows)" in refresh.group(0)
+          and "getElementById('rows').innerHTML" not in refresh.group(0),
+          refresh.group(0) if refresh else None)
+
+    # Unkeyed markup must degrade to the old behaviour, not drop rows.
+    apply_rows = re.search(r"function applyRows\(.*?\n\}", page_src, re.S)
+    check("unkeyed markup falls back to a plain replace",
+          apply_rows is not None
+          and "host.innerHTML = html" in apply_rows.group(0))
+
+
 def main():
     # The suite runs on epyc, where config.DB_PATH is the observatory's live
     # database. For years one test marked /mark/XYZ straight into it. Nothing
@@ -5318,7 +5458,8 @@ def main():
                test_done_targets_stay_in_the_list,
                test_done_target_is_green_on_the_sky_map,
                test_interpolate_clamps_to_the_right_end,
-               test_ephemeris_refetched_when_its_window_runs_out):
+               test_ephemeris_refetched_when_its_window_runs_out,
+               test_a_poll_patches_the_table_instead_of_rebuilding_it):
         print(f"\n{fn.__name__}:")
         fn()
 
