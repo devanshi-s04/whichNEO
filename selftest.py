@@ -3414,11 +3414,27 @@ def test_the_browser_is_never_given_geometry_to_judge():
         script = page[page.rindex("<script>"):]
         check("the page paints a frame by assigning it",
               "layer.innerHTML = frag" in script)
-        for forbidden in ("createElementNS", "setAttribute",
+        for forbidden in ("createElementNS",
                           "keepout", "moon_sep", "sector",
                           "Math.sin", "Math.cos", "Math.atan"):
             check("the script never reaches for %s" % forbidden,
                   forbidden not in script)
+
+        # setAttribute is banned for the same reason as the rest -- placing a
+        # marker means setting its coordinates -- with one exception that has
+        # nothing to do with the map: patchRow() carries a table row's own
+        # attributes across a poll. Scoped to that function rather than
+        # dropped, so any new caller anywhere else still fails this.
+        patch_row = re.search(r"\nfunction patchRow\(.*?\n\}", script, re.S)
+        check("patchRow is where the one legitimate use lives",
+              patch_row is not None)
+        outside = script.replace(patch_row.group(0), "") if patch_row else script
+        check("nothing else in the script sets an attribute",
+              "setAttribute" not in outside)
+        check("and patchRow never touches the sky map",
+              patch_row is not None
+              and "skyplot" not in patch_row.group(0)
+              and "skydyn" not in patch_row.group(0))
     finally:
         config.DB_PATH = prev_db
         importlib.reload(auth)
