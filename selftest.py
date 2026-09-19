@@ -5112,6 +5112,147 @@ def test_plan_sync_button_and_the_toolbar_it_merged_past():
         importlib.reload(appmod)
 
 
+def test_the_plan_can_be_saved_from_any_browser():
+    """Getting the plan onto the observer's disk must not need one browser.
+
+    The version this replaces disabled the button outright unless
+    `window.showSaveFilePicker` existed, and labelled it "needs Chrome/Edge".
+    That label was wrong far more often than it was right, and wrong in a way
+    that cost a week: the File System Access spec declares its `partial
+    interface Window` [SecureContext], so the property is *absent* on any
+    origin that is not https, localhost or 127.0.0.1 -- and both deployment
+    guides we ship tell observers to reach the board over plain http on the
+    LAN (`http://<machine>:8080` in deploy/VISNJAN.md, `http://epyc:12600` in
+    deploy/EPYC.md). So an observer in Chrome, on the origin our own docs
+    hand them, got told to go and install Chrome.
+
+    Hence the three things checked here: the button is never disabled, it
+    tells apart "this origin cannot" from "this browser cannot", and the
+    route it falls back to actually offers the file as a download. The
+    browser half is read out of the template rather than driven in a browser,
+    because this suite has to pass on the observatory's Windows box, which
+    has no node -- same reason as the skymap guards above.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    try:
+        importlib.reload(appmod)
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        c = appmod.app.test_client()
+
+        # ---- the server half: /plan gains a download form, and loses nothing.
+        plan_dir = tempfile.mkdtemp()
+        plan_path = os.path.join(plan_dir, "2026-09-19.txt")
+        with open(plan_path, "w") as f:
+            f.write("PLAN BODY\n")
+        conn = db.connect(config.DB_PATH)
+        db.set_meta(conn, "plan_path", plan_path, site=appmod.current_site())
+        conn.commit()
+        conn.close()
+
+        plain = c.get("/plan")
+        dl = c.get("/plan?download=1")
+        check("the plain plan URL is unchanged", plain.status_code == 200
+              and plain.headers["Content-Type"] == "text/plain; charset=utf-8",
+              (plain.status_code, plain.headers.get("Content-Type")))
+        # The control room's curl loop points at the bare URL. If it ever
+        # starts arriving as an attachment, `curl -O` starts writing a
+        # differently-named file and the loop silently stops updating the one
+        # the dome reads.
+        check("and still offers no attachment",
+              plain.headers.get("Content-Disposition") is None,
+              plain.headers.get("Content-Disposition"))
+        check("?download=1 names the file after the night",
+              dl.headers.get("Content-Disposition")
+              == 'attachment; filename="whichneo-2026-09-19.txt"',
+              dl.headers.get("Content-Disposition"))
+        check("and changes not one byte of the body",
+              dl.data == plain.data == b"PLAN BODY\n", dl.data)
+
+        # The filename goes into a response header and comes from a database
+        # value, so a quote or a newline in it would end the header and start
+        # whatever followed. Dropped, not escaped.
+        nasty = appmod._plan_download_name('/p/ev"il\r\nSet-Cookie: a=b.txt')
+        check("a header-breaking plan path cannot break the header",
+              '"' not in nasty and "\r" not in nasty and "\n" not in nasty,
+              nasty)
+        # At Tičan the board runs on Windows, so plan_path is a backslash path.
+        check("a Windows plan path still yields a bare filename",
+              appmod._plan_download_name(r"C:\whichNEO\plans\2026-09-19.txt")
+              == "whichneo-2026-09-19.txt",
+              appmod._plan_download_name(r"C:\whichNEO\plans\2026-09-19.txt"))
+        check("a name that sanitises away still has a stem",
+              appmod._plan_download_name("/p/š.txt") == "whichneo-plan.txt",
+              appmod._plan_download_name("/p/š.txt"))
+        for empty in ("", None):
+            check("and so does %r" % (empty,),
+                  appmod._plan_download_name(empty) == "whichneo-plan.txt",
+                  appmod._plan_download_name(empty))
+
+        # ---- the browser half, read from the template.
+        page = c.get("/").data.decode()
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "templates", "index.html")).read()
+
+        check("the button is never disabled any more",
+              "planSyncBtn.disabled" not in src, None)
+        check("and no longer tells anyone which browser to install",
+              "sync to file (needs Chrome/Edge)" not in src, None)
+
+        mode = re.search(r"function planSyncMode\(win\) \{.*?\n\}", src, re.S)
+        check("planSyncMode is there to tell the two causes apart",
+              mode is not None)
+        if mode is not None:
+            b = mode.group(0)
+            picker, secure = b.find("showSaveFilePicker"), b.find("isSecureContext")
+            # Order matters, and not only cosmetically: a secure context with
+            # no picker (Firefox, Safari) and an insecure one (any browser)
+            # need different words, and only the picker test can be first --
+            # every origin that has the picker is secure, but not the reverse.
+            check("it looks for the picker before blaming the origin",
+                  0 <= picker < secure, (picker, secure))
+            check("and returns all three tiers",
+                  all(t in b for t in ("'file'", "'insecure'", "'unsupported'")),
+                  b)
+
+        check("the fallback hands over the download form of the route",
+              "'/plan?download=1'" in src, None)
+        check("the help control and its panel render",
+              'id="planSyncHelp"' in page and 'id="planSyncRecipe"' in page)
+        check("the panel starts collapsed",
+              re.search(r'id="planSyncRecipe"[^>]*\bhidden\b', page) is not None)
+        # Filled in from location.origin, so the command is copy-pasteable on
+        # whatever origin the observer actually reached the board on -- which
+        # is the whole point, since the insecure one is where they need it.
+        check("the panel has slots for this origin's plan URL",
+              page.count('class="planUrl"') >= 2, page.count('class="planUrl"'))
+        check("and fills them as text, not markup",
+              "el.textContent = url" in src, None)
+        check("the recipe writes via a temporary name",
+              "mv ~/plan.tmp ~/plan.txt" in page and "Move-Item -Force" in page)
+
+        # A download on a timer is the thing this must not quietly become:
+        # it fills Downloads with numbered copies, none of them at the path
+        # the dome reads, and browsers block the repeats anyway.
+        check("nothing downloads on a timer",
+              "planDownload" in src
+              and re.search(r"setInterval\([^)]*planDownload", src) is None,
+              None)
+        poll = re.search(r"async function refresh\(\) \{.*?\n\}", src, re.S)
+        check("and the poll does not either",
+              poll is not None and "planDownload" not in poll.group(0))
+    finally:
+        config.DB_PATH = prev_db
+        importlib.reload(appmod)
+
+
 def test_done_targets_stay_in_the_list():
     """Marking a target done must not remove it from the board.
 
@@ -5684,7 +5825,8 @@ def main():
     # NEOCP simply never renders. This is what catches it.
     live_before = _live_db_fingerprint()
 
-    for fn in (test_site, test_horizon_mask, test_analytic_matches_astropy,
+    for fn in (test_the_plan_can_be_saved_from_any_browser,
+               test_site, test_horizon_mask, test_analytic_matches_astropy,
                test_neocp_list_parse, test_neocp_info_column_collision,
                test_ephemeris_row, test_ephemeris_azimuth_convention,
                test_exposure_rule, test_night_bounds, test_chronological_sort,

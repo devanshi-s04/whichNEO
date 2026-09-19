@@ -198,6 +198,66 @@ find out who has one. Without an email on file the recovery path is still
 See `deploy/EPYC.md` for the deployment details — the `WHICHNEO_HTTPS` flag,
 `data/secret_key`, `data/smtp_password`, and retiring the old shared password.
 
+## Keeping a copy of the plan on disk
+
+The board writes `plans/<night>.txt` on the machine it runs on. When the
+control room is a *different* machine, something has to copy it there, and the
+most robust something is not a browser.
+
+**The recommended way — one scheduled line, no browser involved.** `/plan`
+serves the current plan as `text/plain` and is not behind a login, so:
+
+```bash
+# Linux / macOS, crontab -e
+* * * * * curl -fsS http://<board>:8080/plan -o ~/plan.tmp && mv ~/plan.tmp ~/plan.txt
+```
+
+```powershell
+# Windows, PowerShell, left running
+while ($true) { curl.exe -fsS http://<board>:8080/plan -o plan.tmp; Move-Item -Force plan.tmp plan.txt; Start-Sleep 60 }
+```
+
+Both write a temporary name and move it into place, so the control room never
+reads a half-written plan. This keeps working when the browser is closed, the
+screen is locked, or the observer's laptop has gone to sleep — which is most of
+the night. **Prefer this to anything below.**
+
+The bare `/plan` URL is deliberately header-stable: no `Content-Disposition`,
+so `curl -O` and `wget` keep writing the name you told them to.
+`/plan?download=1` returns the identical body with an attachment header, for
+the browser button only.
+
+### The button on the page
+
+The header's **sync to file** button is a convenience on top of that, and what
+it can manage depends on where the page was opened from:
+
+| Where the board was opened | What the button does |
+|---|---|
+| `https://…`, or `http://localhost`, in Chrome/Edge | Picks one file, then rewrites **that same file** every refresh. |
+| `https://…` in Firefox or Safari | Downloads the plan, one file per click. |
+| `http://<host>:8080` — any browser, Chrome included | Downloads the plan, one file per click. |
+
+In-place writing uses the File System Access API, which the spec declares
+`[SecureContext]`. That has a consequence worth stating plainly, because it
+cost a week of looking in the wrong place:
+
+> **On a plain-`http` LAN origin the API is absent in Chrome too.** Not
+> failing — absent. `window.showSaveFilePicker` is simply not defined, exactly
+> as in Firefox. An observer on `http://epyc:12600` in Chrome gets the
+> download fallback, and the button says so.
+
+Since `deploy/VISNJAN.md` tells observers to open `http://<machine>:8080` over
+the observatory LAN, the plain-http case is the *normal* one at the telescope,
+not an edge case. The button never disables itself and never names a browser:
+it says whether the limit is the origin or the browser, and its `?` shows the
+`curl` line above, pre-filled with the origin you actually used.
+
+A download is a floor, not a sync — it lands in Downloads rather than the path
+the dome reads, each click makes a new numbered file, and browsers block
+repeated unattended downloads. That is why downloads happen on a click and
+never on a timer, and why the table above is not the recommended answer.
+
 ## Known formatting difference
 
 Our plan file omits the trailing `Map/Offsets` text that appears on the legacy
