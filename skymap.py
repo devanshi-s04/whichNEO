@@ -21,6 +21,7 @@ import math
 from html import escape
 
 import config
+import neodistance
 import observability
 
 _SECTOR_WIDTH = 45.0
@@ -95,6 +96,76 @@ def _interpolate(track, ts):
             d_az = ((b[1] - a[1] + 180.0) % 360.0) - 180.0
             return (a[1] + d_az * f) % 360.0, a[2] + (b[2] - a[2]) * f
     return track[-1][1], track[-1][2]
+
+
+# MPC's uncertainty-map palette, so a marker here means what the same colour
+# means on their map. Tuned for luminance on this background rather than
+# copied as literal RGB -- these have to read at a glance on a dome screen.
+DISTANCE_COLOURS = {
+    neodistance.NEAR: "#e04b3c",       # red,       < 0.01 AU
+    neodistance.CLOSE: "#f0862c",      # orange,    0.01 - 0.05 AU
+    neodistance.MAIN_BELT: "#4a7fd8",  # dark blue, main-belt
+    neodistance.FAR: "#3fae5a",        # green,     everything else
+    neodistance.UNKNOWN: "#8d97a8",    # no distance could be derived
+}
+
+# Done is deliberately off MPC's list. Green used to mean "this observer has
+# shot it", and now means "more than 0.05 AU away" -- the same colour cannot
+# carry both. White belongs to no distance class, including the magenta MPC
+# has reserved for Jupiter Trojans and not yet implemented.
+DONE_COLOUR = "#ffffff"
+
+
+def _mark_colour(mark):
+    """What colour this marker is drawn in, and why, in one place."""
+    if mark.get("observed"):
+        return DONE_COLOUR
+    return DISTANCE_COLOURS.get(mark.get("distance"),
+                                DISTANCE_COLOURS[neodistance.UNKNOWN])
+
+
+def _distance_phrase(mark):
+    """The distance in words, for the marker's tooltip.
+
+    The number is given, not only the colour. A colour asserts a bucket with
+    no room for doubt, and this distance is derived from an absolute
+    magnitude that is itself an estimate -- half a magnitude of error is a
+    quarter of the distance. Someone deciding whether to point at a thing
+    should be able to see 0.043 and judge for themselves.
+    """
+    d = mark.get("delta_au")
+    if d is None:
+        return " &#8212; distance not derivable"
+    word = {neodistance.NEAR: "within 0.01 AU",
+            neodistance.CLOSE: "0.01&#8211;0.05 AU",
+            neodistance.MAIN_BELT: "beyond 0.05 AU, main-belt orbit",
+            neodistance.FAR: "beyond 0.05 AU"}.get(mark.get("distance"), "")
+    return f" &#8212; about {d:.4f} AU from Earth ({word})"
+
+
+def _distance_at(track, ts):
+    """Interpolated geocentric distance, or None where it is not derivable.
+
+    Separate from _interpolate() so the position path keeps its shape and
+    every caller of it keeps working. Either endpoint missing a distance
+    means None rather than a value carried across the gap: the derivation
+    refuses some samples on purpose, and quietly substituting a neighbour's
+    answer would paint a colour for geometry we declined to judge.
+    """
+    if not track or len(track[0]) < 4:
+        return None
+    if ts <= track[0][0]:
+        return track[0][3]
+    if ts >= track[-1][0]:
+        return track[-1][3]
+    for a, b in zip(track, track[1:]):
+        if a[0] <= ts <= b[0]:
+            if a[3] is None or b[3] is None:
+                return None
+            span = b[0] - a[0]
+            f = 0.0 if span == 0 else (ts - a[0]) / span
+            return a[3] + (b[3] - a[3]) * f
+    return track[-1][3]
 
 
 def _spacing(track):
@@ -173,10 +244,16 @@ def target_marks(rows, tracks, now, site=None):
         if not track:
             continue
         gap = _spacing(track)
+        # Distance at the instant being drawn, so a candidate closing on
+        # Earth changes colour through a replay rather than wearing the one
+        # it had when the cycle ran.
+        delta = _distance_at(track, now)
         common = {
             "desig": r["desig"], "index": i,
             "observed": bool(r.get("observed")),
             "vmag": r.get("vmag"), "score": r.get("score"),
+            "delta_au": delta,
+            "distance": neodistance.colour(delta, r.get("mb_score")),
         }
         if _covers(track, now, gap):
             az, alt = _interpolate(track, now)
@@ -438,7 +515,7 @@ def dynamic_svg(marks, moon=None, size=None, localt=None, site=None,
 
     # --- targets ---
     for m in marks:
-        colour = "#55b37e" if m["observed"] else "#f0a63c"
+        colour = _mark_colour(m)
         if m["up"]:
             x, y = project(m["az"], m["alt"], cx, cy, radius)
             p.append(f'<a href="/target/{m["desig"]}" class="mk" '
@@ -455,6 +532,7 @@ def dynamic_svg(marks, moon=None, size=None, localt=None, site=None,
             p.append(f'<title>{m["desig"]} &#8212; altitude {m["alt"]:.0f}&#176;, '
                      f'azimuth {m["az"]:.0f}&#176;, V {m["vmag"]:.1f}, '
                      f'score {m["score"]}'
+                     f'{_distance_phrase(m)}'
                      f'{" &#8212; in light-polluted sky" if m["mask"] else ""}'
                      f'{" &#8212; observed" if m["observed"] else ""}</title>')
             p.append("</a>")

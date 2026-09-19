@@ -140,3 +140,76 @@ def fetch_ephemeris(desig, timeout=30, site=None):
     r = requests.get(url, timeout=timeout, headers=_UA)
     r.raise_for_status()
     return r.text
+
+
+# --- MPC's variant-orbit population scores -----------------------------------
+#
+# An hourly table at NEOCP_CLASSES_URL, one row per object:
+#
+#   desig digest2 NEO large_e MC HUN MB HIL JFC TRO DIST H arc Nsets Unc V
+#   dq de di
+#
+# Two columns earn their place here. MB is MPC's own main-belt score, which is
+# what the uncertainty map's "dark blue" means and which MPC nowhere defines
+# numerically -- using theirs beats inventing an a/e cut and calling it theirs.
+# H is a median over the variant orbits, and it disagrees with neocp.txt's H by
+# about half a magnitude, which is a quarter of the derived distance.
+#
+# MPC marks the page Beta and publishes no JSON or CSV, so this reads the table
+# by its own header row rather than by column position: a column inserted
+# upstream then moves nothing. Every field is optional. The board worked before
+# this table existed and has to keep working if it goes away.
+
+_CLASS_CELL = re.compile(r"<t[dh][^>]*>(.*?)</t[dh]>", re.S | re.I)
+_CLASS_ROW = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S | re.I)
+_CLASS_TAG = re.compile(r"<[^>]+>")
+
+# Deliberately narrow. The rest of the table is real data we have no use for
+# yet, and parsing what we do not use is surface area for no gain.
+_CLASS_WANT = {"H": "mpc_h", "MB": "mb_score", "TRO": "tro_score",
+               "NEO": "neo_score", "Unc": "sky_unc_sqdeg"}
+
+
+def parse_neocp_classes(html):
+    """{designation: {mpc_h, mb_score, tro_score, neo_score, ...}}.
+
+    A missing or unparseable cell comes back absent rather than as zero: a
+    main-belt score nobody supplied is not the same fact as a score of 0.
+    """
+    out = {}
+    rows = _CLASS_ROW.findall(html or "")
+    if not rows:
+        return out
+    header = [_CLASS_TAG.sub("", c).strip()
+              for c in _CLASS_CELL.findall(rows[0])]
+    if not header or header[0].lower() not in ("desig", "designation"):
+        return out
+    for row in rows[1:]:
+        cells = [_CLASS_TAG.sub("", c).strip()
+                 for c in _CLASS_CELL.findall(row)]
+        if len(cells) != len(header):
+            continue
+        by_name = dict(zip(header, cells))
+        desig = by_name.get(header[0])
+        if not desig:
+            continue
+        entry = {}
+        for column, field in _CLASS_WANT.items():
+            raw = by_name.get(column)
+            if raw in (None, "", "n.a."):
+                continue
+            try:
+                entry[field] = float(raw)
+            except ValueError:
+                continue
+        if entry:
+            out[desig] = entry
+    return out
+
+
+def fetch_neocp_classes(timeout=None):
+    """The variant-orbit table for everything on NEOCP. One request."""
+    r = requests.get(config.NEOCP_CLASSES_URL,
+                     timeout=timeout or config.NEOCP_TIMEOUT_S, headers=_UA)
+    r.raise_for_status()
+    return r.text

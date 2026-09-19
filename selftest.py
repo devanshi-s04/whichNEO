@@ -39,6 +39,7 @@ import moonplot
 import registry
 import siteconf
 import sites as sitesmod
+import neodistance
 import skymap
 import update_neocp
 
@@ -3062,7 +3063,7 @@ def test_archived_replay_endpoint():
         check("scrubbing inside the archived night works",
               c.get("/skymap.svg?night=2026-09-14&ts=" + mid).status_code == 200)
 
-        # Green means "you" when there is a you, "anyone" when there is not.
+        # Done means "you" when there is a you, "anyone" when there is not.
         anon = appmod.app.test_client().get("/skymap.svg?night=2026-09-14")
         with c.session_transaction() as s:
             s["uid"] = ana
@@ -3075,11 +3076,12 @@ def test_archived_replay_endpoint():
         as_boris = cb.get("/skymap.svg?night=2026-09-14")
 
         def done_colour(resp):
-            # The same green the live map uses for a done target; see
-            # test_done_target_is_green_on_the_sky_map.
-            return "#55b37e" in resp.data.decode()
+            # White, not green. Green now means "more than 0.05 AU from
+            # Earth" -- MPC's meaning -- so done had to move off that scale
+            # entirely; see test_a_done_target_is_white_on_the_sky_map.
+            return skymap.DONE_COLOUR in resp.data.decode()
 
-        check("ana, who observed it, sees it green", done_colour(as_ana))
+        check("ana, who observed it, sees it marked done", done_colour(as_ana))
         check("boris, who did not, does not", not done_colour(as_boris))
         check("a signed-out visitor sees what the observatory did",
               done_colour(anon))
@@ -3887,7 +3889,8 @@ def test_skymap_marks():
     check("observed target stays on the map", len(obs) == 1 and obs[0]["observed"])
 
     svg = skymap.render_svg(obs, None, size=400)
-    check("observed marker is drawn green", "#55b37e" in svg)
+    check("observed marker is drawn in the done colour",
+          skymap.DONE_COLOUR in svg)
 
     # The map's ring is judged where the object is NOW, not from the stored
     # peak flag -- the peak deliberately prefers clean sky, so a peak-derived
@@ -5156,27 +5159,42 @@ def test_done_targets_stay_in_the_list():
           {k: v["observed"] for k, v in lanes.items()})
 
 
-def test_done_target_is_green_on_the_sky_map():
-    """A target done while it is still up shows a green marker.
+def test_a_done_target_is_white_on_the_sky_map():
+    """Done is white, and white is not one of MPC's distance colours.
+
+    It used to be green. Green now carries MPC's meaning -- more than 0.05 AU
+    from Earth -- and one colour cannot say both "this observer has shot it"
+    and "this is far away", least of all on a map where the other colours are
+    about how close a thing is to hitting us.
 
     This path existed and was tested from the day the map was built, but was
     unreachable on the default view: the row was filtered out before the map
     ever saw it, so the marker could never be drawn.
     """
     now = 1_760_000_000.0
-    track = [(now - 1800, 100.0, 30.0), (now, 110.0, 40.0),
-             (now + 1800, 120.0, 50.0)]
+    # Fourth element is the derived geocentric distance. Well beyond 0.05 AU,
+    # so an outstanding copy of this target is green and the done copy has to
+    # differ from it for the right reason.
+    track = [(now - 1800, 100.0, 30.0, 1.2), (now, 110.0, 40.0, 1.2),
+             (now + 1800, 120.0, 50.0, 1.2)]
     base = dict(desig="T1", vmag=19.0, score=80, mask_flags=[])
 
     done = skymap.target_marks([dict(base, observed=True)], {"T1": track}, now)
     check("a done, still-observable target is drawn",
           len(done) == 1 and done[0]["up"], done)
-    check("and it is drawn green",
-          "#55b37e" in skymap.render_svg(done, None, size=400))
+    done_svg = skymap.render_svg(done, None, size=400)
+    check("and it is drawn in the done colour",
+          skymap.DONE_COLOUR in done_svg)
+    check("which is none of MPC's distance colours",
+          skymap.DONE_COLOUR not in skymap.DISTANCE_COLOURS.values(),
+          skymap.DONE_COLOUR)
 
     fresh = skymap.target_marks([dict(base, observed=False)], {"T1": track}, now)
-    check("an outstanding target stays amber",
-          "#f0a63c" in skymap.render_svg(fresh, None, size=400))
+    fresh_svg = skymap.render_svg(fresh, None, size=400)
+    check("an outstanding target far from Earth is green",
+          skymap.DISTANCE_COLOURS[neodistance.FAR] in fresh_svg)
+    check("and the done one is not",
+          skymap.DISTANCE_COLOURS[neodistance.FAR] not in done_svg)
 
 
 def test_moon_phase_geometry():
@@ -5211,13 +5229,25 @@ def test_ephemeris_track_matches_row():
     row = ephemeris.Row(SAMPLE_EPH)
     got = ephemeris.track([SAMPLE_EPH])
     check("track returns one entry for one row", len(got) == 1, got)
-    ts, az, alt = got[0]
+    ts, az, alt, delta = got[0]
     check("track timestamp matches Row", ts == row.ts, (ts, row.ts))
     check("track azimuth matches Row (compass, not MPC south)",
           abs(az - row.az) < 1e-9, (az, row.az))
     check("track altitude matches Row", abs(alt - row.alt) < 1e-9, (alt, row.alt))
     check("track azimuth really is the flipped one",
           abs(az - (row.az_mpc + 180.0) % 360.0) < 1e-9, (az, row.az_mpc))
+
+    # Without an absolute magnitude there is nothing to derive a distance
+    # from, and the sample says so rather than carrying a fabricated number.
+    check("no absolute magnitude means no distance", delta is None, delta)
+
+    with_h = ephemeris.track([SAMPLE_EPH], h=20.0)
+    check("given one, the sample carries a distance",
+          with_h[0][3] is not None, with_h[0])
+    check("and it agrees with solving from the row directly",
+          abs(with_h[0][3]
+              - neodistance.solve(row.vmag, 20.0, row.elong)) < 1e-12,
+          (with_h[0][3], neodistance.solve(row.vmag, 20.0, row.elong)))
 
 
 def _live_db_fingerprint():
@@ -5867,6 +5897,216 @@ def test_an_mpc_row_survives_the_round_trip():
           (r.az - r.az_mpc) % 360.0 == 180.0, (r.az, r.az_mpc))
 
 
+def test_derived_distance_agrees_with_jpl():
+    """The distance behind the map's colours, checked against JPL Horizons.
+
+    MPC colours its uncertainty maps by how far an object is from Earth and
+    does not publish the number -- not in the ephemeris, not on the offsets
+    page, not per variant orbit. So it is derived from H, V and solar
+    elongation, and something has to establish that the arithmetic is right
+    rather than merely plausible.
+
+    Each case below is a real Horizons observation from L01: its absolute
+    magnitude, the apparent magnitude and elongation it published, and the
+    geocentric distance it computed from a well-determined orbit. Pinned as
+    numbers rather than fetched, so the check is deterministic and needs no
+    network -- Horizons is the reference, not a runtime dependency.
+
+    Measured over 50 epochs when this was built: buckets agreed 50/50 using
+    each object's true G, and 49/50 assuming 0.15 as production must.
+    """
+    # (name, H, V, elongation, true delta AU, true G)
+    cases = [
+        ("Ceres", 3.34, 8.893, 86.543, 2.77441914, 0.12),
+        ("Eros", 10.4, 10.251, 109.2696, 0.41586274, 0.46),
+        ("Apophis", 19.09, 10.816, 153.8702, 0.01345935, 0.24),
+        ("2024 YR4", 23.93, 13.553, 95.8751, 0.00220468, 0.15),
+    ]
+    for name, h, v, elong, truth, g in cases:
+        got = neodistance.solve(v, h, elong, g)
+        check(f"{name}: a distance comes back", got is not None)
+        if got is None:
+            continue
+        rel = abs(got - truth) / truth
+        check(f"{name}: within 5% of Horizons ({truth:.5f} AU)",
+              rel < 0.05, f"got {got:.5f}, off by {rel * 100:.2f}%")
+        check(f"{name}: lands in the same colour as the true distance",
+              neodistance.colour(got) == neodistance.colour(truth),
+              (neodistance.colour(got), neodistance.colour(truth)))
+
+    # 2024 YR4 at 0.0022 AU is the case the red bucket exists for, so it is
+    # asserted by name rather than left to the loop above.
+    close = neodistance.solve(13.553, 23.93, 95.8751, 0.15)
+    check("a genuine close approach reads as within 0.01 AU",
+          neodistance.colour(close) == neodistance.NEAR, close)
+
+    # Production has no measured slope parameter and must assume one. That
+    # costs accuracy, and the cost is stated rather than hidden: Eros, whose
+    # real G is 0.46, reads about a fifth nearer than it is.
+    assumed = neodistance.solve(10.251, 10.4, 109.2696)
+    check("assuming G=0.15 still puts Eros in the right colour",
+          neodistance.colour(assumed) == neodistance.FAR, assumed)
+    check("though it is measurably off, which is why G is documented",
+          abs(assumed - 0.41586274) / 0.41586274 > 0.1, assumed)
+
+
+def test_a_distance_is_refused_rather_than_guessed():
+    """Where the model does not apply, no colour is better than a wrong one.
+
+    Both guards exist because the HG phase relation is fitted to roughly
+    0-120 degrees of phase and is extrapolation beyond that. Extrapolating
+    under-counts the dimming, so the solver compensates by pushing the
+    distance outwards -- it would report a red object as orange, which is
+    precisely the error this feature exists to prevent.
+    """
+    check("no apparent magnitude, no distance",
+          neodistance.solve(None, 20.0, 90.0) is None)
+    check("no absolute magnitude, no distance",
+          neodistance.solve(20.0, None, 90.0) is None)
+    check("no elongation, no distance",
+          neodistance.solve(20.0, 20.0, None) is None)
+
+    check("a target near the Sun is refused",
+          neodistance.solve(20.0, 20.0, 5.0) is None)
+    check("and the threshold is well below anything observable",
+          neodistance.MIN_ELONG_DEG < 40.0, neodistance.MIN_ELONG_DEG)
+
+    # The real case. C46K391 on the live board: H 31, V 21.5 at 57 degrees
+    # elongation. Solved naively that is 0.0014 AU -- inside half the Moon's
+    # distance -- but at that distance the phase angle is about 122 degrees,
+    # past where the relation was ever fitted. The honest answer is that we
+    # cannot say.
+    check("a close object at high phase angle is refused, not coloured",
+          neodistance.solve(21.5, 31.0, 57.5) is None)
+    check("and the marker reads unknown rather than green",
+          neodistance.colour(neodistance.solve(21.5, 31.0, 57.5))
+          == neodistance.UNKNOWN)
+
+    # Same object, same H, at a geometry the relation does cover.
+    ok = neodistance.solve(10.816, 19.09, 153.8702)
+    check("a low phase angle is answered normally", ok is not None)
+
+
+def test_the_map_uses_mpc_s_own_colours():
+    """Marker colour is MPC's uncertainty-map palette, plus white for done.
+
+    MPC's own text: green beyond 0.05 AU, dark blue for a main-belt orbit,
+    magenta for Jupiter Trojans (unimplemented, so reserved), orange between
+    0.05 and 0.01, red within 0.01.
+    """
+    check("within 0.01 AU is the near colour",
+          neodistance.colour(0.0099) == neodistance.NEAR)
+    check("0.01 exactly is no longer near",
+          neodistance.colour(0.0100) == neodistance.CLOSE)
+    check("just under 0.05 is still close",
+          neodistance.colour(0.0499) == neodistance.CLOSE)
+    check("0.05 exactly is far",
+          neodistance.colour(0.0500) == neodistance.FAR)
+    check("no distance at all is unknown, not far",
+          neodistance.colour(None) == neodistance.UNKNOWN)
+
+    # The main-belt call is MPC's, from the variant-orbit table, because its
+    # uncertainty-map text says "main-belt" without ever defining it.
+    check("a far object MPC scores as main-belt is dark blue",
+          neodistance.colour(1.5, 90) == neodistance.MAIN_BELT)
+    check("a far object it does not is green",
+          neodistance.colour(1.5, 0) == neodistance.FAR)
+    check("the main-belt score never overrides a close distance",
+          neodistance.colour(0.004, 100) == neodistance.NEAR)
+    check("a missing score is not the same fact as a score of zero",
+          not neodistance.is_main_belt(None))
+
+    # Every colour distinct, or two meanings share a swatch.
+    shades = list(skymap.DISTANCE_COLOURS.values()) + [skymap.DONE_COLOUR]
+    check("every colour on the map is distinct",
+          len(set(shades)) == len(shades), shades)
+    check("done is not one of MPC's distance colours",
+          skymap.DONE_COLOUR not in skymap.DISTANCE_COLOURS.values())
+
+    now = 1_760_000_000.0
+    base = dict(desig="T1", vmag=19.0, score=80, mask_flags=[], observed=False)
+
+    def colour_of(delta, **extra):
+        track = [(now - 1800, 100.0, 30.0, delta), (now, 110.0, 40.0, delta),
+                 (now + 1800, 120.0, 50.0, delta)]
+        marks = skymap.target_marks([dict(base, **extra)], {"T1": track}, now)
+        return marks[0]["distance"] if marks else None
+
+    check("a marker inside 0.01 AU carries the near colour",
+          colour_of(0.005) == neodistance.NEAR)
+    check("one between the thresholds carries close",
+          colour_of(0.02) == neodistance.CLOSE)
+    check("a distant one carries far", colour_of(2.0) == neodistance.FAR)
+    check("a distant one MPC calls main-belt carries dark blue",
+          colour_of(2.0, mb_score=80) == neodistance.MAIN_BELT)
+    check("a sample with no distance carries unknown",
+          colour_of(None) == neodistance.UNKNOWN)
+
+    # Distance is interpolated at the instant being drawn, because a
+    # candidate closing on Earth changes distance measurably across a night
+    # and those are the objects whose colour matters most.
+    moving = [(now - 3600, 100.0, 30.0, 0.08), (now + 3600, 120.0, 50.0, 0.02)]
+    check("halfway along, the distance is halfway between",
+          abs(skymap._distance_at(moving, now) - 0.05) < 1e-9,
+          skymap._distance_at(moving, now))
+    holed = [(now - 3600, 100.0, 30.0, 0.08), (now + 3600, 120.0, 50.0, None)]
+    check("a sample that refused a distance is not interpolated across",
+          skymap._distance_at(holed, now) is None)
+
+
+def test_mpc_class_table_is_read_by_its_own_header():
+    """MPC's variant-orbit table, parsed defensively.
+
+    It is where the main-belt classification comes from -- MPC's own call
+    rather than an a/e cut invented here -- and where the better H comes
+    from. MPC marks the page Beta and publishes no JSON or CSV, so this is
+    scraped HTML and is read by column NAME: a column inserted upstream then
+    moves nothing.
+    """
+    header = ("<tr><th>desig</th><th>digest2</th><th>NEO</th><th>large_e</th>"
+              "<th>MC</th><th>HUN</th><th>MB</th><th>HIL</th><th>JFC</th>"
+              "<th>TRO</th><th>DIST</th><th>H</th><th>arc</th><th>Nsets</th>"
+              "<th>Unc</th><th>V</th><th>dq</th><th>de</th><th>di</th></tr>")
+    row = ("<tr><td>P12qbq7</td><td>95</td><td>3</td><td>10</td><td>4</td>"
+           "<td>0</td><td>88</td><td>0</td><td>1</td><td>0</td><td>0</td>"
+           "<td>20.4</td><td>0.05</td><td>1</td><td>0.34</td><td>21.1</td>"
+           "<td>0.4</td><td>0.2</td><td>3.1</td></tr>")
+    got = neocp.parse_neocp_classes(f"<table>{header}{row}</table>")
+    check("one row parses", list(got) == ["P12qbq7"], got)
+    entry = got.get("P12qbq7", {})
+    check("the median H is picked up", entry.get("mpc_h") == 20.4, entry)
+    check("so is the main-belt score", entry.get("mb_score") == 88.0, entry)
+    check("and the Trojan score MPC reserves magenta for",
+          entry.get("tro_score") == 0.0, entry)
+    check("that score makes it main-belt",
+          neodistance.is_main_belt(entry.get("mb_score")))
+
+    # Read by name: a column added upstream must not shift the others.
+    shifted_header = header.replace("<th>MB</th>",
+                                    "<th>NEWCOL</th><th>MB</th>")
+    shifted_row = row.replace("<td>88</td>", "<td>999</td><td>88</td>")
+    moved = neocp.parse_neocp_classes(
+        f"<table>{shifted_header}{shifted_row}</table>")
+    check("an inserted column does not shift the ones we read",
+          moved.get("P12qbq7", {}).get("mb_score") == 88.0, moved)
+
+    check("a row whose cell count disagrees with the header is skipped",
+          neocp.parse_neocp_classes(
+              f"<table>{header}<tr><td>X</td><td>1</td></tr></table>") == {})
+    check("markup that is not this table yields nothing, not a guess",
+          neocp.parse_neocp_classes("<table><tr><th>a</th></tr></table>") == {})
+    check("no markup at all is survivable", neocp.parse_neocp_classes("") == {})
+
+    # n.a. is absent, not zero. A main-belt score nobody supplied is not the
+    # same fact as a score of 0, and colouring on the difference matters.
+    na_row = row.replace("<td>88</td>", "<td>n.a.</td>")
+    na = neocp.parse_neocp_classes(f"<table>{header}{na_row}</table>")
+    check("an n.a. cell is absent rather than zero",
+          "mb_score" not in na.get("P12qbq7", {}), na)
+    check("and absent means not main-belt",
+          not neodistance.is_main_belt(na.get("P12qbq7", {}).get("mb_score")))
+
+
 def main():
     # The suite runs on epyc, where config.DB_PATH is the observatory's live
     # database. For years one test marked /mark/XYZ straight into it. Nothing
@@ -5949,7 +6189,7 @@ def main():
                test_moon_phase_geometry, test_ephemeris_track_matches_row,
                test_plan_sync_button_and_the_toolbar_it_merged_past,
                test_done_targets_stay_in_the_list,
-               test_done_target_is_green_on_the_sky_map,
+               test_a_done_target_is_white_on_the_sky_map,
                test_interpolate_clamps_to_the_right_end,
                test_ephemeris_refetched_when_its_window_runs_out,
                test_a_poll_patches_the_table_instead_of_rebuilding_it,
@@ -5958,7 +6198,11 @@ def main():
                test_every_page_offers_the_feedback_form,
                test_no_pointing_line_is_invented_across_a_gap,
                test_a_refused_target_is_refused_everywhere,
-               test_an_mpc_row_survives_the_round_trip):
+               test_an_mpc_row_survives_the_round_trip,
+               test_derived_distance_agrees_with_jpl,
+               test_a_distance_is_refused_rather_than_guessed,
+               test_the_map_uses_mpc_s_own_colours,
+               test_mpc_class_table_is_read_by_its_own_header):
         print(f"\n{fn.__name__}:")
         fn()
 
