@@ -1,0 +1,58 @@
+{# The feedback control, on every page.
+
+   Deliberately the same shape as the observatory switcher in _header.html: a
+   <details> disclosure and a plain form, no script. The board runs on a dome
+   screen at three in the morning, and a suggestion box that needs JavaScript
+   to open is one that does not open there.
+
+   Placed after any page-specific <footer>, which stays: those carry the
+   explanatory prose for their own page and are not navigation.
+
+   `page` travels as a hidden field rather than being read from the Referer
+   header, which browsers strip, proxies rewrite, and nobody can rely on.
+#}
+<div class="feedback">
+  <details class="fbmenu">
+    <summary title="Suggest something, or report what looks wrong">
+      Feedback
+    </summary>
+    <div class="fbmenu-panel">
+      <form method="post" action="{{ url_for('feedback') }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <input type="hidden" name="page" value="{{ request.path }}">
+
+        {# Not hidden from a bot, only from a person: something that fills
+           every field it finds gives itself away here. #}
+        <div class="fb-hp" aria-hidden="true">
+          <label>Website<input type="text" name="website" tabindex="-1"
+                               autocomplete="off"></label>
+        </div>
+
+        <label class="fb-label" for="fb-message">
+          Something missing, wrong, or worth adding?
+        </label>
+        <textarea id="fb-message" name="message" rows="4"
+                  maxlength="{{ config.FEEDBACK_MAX_CHARS }}"
+                  placeholder="What you expected, and what happened instead."
+                  required></textarea>
+
+        {% if current_user %}
+        <p class="fb-note">Sending as <strong>{{ current_user.username }}</strong>{%
+          if not current_user.email %} &mdash; there is no address on your
+          account, so there will be no way to reply{% endif %}.</p>
+        {% else %}
+        <label class="fb-label" for="fb-reply">Your email, so there is a way
+          to reply</label>
+        <input id="fb-reply" type="email" name="reply_to" required
+               placeholder="you@example.org">
+        {% endif %}
+
+        <div class="fb-actions">
+          <button type="submit">Send</button>
+          <span class="dim">Goes to whoever maintains this board, with the
+            observatory and page you were on.</span>
+        </div>
+      </form>
+    </div>
+  </details>
+</div>

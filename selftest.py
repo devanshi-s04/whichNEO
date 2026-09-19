@@ -5390,6 +5390,292 @@ def test_a_poll_patches_the_table_instead_of_rebuilding_it():
           and "host.innerHTML = html" in apply_rows.group(0))
 
 
+def test_feedback_reaches_somewhere_even_when_the_mail_does_not():
+    """A suggestion must survive the relay being down.
+
+    mailer.send() hands a message to a thread and swallows any failure, which
+    is right for a password reset -- an error reaching the caller tells a
+    stranger whether an address is on file -- and wrong here. Feedback has no
+    such secret to keep, and a report lost to an outage with nothing but a
+    line in the log is a report nobody acts on, while the sender was told it
+    went. So the row is written before the send is attempted, and whether the
+    mail actually left is recorded against it.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+    import auth
+    import mailer
+
+    prev_db = config.DB_PATH
+    prev_to = config.FEEDBACK_TO
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    config.FEEDBACK_TO = "nobody@example.invalid"
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        conn.close()
+        importlib.reload(appmod)
+        appmod._feedback_hits.clear()
+        c = appmod.app.test_client()
+
+        def token():
+            body = c.get("/").data.decode()
+            m = re.search(r'name="csrf" value="([^"]+)"', body)
+            return m.group(1) if m else None
+
+        def stored():
+            conn = db.connect(config.DB_PATH)
+            try:
+                return db.recent_feedback(conn)
+            finally:
+                conn.close()
+
+        tok = token()
+        check("the board hands out a token the form can use", bool(tok))
+
+        # No mail is configured in a temp deployment, so every send here
+        # fails -- which is exactly the case this test exists for.
+        check("mail really is unavailable in this fixture",
+              not mailer.available())
+
+        r = c.post("/feedback", data={
+            "csrf": tok, "message": "the sky map is upside down",
+            "reply_to": "observer@example.org", "page": "/target/P11aaaa"})
+        check("a signed-out visitor with an address may send",
+              r.status_code == 200, r.status_code)
+        check("and is told it is recorded, not that it was emailed",
+              b"recorded" in r.data.lower() and b"emailed" not in r.data.lower())
+
+        rows = stored()
+        check("the message is stored despite the send failing",
+              len(rows) == 1, len(rows))
+        if rows:
+            row = rows[0]
+            check("with the text intact",
+                  row["message"] == "the sky map is upside down", row["message"])
+            check("the observatory it was sent from",
+                  row["site_id"] == config.DEFAULT_SITE.id, row["site_id"])
+            check("and the page the sender was looking at",
+                  row["page"] == "/target/P11aaaa", row["page"])
+            check("a reply address for someone with no account",
+                  row["reply_to"] == "observer@example.org", row["reply_to"])
+
+        # The delivery flag is written from the sending thread, so give it a
+        # moment rather than asserting into a race.
+        for _ in range(50):
+            rows = stored()
+            if rows and rows[0]["delivery_error"]:
+                break
+            time.sleep(0.1)
+        check("the failure is recorded against the row, not swallowed",
+              bool(rows and rows[0]["delivery_error"]),
+              rows[0]["delivery_error"] if rows else None)
+        check("and it is not marked delivered",
+              bool(rows) and not rows[0]["delivered"])
+
+        # --- what must be refused ---------------------------------------
+        before = len(stored())
+
+        r = c.post("/feedback", data={
+            "csrf": token(), "message": "no way to answer me", "page": "/"})
+        check("a signed-out visitor with no address is refused",
+              r.status_code == 400, r.status_code)
+        check("and told why", b"email" in r.data.lower())
+        check("their words are handed back, not thrown away",
+              b"no way to answer me" in r.data)
+
+        r = c.post("/feedback", data={
+            "csrf": token(), "message": "bad@address", "reply_to": "not-an-email",
+            "page": "/"})
+        check("an address that cannot be replied to is refused",
+              r.status_code == 400, r.status_code)
+
+        r = c.post("/feedback", data={
+            "message": "no token", "reply_to": "a@b.co", "page": "/"})
+        check("a post with no CSRF token is refused",
+              r.status_code == 400, r.status_code)
+
+        r = c.post("/feedback", data={
+            "csrf": token(), "message": "buy cheap things",
+            "reply_to": "bot@example.org", "website": "http://spam", "page": "/"})
+        check("the honeypot answers normally so a bot learns nothing",
+              r.status_code == 200, r.status_code)
+        check("but nothing it sent is stored", len(stored()) == before,
+              len(stored()))
+
+        r = c.post("/feedback", data={
+            "csrf": token(), "reply_to": "a@b.co",
+            "message": "x" * (config.FEEDBACK_MAX_CHARS + 1), "page": "/"})
+        check("an oversized message is refused", r.status_code == 400,
+              r.status_code)
+
+        # --- the throttle -------------------------------------------------
+        appmod._feedback_hits.clear()
+        codes = []
+        for i in range(config.FEEDBACK_LIMIT + 2):
+            codes.append(c.post("/feedback", data={
+                "csrf": token(), "message": f"message {i}",
+                "reply_to": "flood@example.org", "page": "/"}).status_code)
+        check("the first few go through",
+              codes[:config.FEEDBACK_LIMIT] == [200] * config.FEEDBACK_LIMIT,
+              codes)
+        check("and then one address is throttled",
+              codes[config.FEEDBACK_LIMIT] == 429, codes)
+        appmod._feedback_hits.clear()
+
+        # --- reading them -------------------------------------------------
+        r = c.get("/feedback")
+        check("a signed-out visitor cannot read what was sent",
+              r.status_code == 302, r.status_code)
+
+        conn = db.connect(config.DB_PATH)
+        db.create_user(conn, "plain", auth.hash_password("correct-horse-1"))
+        db.create_user(conn, "boss", auth.hash_password("correct-horse-2"),
+                       is_admin=1)
+        conn.close()
+
+        c.post("/login", data={"username": "plain",
+                               "password": "correct-horse-1"})
+        check("nor can an ordinary account",
+              c.get("/feedback").status_code == 403)
+        c.post("/logout")
+
+        c.post("/login", data={"username": "boss",
+                               "password": "correct-horse-2"})
+        page = c.get("/feedback")
+        check("an admin can", page.status_code == 200, page.status_code)
+        check("and sees the message", b"upside down" in page.data)
+        check("and whether it was actually mailed", b"Mailed" in page.data)
+
+        # A signed-in sender is identified by their account, not by a form
+        # field: we already know who they are, and a text input is not
+        # evidence of anything.
+        tok = token()
+        c.post("/feedback", data={
+            "csrf": tok, "message": "from an account",
+            "reply_to": "someone-else@example.org", "page": "/"})
+        mine = [r for r in stored() if r["message"] == "from an account"]
+        check("a signed-in message records the account", bool(mine)
+              and mine[0]["username"] == "boss",
+              mine[0]["username"] if mine else None)
+        check("and ignores a reply address typed into the form",
+              bool(mine) and mine[0]["reply_to"] != "someone-else@example.org",
+              mine[0]["reply_to"] if mine else None)
+        c.post("/logout")
+    finally:
+        config.DB_PATH = prev_db
+        config.FEEDBACK_TO = prev_to
+        siteconf.forget()
+        importlib.reload(appmod)
+
+
+def test_the_feedback_form_cannot_be_used_to_send_mail_to_strangers():
+    """A public form that sends email is an open relay unless it is nailed
+    down. Four things are fixed and none of them come from the sender: the
+    recipient, the subject, the length, and the rate. The sender's text
+    reaches the body only -- a header taking a newline is how a suggestion
+    box becomes a way to mail anybody.
+    """
+    import app as appmod
+    import mailer
+
+    check("the recipient is configuration, not a form field",
+          "FEEDBACK_TO" in open(os.path.join(
+              os.path.dirname(__file__), "config.py")).read())
+
+    src = open(os.path.join(os.path.dirname(__file__), "app.py")).read()
+    body = re.search(r"def feedback\(\):.*?\n(?=@app\.route|\Z)", src, re.S)
+    check("the route is there", body is not None)
+    if body:
+        check("it mails config.FEEDBACK_TO and nothing else",
+              "config.FEEDBACK_TO" in body.group(0)
+              and 'form.get("to")' not in body.group(0))
+        check("the subject is built here, not received",
+              "FEEDBACK_SUBJECT.format" in body.group(0))
+
+    # Reply-To is the one header carrying anything a stranger supplied, so it
+    # is the one that has to refuse a newline.
+    msg = mailer.build("to@example.org", "Subject", "body",
+                       reply_to="ok@example.org")
+    check("a clean reply address is used", msg["Reply-To"] == "ok@example.org")
+
+    for bad in ("a@b.co\nBcc: victim@example.org",
+                "a@b.co\r\nTo: victim@example.org"):
+        msg = mailer.build("to@example.org", "Subject", "body", reply_to=bad)
+        check("an address carrying a newline is dropped",
+              msg["Reply-To"] is None, msg["Reply-To"])
+
+    check("and the address check rejects it before that",
+          not appmod._usable_email("a@b.co\nBcc: x@y.z"))
+    for bad in ("", "no-at-sign", "a@nodot", "a b@c.co", "a@b.co, c@d.co"):
+        check(f"{bad!r} is not a usable reply address",
+              not appmod._usable_email(bad))
+    check("an ordinary address is", appmod._usable_email("obs@example.org"))
+
+
+def test_every_page_offers_the_feedback_form():
+    """One footer, every page -- for the same reason there is one header.
+
+    A suggestion box on the board only is one that the person looking at a
+    target page, where they noticed the problem, has to go and find.
+    """
+    import importlib
+    import tempfile
+
+    import app as appmod
+
+    prev_db = config.DB_PATH
+    config.DB_PATH = os.path.join(tempfile.mkdtemp(), "targets.db")
+    siteconf.forget()
+    try:
+        conn = db.connect(config.DB_PATH)
+        db.init(conn)
+        # A fully populated row: a target page formats magnitudes and counts
+        # without guarding every one, so a row carrying only a designation
+        # 500s for reasons that have nothing to do with the footer. The live
+        # board has no NULL in any of these columns.
+        conn.execute(
+            "INSERT INTO targets (site_id, desig, score, vmag, hmag, nobs,"
+            " arc_days, not_seen_days, observable, score_total,"
+            " discard_reasons, window_minutes) VALUES "
+            "(1,'P11aaaa', 85, 20.4, 22.1, 6, 0.4, 0.5, 1, 3.2, '[]', 180.0)")
+        conn.commit()
+        conn.close()
+        importlib.reload(appmod)
+        c = appmod.app.test_client()
+
+        for path in list(HEADER_PAGES) + ["/target/P11aaaa"]:
+            resp = c.get(path)
+            # /forgot answers 503 with no relay configured, by design -- it
+            # still renders, and still has to carry the form.
+            check(f"{path} renders",
+                  resp.status_code in (200, 503), resp.status_code)
+            body = resp.data.decode()
+            check(f"{path} offers the feedback form", 'class="fbmenu"' in body)
+            check(f"{path} posts it to /feedback",
+                  'action="/feedback"' in body)
+            check(f"{path} names the page it was sent from",
+                  'name="page"' in body)
+
+        # Every template, not merely every route this list happens to name.
+        here = os.path.dirname(os.path.abspath(__file__))
+        missing = []
+        for name in os.listdir(os.path.join(here, "templates")):
+            if name.startswith("_") or not name.endswith(".html"):
+                continue
+            src = open(os.path.join(here, "templates", name)).read()
+            if "</body>" in src and "_footer.html" not in src:
+                missing.append(name)
+        check("no full page template was missed", not missing, missing)
+    finally:
+        config.DB_PATH = prev_db
+        siteconf.forget()
+        importlib.reload(appmod)
+
+
 def main():
     # The suite runs on epyc, where config.DB_PATH is the observatory's live
     # database. For years one test marked /mark/XYZ straight into it. Nothing
@@ -5475,7 +5761,10 @@ def main():
                test_done_target_is_green_on_the_sky_map,
                test_interpolate_clamps_to_the_right_end,
                test_ephemeris_refetched_when_its_window_runs_out,
-               test_a_poll_patches_the_table_instead_of_rebuilding_it):
+               test_a_poll_patches_the_table_instead_of_rebuilding_it,
+               test_feedback_reaches_somewhere_even_when_the_mail_does_not,
+               test_the_feedback_form_cannot_be_used_to_send_mail_to_strangers,
+               test_every_page_offers_the_feedback_form):
         print(f"\n{fn.__name__}:")
         fn()
 

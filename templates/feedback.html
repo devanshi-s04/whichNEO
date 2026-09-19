@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhichNEO &mdash; feedback received</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+{% set page_heading %}Which<b>NEO</b>{% endset %}
+{% set page_subtitle %}Feedback received{% endset %}
+{% include "_header.html" %}
+
+<section class="card">
+  <p class="cap">Every message is written down before the mail is attempted,
+  so a relay outage cannot lose one. The <em>mailed</em> column is whether the
+  email actually went out &mdash; a row marked no is one nobody has seen in an
+  inbox, and the reason is beside it.</p>
+
+  {% if not rows %}
+  <p class="dim">Nothing yet.</p>
+  {% else %}
+  <table class="mini fb-list">
+    <thead>
+      <tr><th>When (UT)</th><th>From</th><th>Observatory</th><th>Page</th>
+          <th>Mailed</th><th>Message</th></tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td class="nowrap">{{ r.created_utc }}</td>
+        <td>
+          {% if r.username %}{{ r.username }}{% else %}<span class="dim">not signed in</span>{% endif %}
+          {% if r.reply_to %}<br><a href="mailto:{{ r.reply_to }}">{{ r.reply_to }}</a>{% endif %}
+        </td>
+        <td>{{ r.obscode or '&mdash;'|safe }}</td>
+        <td class="dim">{{ r.page or '&mdash;'|safe }}</td>
+        <td>
+          {% if r.delivered %}<span class="pill">yes</span>
+          {% else %}<span class="pill warn" title="{{ r.delivery_error }}">no</span>{% endif %}
+        </td>
+        <td class="fb-msg">{{ r.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+{% include "_footer.html" %}
+</div>
+</body>
+</html>

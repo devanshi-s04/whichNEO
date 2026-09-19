@@ -120,6 +120,17 @@ SMTP_FROM = os.environ.get("WHICHNEO_SMTP_FROM", "whichneo@infra.juriclab.org")
 SMTP_STARTTLS = True
 SMTP_TIMEOUT_S = 20
 
+# Where the feedback form's messages go. One fixed address, never anything the
+# sender can influence: a public form that mails an arbitrary recipient is an
+# open relay with extra steps.
+FEEDBACK_TO = os.environ.get("WHICHNEO_FEEDBACK_TO", "ds2004@uw.edu")
+
+# What one address may send in an hour. Generous for a person, tight enough
+# that the form is not worth automating against.
+FEEDBACK_LIMIT = 5
+FEEDBACK_WINDOW_S = 3600
+FEEDBACK_MAX_CHARS = 4000
+
 # How long a password-reset link stays good. Long enough to survive a night
 # shift and a slow mail queue, short enough that a link left in an inbox is
 # not a standing key to the account.

@@ -304,6 +304,32 @@ CREATE TABLE IF NOT EXISTS site_members (
     PRIMARY KEY (site_id, user_id)
 );
 
+-- Suggestions and bug reports from whoever is looking at the board.
+--
+-- Written before the mail is attempted, and deliberately so: mailer.send()
+-- hands the message to a thread and swallows a failure, which is right for a
+-- password reset (an error there tells a stranger whether an account exists)
+-- and wrong here. A relay outage would otherwise lose an observer's report
+-- with nothing but a line in the log, while the sender was told it went.
+--
+-- No IP address column. The throttle needs the address for the length of a
+-- request and keeps it in memory; there is no reason to write down where
+-- someone was sitting when they reported a bug.
+CREATE TABLE IF NOT EXISTS feedback (
+    id             INTEGER PRIMARY KEY,
+    created_utc    TEXT NOT NULL,
+    site_id        INTEGER,
+    user_id        INTEGER,
+    reply_to       TEXT,
+    page           TEXT,
+    message        TEXT NOT NULL,
+    delivered      INTEGER NOT NULL DEFAULT 0,
+    delivery_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_recent
+    ON feedback(created_utc DESC);
+
 CREATE INDEX IF NOT EXISTS idx_targets_seq
     ON targets(site_id, observable DESC, max_alt_ts ASC);
 """
@@ -1154,3 +1180,41 @@ def get_meta(conn, key, default=None, site=None):
     row = conn.execute("SELECT value FROM meta WHERE site_id=? AND key=?",
                        (site_id, key)).fetchone()
     return row["value"] if row else default
+
+
+# --- feedback ----------------------------------------------------------------
+
+def record_feedback(conn, message, site_id=None, user_id=None,
+                    reply_to=None, page=None):
+    """Store one message and return its id.
+
+    Called before the send is attempted, so the message exists whether or not
+    the relay is reachable -- see the table's comment.
+    """
+    cur = conn.execute(
+        "INSERT INTO feedback (created_utc, site_id, user_id, reply_to, "
+        "page, message) VALUES (?,?,?,?,?,?)",
+        (utcnow(), site_id, user_id, reply_to, page, message))
+    conn.commit()
+    return cur.lastrowid
+
+
+def mark_feedback_delivered(conn, feedback_id, error=None):
+    """Record whether the mail actually went out.
+
+    The reading page shows this, which is the only reason storing the message
+    is worth anything: a row that was never delivered is one to act on rather
+    than assume arrived.
+    """
+    conn.execute(
+        "UPDATE feedback SET delivered=?, delivery_error=? WHERE id=?",
+        (0 if error else 1, str(error)[:500] if error else None, feedback_id))
+    conn.commit()
+
+
+def recent_feedback(conn, limit=200):
+    """Newest first, with the sender's name where there is an account."""
+    return [dict(r) for r in conn.execute(
+        "SELECT f.*, u.username, u.email AS user_email "
+        "FROM feedback f LEFT JOIN users u ON u.id = f.user_id "
+        "ORDER BY f.created_utc DESC, f.id DESC LIMIT ?", (limit,))]
