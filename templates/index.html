@@ -101,6 +101,29 @@
           <td class="n">&mdash;</td></tr>
       <tr><td><span class="sw poll"></span></td><td>In poor sky now</td>
           <td class="n live-now">{{ sky.flagged }}</td></tr>
+
+      {# Marker colour is MPC's uncertainty-map palette, so a dot here means
+         what the same colour means on their map. The distance behind it is
+         ours, not theirs: MPC publishes the colours and not the number, so
+         it is derived from H, V and solar elongation -- see neodistance. #}
+      <tr><td colspan="3" class="legend-head">Distance from Earth</td></tr>
+      <tr><td><span class="sw d-near"></span></td>
+          <td>Within 0.01 AU</td><td class="n live-now">{{ sky.near }}</td></tr>
+      <tr><td><span class="sw d-close"></span></td>
+          <td>0.01 &ndash; 0.05 AU</td>
+          <td class="n live-now">{{ sky.close }}</td></tr>
+      <tr><td><span class="sw d-far"></span></td>
+          <td>Beyond 0.05 AU</td><td class="n live-now">{{ sky.far }}</td></tr>
+      <tr><td><span class="sw d-mainbelt"></span></td>
+          <td>Beyond 0.05 AU, main-belt</td>
+          <td class="n live-now">{{ sky.mainbelt }}</td></tr>
+      {% if sky.unknown %}
+      <tr><td><span class="sw d-unknown"></span></td>
+          <td title="No absolute magnitude, or geometry the derivation
+                     refuses. Not a claim that the object is far away.">
+              Distance not derivable</td>
+          <td class="n live-now">{{ sky.unknown }}</td></tr>
+      {% endif %}
       {% for start, end, minalt, reason in site.keepout_wedges %}
       <tr><td><span class="sw keepout"></span></td>
           <td>Keep out &mdash; below {{ minalt|int }}&deg;,

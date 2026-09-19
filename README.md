@@ -98,17 +98,70 @@ Exposure time uses the observatory's own rule, recovered from the legacy code:
 
 ## Verification
 
-`selftest.py` runs 50 checks. Two matter most:
+`selftest.py` runs over a thousand checks. Three matter most:
 
 - **Analytic vs astropy** — the fast path used for observing windows is
-  cross-validated against astropy's full transform. Catching a 0.67° azimuth
-  drift here is what originally surfaced missing precession handling.
+  cross-validated against astropy's full transform, and agrees to under an
+  arcsecond. Omitting the precession step would introduce up to 0.67° in
+  azimuth, which is enough to move a target across the dome keep-out
+  boundary; that is why the fast path precesses to epoch of date.
 - **Azimuth convention** — pins MPC-south to compass-north conversion, the
-  error with the largest silent blast radius.
+  error with the largest silent blast radius, by writing the line back out
+  in MPC's own convention and re-reading it.
+- **Derived distance vs JPL Horizons** — see below.
 
 At runtime, every cycle recomputes MPC's alt/az and lunar separation with
 astropy and flags disagreements beyond tolerance, so a change to MPC's page
 format surfaces as a visible mismatch rather than quietly wrong pointing.
+
+### Distance from Earth, and how far to trust it
+
+Sky-map markers use MPC's uncertainty-map palette — red within 0.01 AU,
+orange to 0.05, green beyond, dark blue for a main-belt orbit — so a dot here
+means what the same colour means on MPC's map. Done is white, deliberately
+off that scale: green now carries MPC's meaning and cannot also mean "this
+observer has shot it".
+
+**The main-belt call is MPC's**, read from the variant-orbit table at
+`minorplanetcenter.net/mpcops/neocp/neocp_plots/info/`. Their uncertainty-map
+text says "main-belt" without defining it numerically, so using their score
+beats inventing an a/e cut and presenting it as theirs. The same table
+supplies a median H better than `neocp.txt`'s — the two disagree by about
+half a magnitude, which is a quarter of the distance.
+
+**The distance is ours.** MPC publishes the colours and not the number: it is
+absent from the confirmation ephemeris (we already request "Full output" and
+there is no such column, nor an option for one), from the offsets page, and
+from the per-variant data. So `neodistance.py` derives it from H, V and solar
+elongation.
+
+Validated against JPL Horizons for Ceres, Eros, Apophis and 2024 YR4 over 50
+epochs from L01, spanning 0.002 to 3.5 AU:
+
+| | |
+|---|---|
+| buckets agreeing, each object's true G | 50/50 |
+| buckets agreeing, G assumed to be 0.15 | 49/50 |
+| median error | under 0.25% |
+| 2024 YR4 at a true 0.0022 AU | recovered to 1.6% |
+
+Four of those cases are pinned as offline fixtures in `selftest.py`, so the
+check is deterministic and Horizons is a reference rather than a dependency.
+
+Three limits, stated because a colour implies a confidence this number does
+not have:
+
+- **H dominates the error.** It is an estimate for an object discovered
+  yesterday. Half a magnitude is ±24% in distance; measured against one
+  night's board, 6 of 110 objects would change colour if H were wrong by
+  that much — all straddling 0.05 AU, none near 0.01.
+- **G is assumed.** NEOCP objects have no measured slope parameter. Eros,
+  whose real G is 0.46, reads about a fifth nearer than it is.
+- **Some geometry is refused rather than guessed.** The HG relation is fitted
+  to roughly 0–120° of phase. Past that, extrapolating under-counts the
+  dimming and pushes the answer outwards — it would report a red object as
+  orange. Those markers read "distance not derivable" instead. The tooltip
+  gives the number alongside the colour for the same reason.
 
 ## Performance
 
