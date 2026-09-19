@@ -27,6 +27,7 @@ import history
 import history_plot
 import mailer
 import moonplot
+import neodistance
 import observability
 import observatories
 import pipeline
@@ -443,7 +444,14 @@ def sky_view(conn, rows, now=None):
     now = now if now is not None else time.time()
     site = current_site()
     shown = sky_rows(rows)
-    tracks = {d: ephemeris.track(lines)
+    # MPC's variant-orbit median H where there is one, the list's H otherwise.
+    # The median is the better estimate -- the two disagree by about half a
+    # magnitude, which is a quarter of the derived distance -- but a board
+    # that has not yet seen the class table still colours its markers.
+    absolute_mag = {r["desig"]: (r.get("mpc_h") if r.get("mpc_h") is not None
+                                 else r.get("hmag"))
+                    for r in shown}
+    tracks = {d: ephemeris.track(lines, absolute_mag.get(d))
               for d, lines in db.load_tracks(
                   conn, [r["desig"] for r in shown], site).items()}
     marks = skymap.target_marks(shown, tracks, now, site)
@@ -459,6 +467,15 @@ def sky_view(conn, rows, now=None):
         "pending": sum(1 for m in marks if not m["up"]),
         "flagged": sum(1 for m in marks if m["up"] and m["mask"]),
         "total": len(shown),
+        # Counted over every marker, drawn or on the rim, because the
+        # question the legend answers is "how many of tonight's candidates
+        # are close", not "how many are above the horizon this second".
+        **{name: sum(1 for m in marks if m.get("distance") == value)
+           for name, value in (("near", neodistance.NEAR),
+                               ("close", neodistance.CLOSE),
+                               ("far", neodistance.FAR),
+                               ("mainbelt", neodistance.MAIN_BELT),
+                               ("unknown", neodistance.UNKNOWN))},
     }
 
 
@@ -489,7 +506,12 @@ def archived_sky_view(conn, archived, now=None):
         mine = (me["username"] in observers) if me else bool(t["observed"])
         rows.append({"desig": t["desig"], "observed": mine,
                      "vmag": t["vmag"], "score": t["score"]})
-    tracks = {t["desig"]: ephemeris.track(t["lines"]) for t in archived["targets"]}
+    # A night archived before this existed carries no absolute magnitude, so
+    # its markers read "distance not derivable" rather than inventing one.
+    tracks = {t["desig"]: ephemeris.track(
+        t["lines"], t.get("mpc_h") if t.get("mpc_h") is not None
+        else t.get("hmag"))
+        for t in archived["targets"]}
     site = current_site()
     marks = skymap.target_marks(rows, tracks, now, site)
     try:

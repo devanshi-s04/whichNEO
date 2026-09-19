@@ -24,6 +24,17 @@
   --no:       #cf6154;
   --warn:     #d9a441;
 
+  /* "This observer has shot it", everywhere on the page. It used to be --go,
+     until the sky map adopted MPC's uncertainty-map palette, where green
+     means "more than 0.05 AU from Earth". One colour cannot say both, and on
+     a map about how close things are to hitting us, distance has the better
+     claim on green. White belongs to no distance class -- not even the
+     magenta MPC reserves for Jupiter Trojans. Kept in step with
+     skymap.DONE_COLOUR. */
+  --done:     #ffffff;
+  --done-d:   rgba(255,255,255,.10);
+  --done-h:   rgba(255,255,255,.22);
+
   --ui:   Archivo, ui-sans-serif, system-ui, -apple-system, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
@@ -169,7 +180,17 @@ body {
   vertical-align: -1px;
 }
 .sw.up   { background: var(--amber); }
-.sw.done { background: var(--go); }
+.sw.done { background: var(--done); }
+.legend .legend-head {
+  padding-top: 10px; font-size: 9.5px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--faint); font-weight: 600;
+}
+/* The sky map's distance swatches, matching skymap.DISTANCE_COLOURS. */
+.sw.d-near { background: #e04b3c; }
+.sw.d-close { background: #f0862c; }
+.sw.d-mainbelt { background: #4a7fd8; }
+.sw.d-far { background: #3fae5a; }
+.sw.d-unknown { background: #8d97a8; }
 .sw.tick { border-radius: 1px; width: 3px; height: 12px; background: var(--amber); }
 .sw.poll { background: rgba(207,97,84,.30); border: 1px dashed var(--no); }
 /* Hatched, matching the map: a hard limit, not a preference. */
@@ -242,15 +263,15 @@ body {
   margin-left: -6px; border-radius: 50%;
   background: var(--amber); border: 2px solid var(--panel);
 }
-/* A lane already observed, tinted the same green as its table row and its
+/* A lane already observed, tinted the same white as its table row and its
    marker on the sky map -- one colour meaning "done" everywhere on the page.
    Written after the plain .bar rule and before the hover, so hovering still
    lights a done lane up like any other. */
 .lane .bar.done {
-  background: rgba(85,179,126,.18); border-color: rgba(85,179,126,.5);
+  background: var(--done-d); border-color: rgba(255,255,255,.45);
 }
 .lane:hover .bar { background: rgba(240,166,60,.3); }
-.lane:hover .bar.done { background: rgba(85,179,126,.34); }
+.lane:hover .bar.done { background: var(--done-h); }
 .nowline {
   position: absolute; top: -20px; bottom: 0; width: 1px;
   background: var(--cyan); z-index: 3;
@@ -432,8 +453,8 @@ table.grid tbody td {
 table.grid tbody td.l { text-align: left; }
 table.grid tbody tr:hover td { background: rgba(255,255,255,.022); }
 tr.gone td { color: var(--faint); }
-tr.done td { opacity: .72; background: rgba(85,179,126,.10); }
-tr.done td.nm a { color: var(--go); }
+tr.done td { opacity: .72; background: var(--done-d); }
+tr.done td.nm a { color: var(--done); }
 /* Hidden rows read as clearly dimmer without becoming unreadable. The only
    place they render is the `hidden` view, whose whole purpose is finding a row
    you hid so you can restore it -- if the designation is illegible the view

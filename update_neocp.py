@@ -227,9 +227,25 @@ def run_update(conn, hist_conn=None, source=None, sites=None):
         orbits = {}
     mark("fetch_orbits")
 
+    # MPC's own variant-orbit scores: the main-belt call the sky map colours
+    # by, and a median H better than neocp.txt's. Beta, and a plain HTML
+    # table, so its absence degrades the colours to "unknown" and changes
+    # nothing else.
+    try:
+        classes = neocp.parse_neocp_classes(neocp.fetch_neocp_classes())
+    except Exception as e:
+        logging.warning("neocp class table unavailable (%s); distance "
+                        "colours will read unknown", e)
+        classes = {}
+    mark("fetch_classes")
+
     for t in base:
         o = orbits.get(t["desig"]) or {}
         t["q"], t["e"], t["incl"] = o.get("q"), o.get("e"), o.get("incl")
+        c = classes.get(t["desig"]) or {}
+        for field in ("mpc_h", "mb_score", "tro_score", "neo_score",
+                      "sky_unc_sqdeg"):
+            t[field] = c.get(field)
 
     # One instant for the whole cycle, so two observatories analysing the
     # same object are answering the same question rather than questions a
