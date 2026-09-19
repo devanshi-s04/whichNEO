@@ -69,6 +69,18 @@ CREATE TABLE IF NOT EXISTS targets (
     e                    REAL,
     incl                 REAL,
 
+    -- MPC's own variant-orbit scores, from the hourly table at
+    -- NEOCP_CLASSES_URL. mb_score is what decides the map's dark blue, so
+    -- the main-belt call is MPC's rather than an a/e cut of ours. mpc_h is a
+    -- median over the variant orbits and is the better H for the distance
+    -- calculation: it disagrees with neocp.txt's hmag by about half a
+    -- magnitude, which is a quarter of the distance.
+    mpc_h                REAL,
+    mb_score             REAL,
+    tro_score            REAL,
+    neo_score            REAL,
+    sky_unc_sqdeg        REAL,
+
     max_alt              REAL,
     max_alt_ts           REAL,
     max_alt_utc          TEXT,
@@ -340,6 +352,7 @@ _COLS = [
     "not_seen_days", "update_note", "is_new", "note_flag", "mpc_flag",
     "discovery_code", "obs_codes",
     "q", "e", "incl",
+    "mpc_h", "mb_score", "tro_score", "neo_score", "sky_unc_sqdeg",
     "max_alt", "max_alt_ts", "max_alt_utc", "max_alt_az", "mask_flags",
     "exposure_min", "frames", "frame_sec", "frame_motion", "window_minutes",
     "window_start_ts", "window_end_ts",

@@ -20,6 +20,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
+import neodistance
 
 _UA = {"User-Agent": "visnjan_whichneo/0.2 "
                      "(Visnjan Observatory L01 follow-up planning)"}
@@ -150,8 +151,15 @@ class Row:
         return {k: getattr(self, k) for k in self.__slots__}
 
 
-def track(lines):
-    """Just (ts, compass azimuth, altitude) for each parseable line.
+def track(lines, h=None):
+    """(ts, compass azimuth, altitude, geocentric distance) per parseable line.
+
+    The distance is derived, not MPC's -- see neodistance -- and is None
+    unless an absolute magnitude is supplied, and None again for any sample
+    whose geometry the derivation refuses. It rides along here rather than
+    being computed once per object because it MOVES: a candidate closing on
+    Earth changes distance measurably across one night, and those are exactly
+    the objects whose colour matters.
 
     The sky map redraws on every page load so its positions are current
     rather than up to five minutes stale, which means re-reading the cached
@@ -169,9 +177,14 @@ def track(lines):
         if len(p) < _MIN_FIELDS:
             continue
         try:
+            delta = None
+            if h is not None:
+                delta = neodistance.solve(float(p[_I_V]), h,
+                                          float(p[_I_ELONG]))
             out.append((_to_unix_utc(p[0], p[1], p[2], p[3]),
                         (float(p[_I_AZ]) + 180.0) % 360.0,
-                        float(p[_I_ALT])))
+                        float(p[_I_ALT]),
+                        delta))
         except (ValueError, IndexError):
             continue
     out.sort()
