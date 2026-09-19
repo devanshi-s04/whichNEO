@@ -22,6 +22,10 @@
   <button type="button" id="planSyncBtn" class="chip"
           title="Keep a local .txt file on this computer in sync with the plan file, updated on every refresh">sync to file</button>
   <span id="planSyncStatus" class="syncstatus"></span>
+  {# Always present, in every browser and on every origin. What the button
+     above can manage varies; how to get a file on disk does not. #}
+  <button type="button" id="planSyncHelp" class="chip helpchip"
+          title="How to keep a copy of the plan on disk">?</button>
   <div class="live">
     <div class="stat"><div class="k">Night</div>
       <div class="v">{{ status.night }}</div></div>
@@ -51,6 +55,25 @@
         {% endif %}
       </div>
     </div>
+  </div>
+  {# Collapsed until asked for. This is the answer that does not depend on a
+     browser at all, so it must not depend on the button having failed first. #}
+  <div id="planSyncRecipe" class="syncrecipe" hidden>
+    <p><b>Keeping a copy of the plan on disk.</b> The surest way does not
+      involve this page. The plan is served as plain text at
+      <code class="planUrl"></code>, so one scheduled line on the
+      control-room machine keeps a file there current in any browser, on any
+      origin &mdash; and it keeps working while the browser is closed, the
+      screen is locked, or the laptop has gone to sleep.</p>
+    <p class="rk">Linux / macOS &mdash; <code>crontab -e</code>, every minute</p>
+    <pre><code>* * * * * curl -fsS <span class="planUrl"></span> -o ~/plan.tmp &amp;&amp; mv ~/plan.tmp ~/plan.txt</code></pre>
+    <p class="rk">Windows &mdash; PowerShell, leave it running</p>
+    <pre><code>while ($true) { curl.exe -fsS <span class="planUrl"></span> -o plan.tmp; Move-Item -Force plan.tmp plan.txt; Start-Sleep 60 }</code></pre>
+    <p class="rnote">Each writes a temporary name and moves it into place, so
+      the control room never reads a half-written plan. The
+      <b>sync to file</b> button does the same job from the browser, but only
+      in a Chromium browser <em>and</em> only on a secure origin &mdash; https,
+      or localhost. Hover the button to see which of those is missing here.</p>
   </div>
 {% endset %}
 {% include "_header.html" %}
@@ -391,21 +414,41 @@ const ARCHIVE_BOUNDS = {{ archived_nights|tojson }};
 // ARCHIVE_BOUNDS, just for night="".
 const LIVE_BOUNDS = {{ (replay_default if strip else none)|tojson }};
 
-// Keeps a .txt file on THIS computer (not the server -- see planHandle
-// below) in sync with the plan file, rewritten every refresh() tick. Plain
-// <a href> downloads can't do this: each one is a brand new file, never an
-// update to the same one. The File System Access API can write the same
-// file repeatedly, but only Chromium browsers implement it, and only after
-// the user has granted access to a specific file -- there is no way to
-// start writing to an arbitrary path unasked. The handle it hands back is
-// IndexedDB-storable, so that grant survives a reload; the browser still
-// requires a fresh user gesture to actually reuse it once permission has
-// gone back to "ask again" (e.g. after the tab was closed), which is what
-// the "resume sync" state below is for.
-let planHandle = null;
-let planLastWritten = null;
+// Keeps the observer's own copy of the plan file current. There are three
+// tiers and the button always does something in all of them:
+//
+//   file      -- File System Access API. Rewrites ONE file, in place, at a
+//                path the observer picked, on every refresh() tick. The only
+//                tier that does what "sync" implies.
+//   download  -- everybody else. One file per click, into Downloads.
+//   (none)    -- does not exist. The button is never disabled.
+//
+// Why `file` is so often unavailable, *including in Chrome*: the File System
+// Access spec declares `partial interface Window` [SecureContext], so
+// showSaveFilePicker is absent -- not failing, absent -- on any origin that
+// is not https, localhost or 127.0.0.1. deploy/VISNJAN.md tells observers to
+// reach the board at http://<machine>:8080 over the observatory LAN, and
+// deploy/EPYC.md at http://epyc:12600; on both of those Chrome exposes no
+// such property. The version this replaces read the missing property as "not
+// a Chromium browser" and told a Chromium user to go and get Chrome, which
+// is why the real cause went unfound. planSyncMode() separates the two so
+// the page can name the one that actually applies.
+function planSyncMode(win) {
+  if (win.showSaveFilePicker) return 'file';
+  if (!win.isSecureContext) return 'insecure';
+  return 'unsupported';
+}
+
+const PLAN_SITE_URL = {{ config.SITE_URL|tojson }};
+
+let planMode = null;            // one of the three above, set by initPlanSync
+let planHandle = null;          // FileSystemFileHandle -- `file` tier only
+let planLastWritten = null;     // last text written through that handle
+let planLastDownloaded = null;  // last text the observer took a copy of
 const planSyncBtn = document.getElementById('planSyncBtn');
 const planSyncStatus = document.getElementById('planSyncStatus');
+const planSyncHelp = document.getElementById('planSyncHelp');
+const planSyncRecipe = document.getElementById('planSyncRecipe');
 
 function idbTxn(mode) {
   return new Promise((resolve, reject) => {
@@ -448,6 +491,11 @@ function setSyncStatus(text, isError) {
   planSyncStatus.classList.toggle('bad', !!isError);
 }
 
+async function fetchPlan() {
+  const r = await fetch('/plan');
+  return r.ok ? r.text() : null;
+}
+
 async function writePlanTo(handle, text) {
   const writable = await handle.createWritable();
   await writable.write(text);
@@ -457,11 +505,25 @@ async function writePlanTo(handle, text) {
 // Shared by every path that has a live handle -- the initial connect, a
 // resumed session, restoring a still-granted permission on page load, and
 // every later refresh() tick. One place to keep the "synced HH:MM:SS" /
-// "sync failed" status honest no matter which of those triggered it.
+// "sync failed" status honest no matter which of those triggered it. On the
+// download tier the same tick does the only useful thing it can: notice that
+// the copy the observer took has been overtaken.
 async function syncPlanNow() {
+  if (planMode !== 'file') {
+    // Nothing is polled until a copy has actually been taken: before that
+    // there is no stale copy to warn about, and fetching /plan every twenty
+    // seconds for someone who never asked is pure traffic.
+    if (planLastDownloaded === null) return;
+    try {
+      const text = await fetchPlan();
+      if (text === null || text === planLastDownloaded) return;
+      setSyncStatus('plan changed since your copy — download again', true);
+    } catch (e) { /* one failed poll is not news; the next one will say */ }
+    return;
+  }
   if (!planHandle) return;
   try {
-    const text = await fetch('/plan').then(r => r.ok ? r.text() : null);
+    const text = await fetchPlan();
     if (text === null) return;
     if (text !== planLastWritten) {
       await writePlanTo(planHandle, text);
@@ -504,13 +566,76 @@ async function resumePlanSync() {
   } catch (e) { console.error('resuming plan sync failed', e); }
 }
 
+// One file per click, and only on a click. Deliberately not on a timer, and
+// all three reasons would have to stop being true before a timer became an
+// improvement: the file lands in Downloads, which is not the path beside the
+// telescope that the control room reads; each save is a new "whichneo-plan
+// (14).txt" rather than an update to one file, which is the exact thing the
+// File System Access API was reached for to avoid; and browsers gate
+// repeated unattended downloads behind a permission prompt that, left
+// unanswered, blocks them with no error the page can see. A download is a
+// floor. The recipe panel holds the answer that actually stays current.
+function planDownload() {
+  // Content-Disposition comes from the server, so the file arrives named
+  // whichneo-<night>.txt without the page having to build a blob.
+  const a = document.createElement('a');
+  a.href = '/plan?download=1';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setSyncStatus('downloaded ' + timeNow(), false);
+  // Best effort, and deliberately after the click: this only seeds the
+  // stale-copy check in syncPlanNow() and must never be able to stop the
+  // download from happening.
+  fetchPlan().then(t => { planLastDownloaded = t; }).catch(() => {});
+}
+
+function fillPlanRecipe() {
+  if (!planSyncRecipe) return;
+  const url = location.origin + '/plan';
+  // textContent, not innerHTML: this is the one place a URL taken from the
+  // address bar reaches the DOM, and it has no business arriving as markup.
+  planSyncRecipe.querySelectorAll('.planUrl').forEach(el => { el.textContent = url; });
+}
+
 async function initPlanSync() {
   if (!planSyncBtn) return;
-  if (!window.showSaveFilePicker) {
-    setPlanSyncLabel('sync to file (needs Chrome/Edge)', false);
-    planSyncBtn.disabled = true;
+  planMode = planSyncMode(window);
+
+  fillPlanRecipe();
+  if (planSyncHelp && planSyncRecipe) {
+    planSyncHelp.addEventListener('click', () => {
+      planSyncRecipe.hidden = !planSyncRecipe.hidden;
+      planSyncHelp.classList.toggle('on', !planSyncRecipe.hidden);
+    });
+  }
+
+  if (planMode !== 'file') {
+    // Say which thing is missing, and never blame the browser for the
+    // origin. "needs Chrome/Edge" shown to a Chrome user is what sent the
+    // last round of this looking in the wrong place entirely.
+    setPlanSyncLabel('download plan', false);
+    if (planMode === 'insecure') {
+      let why = 'This page is on ' + location.origin + '. Writing to a file '
+        + 'needs a secure origin (https, or localhost), so no browser — '
+        + 'Chrome included — offers it here.';
+      if (PLAN_SITE_URL && PLAN_SITE_URL.indexOf('https://') === 0
+          && PLAN_SITE_URL.indexOf(location.origin) !== 0) {
+        why += ' Opening ' + PLAN_SITE_URL + ' instead gives you sync to one file.';
+      }
+      planSyncBtn.title = why + ' Click ? for a way that needs no browser at all.';
+      setSyncStatus('not a secure origin — downloads only', false);
+    } else {
+      planSyncBtn.title = 'This browser has no way for a page to write to a '
+        + 'file you picked. Downloads work. Click ? for a way that needs no '
+        + 'browser at all.';
+      setSyncStatus('this browser downloads only', false);
+    }
+    planSyncBtn.addEventListener('click', planDownload);
     return;
   }
+
   planSyncBtn.addEventListener('click', () => {
     if (planHandle) return;   // already connected
     planSyncBtn.textContent.startsWith('resume') ? resumePlanSync() : connectPlanFile();

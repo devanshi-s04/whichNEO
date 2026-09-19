@@ -1154,9 +1154,47 @@ def settings_save():
         conn.close()
 
 
+_PLAN_NAME_OK = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+
+
+def _plan_download_name(path):
+    """A filename for a saved copy of `path`, safe to put in a header.
+
+    The basename is already the useful half of the name -- it is the night,
+    `2026-09-19.txt` -- and the prefix keeps a Downloads folder legible when
+    the observer has files from elsewhere in it.
+
+    Characters outside the allowlist are dropped rather than escaped. This
+    string goes into a response header, and the path it comes from is a
+    database value, not a constant: one containing a quote or a newline
+    would otherwise end the header and start whatever came after it. The
+    backslash split is not decoration either -- at Ticvan the board runs on
+    Windows, so `plan_path` is a backslash path and splitting on "/" alone
+    would hand the whole of `C:\\whichNEO\\plans\\2026-09-19.txt` to the header.
+    """
+    base = (path or "").replace("\\", "/").rsplit("/", 1)[-1]
+    safe = "".join(c for c in base if c in _PLAN_NAME_OK)
+    stem, dot, ext = safe.rpartition(".")
+    if not dot:
+        stem, ext = safe, "txt"
+    # The stem has to survive as something, or the name is not a name. A
+    # plan written under a non-Latin locale can sanitise down to a bare
+    # `.txt`, which is a hidden file rather than tonight's plan.
+    if not stem:
+        stem = "plan"
+    return "whichneo-%s.%s" % (stem, ext or "txt")
+
+
 @app.route("/plan")
 def plan_text():
-    """The nightly plan file, exactly as written to disk."""
+    """The nightly plan file, exactly as written to disk.
+
+    `?download=1` changes nothing about the body -- only whether the browser
+    offers to save it instead of displaying it. The bare URL stays byte-exact
+    and header-stable because it is what a control room's `curl`/`wget` loop
+    is pointed at; see README, "Keeping a copy of the plan on disk".
+    """
     conn = get_conn()
     try:
         path = db.get_meta(conn, "plan_path", site=current_site())
@@ -1166,9 +1204,14 @@ def plan_text():
         return "No plan written yet.", 404
     try:
         with open(path) as f:
-            return f.read(), 200, {"Content-Type": "text/plain; charset=utf-8"}
+            body = f.read()
     except OSError as e:
         return f"Could not read {path}: {e}", 500
+    headers = {"Content-Type": "text/plain; charset=utf-8"}
+    if request.args.get("download"):
+        headers["Content-Disposition"] = (
+            'attachment; filename="%s"' % _plan_download_name(path))
+    return body, 200, headers
 
 
 def _safe_next(raw):
