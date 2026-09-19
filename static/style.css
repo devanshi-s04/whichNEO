@@ -772,3 +772,51 @@ input.num:focus, input.why:focus { outline: 1px solid var(--amber); }
 .sitemenu-item.on .code::after { content: " \2713"; color: var(--go); }
 .sitemenu-item.add { color: var(--amber); }
 .sitemenu-sep { height: 1px; margin: 6px 4px; background: var(--line); }
+
+/* --- feedback ------------------------------------------------------------
+   The disclosure in _footer.html. Borrows the sitemenu's look deliberately:
+   a reader who has opened the observatory switcher already knows what a
+   little bordered summary with a caret does here. Opens UPWARD is wrong for
+   a footer -- it opens inline, pushing the page down, because a panel
+   floating over the bottom of a dome screen is easy to lose behind. */
+.feedback { margin: 28px 0 10px; }
+.fbmenu > summary {
+  display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 8px 14px; border-radius: 7px; list-style: none;
+  background: var(--raised); border: 1px solid var(--line);
+  font-family: var(--ui); font-size: 12px; font-weight: 500;
+  color: var(--muted);
+}
+.fbmenu > summary::-webkit-details-marker { display: none; }
+.fbmenu > summary::after { content: "\25be"; color: var(--faint); }
+.fbmenu > summary:hover { color: var(--ink); border-color: var(--faint); }
+.fbmenu[open] > summary::after { content: "\25b4"; }
+.fbmenu-panel {
+  margin-top: 8px; padding: 14px; border-radius: 8px; max-width: 620px;
+  background: var(--raised); border: 1px solid var(--line);
+}
+.fb-label {
+  display: block; margin: 0 0 6px; font-family: var(--ui); font-size: 11px;
+  color: var(--muted);
+}
+.fbmenu-panel textarea, .fbmenu-panel input[type="email"],
+.card.narrow textarea, .card.narrow input[type="email"] {
+  width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 6px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--ink);
+  font-family: var(--ui); font-size: 12px; resize: vertical;
+}
+.fbmenu-panel input[type="email"] { margin-bottom: 10px; }
+.fb-note { margin: 8px 0 10px; font-size: 11px; color: var(--muted); }
+.fb-actions {
+  display: flex; align-items: center; gap: 12px; margin-top: 10px;
+  font-size: 11px;
+}
+/* Off-screen rather than display:none -- something that fills every field
+   it can see ignores the ones that are not rendered at all. */
+.fb-hp {
+  position: absolute; left: -9999px; width: 1px; height: 1px;
+  overflow: hidden;
+}
+.fb-list .fb-msg { white-space: pre-wrap; max-width: 46ch; }
+.fb-list .nowrap { white-space: nowrap; }
+.card.narrow { max-width: 620px; }

@@ -15,7 +15,7 @@ import time
 from html import escape
 from datetime import datetime, timedelta, timezone
 
-from flask import (Flask, Response, g, has_request_context, jsonify,
+from flask import (Flask, Response, abort, g, has_request_context, jsonify,
                    redirect, render_template, request, send_file, session,
                    url_for)
 
@@ -1623,6 +1623,161 @@ def history_download_csv():
     w.writerows(rows)
     return Response(buf.getvalue(), mimetype="text/csv", headers={
         "Content-Disposition": "attachment; filename=neocp_history.csv"})
+
+
+# --- feedback ----------------------------------------------------------------
+#
+# A public form that causes an email to be sent is an open relay unless it is
+# nailed down, so four things are fixed and none of them come from the sender:
+# the recipient (config.FEEDBACK_TO), the subject, the length, and the rate.
+# The sender's text reaches the body only -- never a header, where a newline
+# would let them add recipients of their own.
+
+FEEDBACK_SUBJECT = "whichNEO feedback — {obscode} {name}"
+
+FEEDBACK_BODY = """{who} sent this from {page}
+
+Observatory: {obscode} {name}
+Reply to:    {reply_to}
+
+----------------------------------------------------------------------
+{message}
+----------------------------------------------------------------------
+
+Stored as feedback #{fid}. Read them all at {site_url}/feedback
+"""
+
+_feedback_hits = {}
+
+
+def _feedback_key():
+    return request.headers.get("X-Forwarded-For", request.remote_addr or "?")
+
+
+def _feedback_throttled():
+    cutoff = time.time() - config.FEEDBACK_WINDOW_S
+    hits = [t for t in _feedback_hits.get(_feedback_key(), []) if t > cutoff]
+    return len(hits) >= config.FEEDBACK_LIMIT
+
+
+def _note_feedback():
+    key = _feedback_key()
+    cutoff = time.time() - config.FEEDBACK_WINDOW_S
+    hits = [t for t in _feedback_hits.get(key, []) if t > cutoff]
+    _feedback_hits[key] = hits + [time.time()]
+    if len(_feedback_hits) > 512:          # same opportunistic sweep as auth
+        for k in [k for k, v in _feedback_hits.items()
+                  if not any(t > cutoff for t in v)]:
+            _feedback_hits.pop(k, None)
+
+
+def _usable_email(addr):
+    """Good enough to reply to, and safe to put in a header.
+
+    Deliberately not a full RFC check: the point is to catch a typo and to
+    refuse anything carrying a newline, not to adjudicate exotic addresses.
+    """
+    if not addr or len(addr) > 254:
+        return False
+    if any(c in addr for c in "\r\n\t ,;<>"):
+        return False
+    local, _, domain = addr.partition("@")
+    return bool(local) and "." in domain and not domain.startswith(".")
+
+
+@app.route("/feedback", methods=["GET", "POST"])
+def feedback():
+    """Take a suggestion, store it, then try to mail it."""
+    if request.method == "GET":
+        user = auth.current_user()
+        if user is None:
+            return redirect(url_for("login", next=url_for("feedback")))
+        if not user["is_admin"]:
+            # Not 403-with-a-list: someone who cannot read these should not
+            # learn how many there are.
+            abort(403)
+        conn = get_conn()
+        try:
+            rows = db.recent_feedback(conn)
+            by_id = {s.id: s for s in registry.all_sites(conn).values()}
+        finally:
+            conn.close()
+        for r in rows:
+            site = by_id.get(r["site_id"])
+            r["obscode"] = site.obscode if site else None
+        return render_template("feedback.html", rows=rows)
+
+    # --- POST ---
+    if not auth.csrf_ok():
+        abort(400)
+
+    # An empty field a person never sees. A bot that fills every input gets a
+    # cheerful thank-you and goes no further, which teaches it nothing.
+    if (request.form.get("website") or "").strip():
+        return render_template("feedback_sent.html", sent=True)
+
+    message = (request.form.get("message") or "").strip()
+    reply_to = (request.form.get("reply_to") or "").strip()
+    page = (request.form.get("page") or "").strip()[:200]
+    user = auth.current_user()
+
+    def again(error):
+        return render_template("feedback_sent.html", sent=False,
+                               error=error, message=message,
+                               reply_to=reply_to, page=page), 400
+
+    if not message:
+        return again("There was nothing in the message.")
+    if len(message) > config.FEEDBACK_MAX_CHARS:
+        return again(f"That is longer than {config.FEEDBACK_MAX_CHARS} "
+                     "characters. Please send the short version.")
+    if user is None and not _usable_email(reply_to):
+        return again("Please leave an email address so there is a way to "
+                     "reply, or sign in first.")
+    if _feedback_throttled():
+        return render_template(
+            "feedback_sent.html", sent=False,
+            error="That is several messages in a short time. Please wait a "
+                  "little before sending another."), 429
+
+    # The account's own address wins over anything typed: we already know who
+    # a signed-in observer is, and a form field is not evidence.
+    if user is not None:
+        reply_to = user["email"] or None
+    site = current_site()
+
+    conn = get_conn()
+    try:
+        fid = db.record_feedback(
+            conn, message, site_id=site.id,
+            user_id=user["id"] if user else None,
+            reply_to=reply_to, page=page)
+    finally:
+        conn.close()
+    _note_feedback()
+
+    def delivered(error):
+        # Its own connection: this runs on the sending thread, after the
+        # request's connection has been closed.
+        c = db.connect()
+        try:
+            db.mark_feedback_delivered(c, fid, error)
+        finally:
+            c.close()
+
+    mailer.send_reporting(
+        config.FEEDBACK_TO,
+        FEEDBACK_SUBJECT.format(obscode=site.obscode, name=site.name),
+        FEEDBACK_BODY.format(
+            who=user["username"] if user else "Someone not signed in",
+            page=page or "the board", obscode=site.obscode, name=site.name,
+            reply_to=reply_to or "(none given)", message=message,
+            fid=fid, site_url=config.SITE_URL.rstrip("/")),
+        reply_to=reply_to, on_done=delivered)
+
+    # "Received", not "sent". It is stored either way, and whether the relay
+    # is up is not the sender's problem or their business.
+    return render_template("feedback_sent.html", sent=True, page=page)
 
 
 if __name__ == "__main__":

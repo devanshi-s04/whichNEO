@@ -52,11 +52,16 @@ def available():
     return bool(config.SMTP_HOST and config.SMTP_USER and password())
 
 
-def build(to, subject, body):
+def build(to, subject, body, reply_to=None):
     msg = EmailMessage()
     msg["From"] = config.SMTP_FROM
     msg["To"] = to
     msg["Subject"] = subject
+    # So replying to a feedback message reaches whoever wrote it. Set only
+    # from an address the caller has already validated -- a header taking a
+    # newline is how a form becomes a way to send mail to strangers.
+    if reply_to and "\n" not in reply_to and "\r" not in reply_to:
+        msg["Reply-To"] = reply_to
     msg["Date"] = formatdate(localtime=True)
     # An explicit Message-ID with our own domain rather than the relay's
     # guess: it is what makes a bounce traceable back to this host.
@@ -66,14 +71,14 @@ def build(to, subject, body):
     return msg
 
 
-def send_now(to, subject, body):
+def send_now(to, subject, body, reply_to=None):
     """Synchronous send. Raises on failure. Used by manage.py mailtest, where
     an exception is exactly what the operator wants to see."""
     if not available():
         raise RuntimeError(
             "No SMTP credentials: set WHICHNEO_SMTP_PASSWORD or write "
             f"{os.path.join(config.DATA_DIR, 'smtp_password')}")
-    msg = build(to, subject, body)
+    msg = build(to, subject, body, reply_to=reply_to)
     with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT,
                       timeout=config.SMTP_TIMEOUT_S) as s:
         s.ehlo()
@@ -106,3 +111,34 @@ def send(to, subject, body):
 
     threading.Thread(target=worker, name="mailer", daemon=True).start()
     return True
+
+
+def send_reporting(to, subject, body, reply_to=None, on_done=None):
+    """Like send(), but says afterwards whether it worked.
+
+    send() swallows failures on purpose: an error reaching the caller of a
+    password reset tells a stranger whether an address is on file. Feedback
+    has no such secret to keep, and something has to record that a message
+    never went out -- otherwise storing it gains nothing over mailing it.
+
+    `on_done(error)` is called on the sending thread with None on success, so
+    it must do its own database connection rather than borrow the request's.
+    """
+    def worker():
+        error = None
+        try:
+            if not available():
+                raise RuntimeError("mail not configured")
+            mid = send_now(to, subject, body, reply_to=reply_to)
+            log.info("sent %r to %s (%s)", subject, to, mid)
+        except Exception as e:
+            error = f"{type(e).__name__}: {e}"
+            log.error("mail to %s failed: %s", to, error)
+        if on_done is not None:
+            try:
+                on_done(error)
+            except Exception:
+                log.exception("feedback delivery callback failed")
+
+    threading.Thread(target=worker, name="mailer-reporting",
+                     daemon=True).start()

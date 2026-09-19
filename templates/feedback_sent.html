@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhichNEO &mdash; feedback</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+{% set page_heading %}Which<b>NEO</b>{% endset %}
+{% set page_subtitle %}Feedback{% endset %}
+{% include "_header.html" %}
+
+<section class="card narrow">
+{% if sent %}
+  <h2>Thank you &mdash; that is recorded.</h2>
+  {# "Recorded", not "sent". It is stored before the mail is attempted, so
+     this is true whether or not the relay is reachable -- and whether it is
+     reachable is not the sender's problem. #}
+  <p>It has been saved along with the observatory and the page you were on.
+  Whoever maintains this board will see it.</p>
+  <p><a class="btn" href="{{ page or url_for('index') }}">Back to the board</a></p>
+{% else %}
+  <h2>That did not go through.</h2>
+  <p class="bad">{{ error }}</p>
+  {% if message %}
+  {# Handed back rather than dropped: losing what someone just typed because
+     they mistyped their address is how a form stops being used. #}
+  <form method="post" action="{{ url_for('feedback') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="page" value="{{ page }}">
+    <label class="fb-label" for="fb-message">Your message</label>
+    <textarea id="fb-message" name="message" rows="6"
+              maxlength="{{ config.FEEDBACK_MAX_CHARS }}">{{ message }}</textarea>
+    {% if not current_user %}
+    <label class="fb-label" for="fb-reply">Your email</label>
+    <input id="fb-reply" type="email" name="reply_to" value="{{ reply_to }}"
+           required>
+    {% endif %}
+    <div class="fb-actions"><button type="submit">Send</button></div>
+  </form>
+  {% endif %}
+{% endif %}
+</section>
+
+{% include "_footer.html" %}
+</div>
+</body>
+</html>
