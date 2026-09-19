@@ -5676,6 +5676,197 @@ def test_every_page_offers_the_feedback_form():
         importlib.reload(appmod)
 
 
+def test_no_pointing_line_is_invented_across_a_gap():
+    """An ephemeris hole must produce no pointable line, not a smooth lie.
+
+    MPC suppresses every row below the server floor, so a target that sets and
+    rises again leaves hours of nothing in the middle while the samples either
+    side stay consecutive in the list. Interpolating across that blends the
+    end of one night with the start of the next into a position that is
+    smooth, plausible and invented -- and because the blended row is stamped
+    with the requested instant, live_row_is_now reads it as current and the
+    plan file publishes it as the one line to slew to.
+
+    Measured on the live board at 15:05 UT: or09023 published a pointing line
+    at altitude +35 with the sun at -33, blended across the daylight hole
+    between 02:30 and 22:00. The MPC's own row for that instant says -31 and
+    astropy agrees to half a degree. It was five in the afternoon.
+
+    skymap._covers() already refuses this for markers, which is why the map
+    went dark for those targets while the plan file did not.
+    """
+    import output
+
+    t0 = 1_760_000_000.0
+    STEP = 1800.0
+    HOLE = 19 * 3600.0
+
+    def row(ts, alt, az):
+        r = ephemeris.Row(SAMPLE_EPH)
+        r.ts, r.alt, r.az = ts, alt, az
+        return r
+
+    # Two runs, half an hour between samples inside each and nineteen hours
+    # between them: the shape MPC returns for a target that sets and rises.
+    first = [row(t0, 40.0, 100.0), row(t0 + STEP, 38.0, 110.0)]
+    second = [row(t0 + HOLE, 20.0, 260.0), row(t0 + HOLE + STEP, 25.0, 270.0)]
+    eph = ephemeris.ObjectEphemeris("GAPPY", first + second)
+
+    inside = eph.interpolate_at(t0 + STEP / 2)
+    check("inside a run it still interpolates",
+          inside is not None and abs(inside.alt - 39.0) < 1e-6,
+          None if inside is None else inside.alt)
+
+    mid = eph.interpolate_at(t0 + HOLE / 2)
+    check("in the hole it refuses instead of inventing a position",
+          mid is None, None if mid is None else (mid.alt, mid.az))
+
+    # The sample beside a hole is still itself -- nothing is blended into it,
+    # so the last usable instant of a run keeps its position.
+    edge = eph.interpolate_at(t0 + STEP)
+    check("landing on the sample beside the hole returns that sample",
+          edge is not None and edge.alt == 38.0,
+          None if edge is None else edge.alt)
+
+    # Clamping off either end is unchanged: there is nothing to blend with.
+    check("before the first sample still clamps",
+          eph.interpolate_at(t0 - 7200) is first[0])
+    check("after the last sample still clamps",
+          eph.interpolate_at(t0 + HOLE + 7200) is second[-1])
+
+    # What the refusal is for. A target whose ephemeris says nothing about now
+    # must not carry an uncommented line, because that line is what gets
+    # slewed to.
+    at = t0 + HOLE / 2
+    target = {
+        "desig": "GAPPY", "observable": True,
+        "score": 100, "nobs": 6, "arc_days": 0.95, "not_seen_days": 1.4,
+        "interp_row": eph.interpolate_at(at),
+        "nearest_row": min(first + second, key=lambda r: abs(r.ts - at)),
+    }
+    target["live_row_is_now"] = (
+        target["interp_row"] is not None
+        and abs(target["interp_row"].ts - at) < 60.0)
+    check("so nothing about that instant counts as pointable",
+          target["live_row_is_now"] is False)
+
+    block = output.plan_entry(target)
+    pointable = [ln for ln in block.splitlines()
+                 if ln and not ln.startswith(("*", "//", "   "))]
+    check("and the plan entry publishes no uncommented pointing line",
+          not pointable, pointable)
+    check("while still showing the nearest real row, commented",
+          "// " in block and "not now, do not slew" in block, block)
+
+    # A run sampled evenly must be unaffected, or this would refuse every
+    # ordinary interpolation and quietly empty the plan file.
+    even = ephemeris.ObjectEphemeris(
+        "EVEN", [row(t0 + i * STEP, 30.0 + i, 100.0 + i) for i in range(8)])
+    got = [even.interpolate_at(t0 + i * STEP + STEP / 2) for i in range(7)]
+    check("an evenly sampled run interpolates at every step",
+          all(g is not None for g in got),
+          [i for i, g in enumerate(got) if g is None])
+
+
+def test_a_refused_target_is_refused_everywhere():
+    """Keep-out is a safety limit, so it has to hold in all three outputs.
+
+    The queue, the sky map and the plan file are rendered by different code
+    from the same rows. "Rejected, not merely flagged" is only true if it is
+    true in all three -- a target dropped from the queue but still drawn on
+    the map, or still carrying a pointing line, is one an observer can slew
+    at anyway, which is the whole thing the wedge exists to prevent.
+    """
+    import output
+
+    site = config.DEFAULT_SITE
+    if not site.keepout_wedges:
+        check("this site declares a keep-out wedge to test", True,
+              "no wedge configured; nothing to assert")
+        return
+
+    start, end, min_alt, _reason = site.keepout_wedges[0]
+    inside_az = (start + (((end - start) % 360.0) / 2.0)) % 360.0
+    low = min_alt - 5.0
+    now = 1_760_000_000.0
+
+    r = ephemeris.Row(SAMPLE_EPH)
+    r.ts, r.az, r.alt = now, inside_az, low
+
+    # 1. The queue.
+    reasons = pipeline.row_rejections(r, now + 86400)
+    check("a target in the wedge is rejected by the pipeline",
+          "keepOut" in reasons, reasons)
+
+    # 2. The map. A rejected row must not be drawn where it is.
+    rows = [{"desig": "WEDGED", "observed": False, "mask_flags": [],
+             "vmag": 19.0, "score": 80}]
+    track = [(now - 1800, inside_az, low), (now, inside_az, low),
+             (now + 1800, inside_az, low)]
+    marks = skymap.target_marks(rows, {"WEDGED": track}, now)
+    drawn = [m for m in marks if m.get("up")]
+    check("and it is not drawn as a dot on the sky map", not drawn, marks)
+
+    # Discriminating, not vacuous: the identical track lifted above the
+    # wedge's height limit IS drawn, so the absence above is the wedge acting
+    # and not some unrelated reason to withhold a marker.
+    clear = [(ts, az, min_alt + 5.0) for ts, az, _ in track]
+    lifted = [m for m in skymap.target_marks(rows, {"WEDGED": clear}, now)
+              if m.get("up")]
+    check("the same track above the limit is drawn",
+          len(lifted) == 1, lifted)
+
+    # 3. The plan file. render_plan only emits observable targets, and the
+    #    rejection is what makes it unobservable.
+    target = {"desig": "WEDGED", "score": 100, "nobs": 6, "arc_days": 0.9,
+              "not_seen_days": 1.0, "observable": not reasons,
+              "discard_reasons": reasons, "nearest_row": r,
+              "interp_row": r, "live_row_is_now": True}
+    check("and it is not observable, so the plan file omits it",
+          target["observable"] is False)
+    check("the plan file really does drop it",
+          "WEDGED" not in output.render_plan([target]),
+          output.render_plan([target])[:200])
+
+    # The same position above the height limit is usable in all three.
+    r.alt = min_alt + 5.0
+    check("the same azimuth above the limit is not rejected",
+          pipeline.row_rejections(r, now + 86400) == [],
+          pipeline.row_rejections(r, now + 86400))
+
+
+def test_an_mpc_row_survives_the_round_trip():
+    """Read MPC's convention, store ours, write MPC's back out unchanged.
+
+    MPC measures azimuth from south; the board stores compass bearings. Two
+    conversions in opposite directions, and an error in either is invisible
+    on its own -- the number still looks like an azimuth. Going round the
+    loop is what catches it.
+    """
+    import output
+
+    r = ephemeris.Row(SAMPLE_EPH)
+    check("MPC's own azimuth is kept alongside ours",
+          r.az_mpc == 240.0 and r.az == 60.0, (r.az_mpc, r.az))
+
+    back = ephemeris.Row(output.ephemeris_line(r))
+    check("the written line parses again", back is not None)
+    check("azimuth survives the round trip",
+          back.az_mpc == r.az_mpc and back.az == r.az,
+          (back.az_mpc, back.az))
+    check("altitude survives it", back.alt == r.alt, (back.alt, r.alt))
+    check("so do the coordinates",
+          abs(back.ra_deg - r.ra_deg) < 1e-6
+          and abs(back.dec_deg - r.dec_deg) < 1e-6,
+          (back.ra_deg, r.ra_deg, back.dec_deg, r.dec_deg))
+    check("and the instant it refers to", back.ts == r.ts, (back.ts, r.ts))
+
+    # The conversion is a half turn, so applying it twice is the identity --
+    # which is what makes an off-by-180 error impossible to hide.
+    check("the two conventions are exactly half a turn apart",
+          (r.az - r.az_mpc) % 360.0 == 180.0, (r.az, r.az_mpc))
+
+
 def main():
     # The suite runs on epyc, where config.DB_PATH is the observatory's live
     # database. For years one test marked /mark/XYZ straight into it. Nothing
@@ -5764,7 +5955,10 @@ def main():
                test_a_poll_patches_the_table_instead_of_rebuilding_it,
                test_feedback_reaches_somewhere_even_when_the_mail_does_not,
                test_the_feedback_form_cannot_be_used_to_send_mail_to_strangers,
-               test_every_page_offers_the_feedback_form):
+               test_every_page_offers_the_feedback_form,
+               test_no_pointing_line_is_invented_across_a_gap,
+               test_a_refused_target_is_refused_everywhere,
+               test_an_mpc_row_survives_the_round_trip):
         print(f"\n{fn.__name__}:")
         fn()
 
