@@ -56,6 +56,28 @@ Windows Task Scheduler, "At startup", two tasks:
 Set both to "Run whether user is logged on or not" and "Restart if the task
 fails". `nssm` is a tidier alternative if it is already used there.
 
+## Getting the plan onto the control-room machine
+
+`plans/<night>.txt` is written on the machine running the board. If the
+control room is that same machine, it is already where you want it and there
+is nothing to do.
+
+If it is a different machine, put one line in Task Scheduler rather than
+relying on anyone's browser:
+
+```powershell
+while ($true) { curl.exe -fsS http://<board>:8080/plan -o plan.tmp; Move-Item -Force plan.tmp plan.txt; Start-Sleep 60 }
+```
+
+It writes `plan.tmp` and moves it, so nothing ever reads a half-written file,
+and it keeps running with no browser open.
+
+The board's **sync to file** button does the same job, but only from a
+Chromium browser **and** only on a secure origin. Opened the way this page
+recommends — `http://<machine>:8080` on the LAN — that origin is not secure,
+so *every* browser, Chrome included, falls back to a plain download. That is
+expected, the button says so, and the line above is the better answer anyway.
+
 ## Checking it is alive
 
 ```
